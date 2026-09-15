@@ -90,11 +90,23 @@ def fetch_candidates(project: str, dataset: str, table: str, limit: int) -> list
     return list(client.query(query).result())
 
 
+class StreetViewAuthError(RuntimeError):
+    """The API key/billing/API-enablement is broken, as opposed to 'no imagery here'."""
+
+
 def streetview_coverage(lat: float, lon: float, api_key: str) -> Optional[dict]:
     resp = requests.get(STREETVIEW_METADATA_URL, params={"location": f"{lat},{lon}", "key": api_key}, timeout=30)
     resp.raise_for_status()
     meta = resp.json()
-    return meta if meta.get("status") == "OK" else None
+    status = meta.get("status")
+    if status == "OK":
+        return meta
+    if status == "ZERO_RESULTS":
+        return None
+    # REQUEST_DENIED, OVER_QUERY_LIMIT, INVALID_REQUEST, UNKNOWN_ERROR, etc.
+    # are all key/billing/quota problems, not "no imagery at this location" -
+    # surface them instead of silently treating every candidate as uncovered.
+    raise StreetViewAuthError(f"Street View metadata request failed: status={status} error_message={meta.get('error_message')!r}")
 
 
 def fetch_streetview_images(lat: float, lon: float, api_key: str, out_dir: Path, headings=DEFAULT_HEADINGS) -> list[Path]:
@@ -203,8 +215,8 @@ def print_row(row: bigquery.table.Row) -> None:
 def main() -> int:
     args = parse_args()
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
-    if not api_key:
-        print("ERROR: set GOOGLE_MAPS_API_KEY in the environment.", file=sys.stderr)
+    if not api_key or api_key == "your-key-here":
+        print("ERROR: set GOOGLE_MAPS_API_KEY in the environment to a real Street View Static API key.", file=sys.stderr)
         return 1
 
     table = table_name(args.state, args.year, args.month)
@@ -222,7 +234,17 @@ def main() -> int:
         lat, lon = row["centroid_lat"], row["centroid_lon"]
         print(f"[{i + 1}/{len(candidates)}] here_segment_id={row['here_segment_id']} at ({lat:.6f}, {lon:.6f})")
 
-        coverage = streetview_coverage(lat, lon, api_key)
+        try:
+            coverage = streetview_coverage(lat, lon, api_key)
+        except StreetViewAuthError as e:
+            print(f"\nERROR: {e}", file=sys.stderr)
+            print(
+                "This means the API key, billing, or API enablement is broken - not that "
+                "there's no imagery. Check that GOOGLE_MAPS_API_KEY is a real key with the "
+                "Street View Static API enabled and billing active on its project.",
+                file=sys.stderr,
+            )
+            return 1
         if not coverage:
             print("  No Street View coverage here, trying next candidate.\n")
             continue
