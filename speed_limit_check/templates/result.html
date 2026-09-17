@@ -54,6 +54,16 @@
           {{ "%.5f"|format(a.lat) }}, {{ "%.5f"|format(a.lon) }}
           {% if a.note %} &middot; {{ a.note }}{% endif %}
         </p>
+        {% if a.row %}
+          <details style="margin:0 0 10px;">
+            <summary style="cursor:pointer; color:var(--muted); font-size:0.82rem;">Full segment data ({{ a.row|length }} fields from the source table)</summary>
+            <table style="margin-top:6px;">
+              {% for key, value in a.row.items() %}
+                <tr><td class="key">{{ key }}</td><td>{{ value }}</td></tr>
+              {% endfor %}
+            </table>
+          </details>
+        {% endif %}
         {% if entry.annotated_url %}
           <button type="button" class="thumb-btn" style="width:280px; height:280px; margin-bottom:8px;" onclick="openLightbox(this.closest('.candidate-gallery'), {{ entry.matched_index }})">
             <img src="{{ entry.annotated_url }}" alt="Annotated Street View image">

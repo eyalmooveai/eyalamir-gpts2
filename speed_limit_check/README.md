@@ -235,13 +235,30 @@ enable/threshold customization is currently web-UI only.
 For every matched segment (the first one found, or every one if walking
 through all candidates), both the CLI and the web app surface:
 
-- The segment's location and full BigQuery row.
+- The segment's location and full BigQuery row (every column selected
+  from `speed_limits_<STATE>_<YEAR>_<MONTH>_details`, not just the speed
+  fields used for matching).
 - The speed limit read off the sign, and how it was found (OCR match).
 - The raw Street View images and an annotated copy with a red box around
   the detected sign text, saved under
   `output/<STATE>_<YEAR>_<MONTH>/<here_segment_id>/`.
 
+Every candidate tried - not just a match - carries this same full row of
+source-table data too, since it's useful context even when no sign was
+found: the run log prints every field as soon as a candidate is selected
+(before Street View/OCR even starts), and the web app's "Candidates
+tried" list has a collapsible "Full segment data" section per candidate
+with the same fields in a table, same as a match's.
+
 ## Resilience
+
+Consecutive requests to either Street View endpoint (metadata and image)
+are throttled to at least 100ms apart, so a walk-segment/side-mode run
+sampling many positions doesn't fire off dozens of requests back to back
+with no pacing at all - a plausible contributor to hitting transient
+errors in the first place, on top of retrying them once they happen.
+Cached images/coverage don't touch the network at all, so this never
+slows down a re-run that's already fetched everything.
 
 A transient 5xx from the Street View Static (image) API - Google's own
 server hiccupping, not a bad key or request - is retried a few times and

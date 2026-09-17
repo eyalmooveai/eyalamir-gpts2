@@ -39,6 +39,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,34 @@ STREETVIEW_API_RETRIES = 3
 DEFAULT_FOV = 90
 MIN_FOV = 10
 MAX_FOV = 120
+
+# Minimum gap enforced between consecutive Street View requests (metadata
+# and image endpoints share this, since they're the same API family/quota
+# bucket) - a walk-segment run at a tight spacing can fire off dozens of
+# these back to back with no pacing at all otherwise, which is plausibly
+# what was tripping the transient 5xx/UNKNOWN_ERROR responses being
+# retried elsewhere in this file. 10/sec is comfortably under typical
+# per-project QPS limits without meaningfully slowing a run down (network
+# latency and Vision OCR per image already dwarf this).
+STREETVIEW_MIN_INTERVAL_S = 0.1
+
+_streetview_throttle_lock = threading.Lock()
+_last_streetview_call_ts = 0.0
+
+
+def _throttle_streetview_call() -> None:
+    """Blocks just long enough to keep consecutive Street View API calls
+    (across metadata and image requests alike) at least
+    STREETVIEW_MIN_INTERVAL_S apart, to avoid bursting past the API's rate
+    limit and triggering transient errors from firing requests back to
+    back with no pacing."""
+    global _last_streetview_call_ts
+    with _streetview_throttle_lock:
+        now = time.monotonic()
+        wait = STREETVIEW_MIN_INTERVAL_S - (now - _last_streetview_call_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_streetview_call_ts = time.monotonic()
 
 SPEED_TOKEN_RE = re.compile(r"^speed$", re.IGNORECASE)
 LIMIT_TOKEN_RE = re.compile(r"^limit$", re.IGNORECASE)
@@ -515,6 +544,7 @@ def streetview_coverage(lat: float, lon: float, api_key: str, log=lambda msg: No
     status = None
     meta = {}
     for attempt in range(STREETVIEW_API_RETRIES):
+        _throttle_streetview_call()
         resp = requests.get(STREETVIEW_METADATA_URL, params={"location": f"{lat},{lon}", "key": api_key}, timeout=30)
         resp.raise_for_status()
         meta = resp.json()
@@ -571,6 +601,7 @@ def fetch_streetview_images(
         params = {"size": "640x640", "location": f"{lat},{lon}", "heading": heading, "fov": fov, "pitch": 0, "key": api_key}
         resp = None
         for attempt in range(STREETVIEW_API_RETRIES):
+            _throttle_streetview_call()
             resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
             if resp.status_code < 500:
                 break
@@ -751,6 +782,7 @@ class CandidateAttempt:
     image_details: list[ImageDetail] = dataclasses.field(default_factory=list)
     annotated_image: Optional[Path] = None
     matched_image_index: Optional[int] = None  # index into image_details
+    row: dict = dataclasses.field(default_factory=dict)  # full source-table row (SELECT * from speed_limits_..._details), every candidate tried - not just matches
 
 
 @dataclasses.dataclass
@@ -920,6 +952,7 @@ def run_pipeline(
         base = i * span
         tag = f"[{i + 1}/{n}]"
         seg_dir_root = out_root / safe_segment_dirname(seg_id)
+        row_dict = _jsonable_row(row)
 
         coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or side_mode != "center" or headings_relative) else []
         if walk_segment and coords:
@@ -966,6 +999,10 @@ def run_pipeline(
             mode_desc.append(f"±{side_offset_m:.0f}m sides only (no center)")
         where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
         log(f"{tag} here_segment_id={seg_id} - {where}")
+        for key, value in row_dict.items():
+            if key in ("here_segment_id", "centroid_lat", "centroid_lon"):
+                continue  # already shown on the summary line above
+            log(f"    {key}: {value}")
 
         image_details: list[ImageDetail] = []
         reading = None
@@ -1040,13 +1077,13 @@ def run_pipeline(
             progress(point_base + point_span, f"{ptag} No readable sign, trying next position...")
 
         if not image_details:
-            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_coverage"))
+            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_coverage", row=row_dict))
             log("  No Street View coverage at any checked position, trying next candidate.")
             progress(base + span, f"{tag} No Street View coverage, trying next candidate...")
             continue
 
         if not reading:
-            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", image_details=image_details))
+            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", image_details=image_details, row=row_dict))
             log("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.")
             progress(base + span, f"{tag} No readable sign, trying next candidate...")
             continue
@@ -1058,14 +1095,11 @@ def run_pipeline(
         result.attempts.append(
             CandidateAttempt(
                 i + 1, seg_id, lat, lon, "match", reading.evidence,
-                image_details=image_details, annotated_image=annotated_path, matched_image_index=matched_index,
+                image_details=image_details, annotated_image=annotated_path, matched_image_index=matched_index, row=row_dict,
             )
         )
-        match_row = _jsonable_row(row)
-        match_row["centroid_lat"] = lat
-        match_row["centroid_lon"] = lon
         result.matches.append(
-            Match(row=match_row, reading=reading, annotated_image=annotated_path, image_details=image_details, matched_image_index=matched_index)
+            Match(row=row_dict, reading=reading, annotated_image=annotated_path, image_details=image_details, matched_image_index=matched_index)
         )
         log(f"Match found: {reading.speed_mph} mph on segment {seg_id}.")
 
