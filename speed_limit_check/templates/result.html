@@ -1,4 +1,8 @@
 {% extends "layout.html" %}
+{% block extra_head %}
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+{% endblock %}
 {% block content %}
 <p><a href="/">&larr; Run another query</a></p>
 
@@ -33,10 +37,10 @@
 {% if attempts_view %}
   <div class="card">
     <h3 style="margin-top:0;">Candidates tried</h3>
-    <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Every image fetched, and what OCR read in it - useful for telling "no sign in frame" apart from "OCR missed it".</p>
+    <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Every image fetched, and what OCR read in it - useful for telling "no sign in frame" apart from "OCR missed it". Click any image to see where it was taken and which way the camera was facing.</p>
     {% for entry in attempts_view %}
       {% set a = entry.attempt %}
-      <div style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
+      <div class="candidate-gallery" data-images='{{ entry.images_js | tojson }}' data-lat="{{ a.lat }}" data-lon="{{ a.lon }}" style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
         <p style="margin:0 0 6px;">
           <strong>#{{ a.index }}</strong> <code>{{ a.segment_id }}</code>
           {% if a.status == "match" %}<span class="badge ok">sign read</span>
@@ -48,15 +52,16 @@
           {% if a.note %} &middot; {{ a.note }}{% endif %}
         </p>
         {% if entry.annotated_url %}
-          <img class="sign" style="max-width:280px; display:block; margin-bottom:8px;" src="{{ entry.annotated_url }}" alt="Annotated Street View image">
+          <button type="button" class="thumb-btn" style="width:280px; height:280px; margin-bottom:8px;" onclick="openLightbox(this.closest('.candidate-gallery'), {{ entry.matched_index }})">
+            <img src="{{ entry.annotated_url }}" alt="Annotated Street View image">
+          </button>
         {% endif %}
-        {% if entry.pairs %}
+        {% if entry.images_js %}
           <div class="thumbs">
-            {% for url, snippet in entry.pairs %}
-              <div style="width:140px;">
-                <a href="{{ url }}" target="_blank"><img src="{{ url }}"></a>
-                <p style="font-size:0.72rem; color:var(--muted); margin:4px 0 0; word-break:break-word;">{{ snippet or "(not checked - match found earlier)" }}</p>
-              </div>
+            {% for im in entry.images_js %}
+              <button type="button" class="thumb-btn" onclick="openLightbox(this.closest('.candidate-gallery'), {{ loop.index0 }})">
+                <img src="{{ im.url }}">
+              </button>
             {% endfor %}
           </div>
         {% endif %}
@@ -69,4 +74,108 @@
   <h3 style="margin-top:0;">Run log</h3>
   <pre class="log">{{ log|join("\n") }}</pre>
 </div>
+
+<div id="lightbox" hidden>
+  <div class="lightbox-inner">
+    <div class="lightbox-topbar">
+      <span id="lb-counter"></span>
+      <button type="button" class="lightbox-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
+    </div>
+    <div class="lightbox-stage">
+      <button type="button" class="lightbox-arrow prev" id="lb-prev" onclick="lbPrev()" aria-label="Previous image">&#8249;</button>
+      <img id="lb-img" src="" alt="Street View image">
+      <button type="button" class="lightbox-arrow next" id="lb-next" onclick="lbNext()" aria-label="Next image">&#8250;</button>
+    </div>
+    <div class="lightbox-bottom">
+      <div class="lightbox-caption">
+        <div class="heading-label" id="lb-heading-label"></div>
+        <div id="lb-snippet"></div>
+      </div>
+      <div class="lightbox-map-wrap"><div id="lb-map"></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let LB_IMAGES = [];
+  let LB_INDEX = 0;
+  let LB_LAT = 0, LB_LON = 0;
+  let lbMap = null;
+  let lbMarker = null;
+
+  function openLightbox(galleryEl, index) {
+    LB_IMAGES = JSON.parse(galleryEl.dataset.images);
+    LB_LAT = parseFloat(galleryEl.dataset.lat);
+    LB_LON = parseFloat(galleryEl.dataset.lon);
+    LB_INDEX = index;
+    document.getElementById('lightbox').hidden = false;
+    renderLightbox();
+    if (lbMap) setTimeout(() => lbMap.invalidateSize(), 0);
+  }
+
+  function closeLightbox() {
+    document.getElementById('lightbox').hidden = true;
+  }
+
+  function lbPrev() {
+    if (LB_INDEX <= 0) return;
+    LB_INDEX -= 1;
+    renderLightbox();
+  }
+
+  function lbNext() {
+    if (LB_INDEX >= LB_IMAGES.length - 1) return;
+    LB_INDEX += 1;
+    renderLightbox();
+  }
+
+  function arrowIcon(headingDeg) {
+    const h = headingDeg === null || headingDeg === undefined ? 0 : headingDeg;
+    return L.divIcon({
+      className: 'lb-arrow-icon',
+      html: `<div style="transform:rotate(${h}deg);">
+               <svg width="30" height="30" viewBox="0 0 24 24">
+                 <circle cx="12" cy="12" r="5" fill="#2f6fed" stroke="#fff" stroke-width="1.5"/>
+                 <path d="M12 1 L17 11 L12 8 L7 11 Z" fill="#2f6fed" stroke="#fff" stroke-width="1"/>
+               </svg>
+             </div>`,
+      iconSize: [30, 30],
+      iconAnchor: [15, 15],
+    });
+  }
+
+  function renderLightbox() {
+    const item = LB_IMAGES[LB_INDEX];
+    document.getElementById('lb-img').src = item.url;
+    document.getElementById('lb-snippet').textContent = item.snippet || '';
+    document.getElementById('lb-heading-label').textContent =
+      (item.heading !== null && item.heading !== undefined) ? `Heading ${item.heading}° (0=N, 90=E, 180=S, 270=W)` : 'Heading unknown';
+    document.getElementById('lb-counter').textContent = `${LB_INDEX + 1} / ${LB_IMAGES.length}`;
+    document.getElementById('lb-prev').disabled = LB_INDEX <= 0;
+    document.getElementById('lb-next').disabled = LB_INDEX >= LB_IMAGES.length - 1;
+
+    if (!lbMap) {
+      lbMap = L.map('lb-map', { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false });
+    }
+    lbMap.setView([LB_LAT, LB_LON], 17);
+    if (!lbMap._speedLimitTiles) {
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(lbMap);
+      lbMap._speedLimitTiles = true;
+    }
+    if (lbMarker) lbMap.removeLayer(lbMarker);
+    lbMarker = L.marker([LB_LAT, LB_LON], { icon: arrowIcon(item.heading) }).addTo(lbMap);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    const lb = document.getElementById('lightbox');
+    if (lb.hidden) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowRight') lbNext();
+    else if (e.key === 'ArrowLeft') lbPrev();
+  });
+
+  document.getElementById('lightbox').addEventListener('click', (e) => {
+    if (e.target.id === 'lightbox') closeLightbox();
+  });
+</script>
 {% endblock %}

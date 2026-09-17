@@ -179,6 +179,17 @@ def safe_segment_dirname(segment_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", segment_id)
 
 
+HEADING_FROM_FILENAME_RE = re.compile(r"heading(\d+)")
+
+
+def heading_from_filename(path: Path) -> Optional[int]:
+    """Street View images are saved as streetview_heading<N>.jpg - recovers
+    the compass heading (0=N, 90=E, 180=S, 270=W) from that filename, e.g.
+    for pairing each image with a direction arrow on a map."""
+    m = HEADING_FROM_FILENAME_RE.search(path.stem)
+    return int(m.group(1)) if m else None
+
+
 def load_keys_file(path: Path) -> None:
     """Load KEY=VALUE lines from `path` into os.environ, without overriding
     anything already set in the environment. Blank lines and lines starting
@@ -446,6 +457,7 @@ class CandidateAttempt:
     images: list[Path] = dataclasses.field(default_factory=list)
     ocr_snippets: list[str] = dataclasses.field(default_factory=list)
     annotated_image: Optional[Path] = None
+    matched_heading: Optional[int] = None
 
 
 @dataclasses.dataclass
@@ -579,6 +591,7 @@ def run_pipeline(
             CandidateAttempt(
                 i + 1, seg_id, lat, lon, "match", reading.evidence,
                 images=image_paths, ocr_snippets=ocr_snippets, annotated_image=annotated_path,
+                matched_heading=heading_from_filename(reading.image_path),
             )
         )
         match_row = _jsonable_row(row)

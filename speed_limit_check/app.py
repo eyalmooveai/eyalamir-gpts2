@@ -9,10 +9,10 @@ See README.md for the API keys/credentials this needs.
 """
 from __future__ import annotations
 
-import itertools
 import os
 import threading
 import uuid
+from itertools import zip_longest
 from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
@@ -24,6 +24,7 @@ from find_bad_speed_limit import (
     DEFAULT_PROJECT,
     NoUsableApiKey,
     StreetViewAuthError,
+    heading_from_filename,
     run_pipeline,
 )
 
@@ -225,17 +226,22 @@ def result_page(job_id):
     result = job["result"]
 
     # Pair each candidate's captured images with the OCR snippet found in
-    # each, so the page shows what every attempt actually saw - not just
-    # the winning one(s) - which is what makes "no sign read" cases debuggable.
+    # each and its compass heading, so the page shows what every attempt
+    # actually saw (not just the winning one(s)) and can plot each image's
+    # location/direction on a map in the lightbox.
     attempts_view = []
     for a in result.attempts:
-        image_urls = [_image_url(p) for p in a.images]
-        pairs = list(itertools.zip_longest(image_urls, a.ocr_snippets))
+        images_js = [
+            {"url": _image_url(p), "heading": heading_from_filename(p), "snippet": snippet}
+            for p, snippet in zip_longest(a.images, a.ocr_snippets)
+        ]
+        matched_index = next((i for i, im in enumerate(images_js) if im["heading"] == a.matched_heading), 0) if a.matched_heading is not None else 0
         attempts_view.append(
             {
                 "attempt": a,
-                "pairs": pairs,
+                "images_js": images_js,
                 "annotated_url": _image_url(a.annotated_image) if a.annotated_image else None,
+                "matched_index": matched_index,
             }
         )
 

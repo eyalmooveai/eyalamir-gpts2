@@ -84,6 +84,13 @@ the sign-read speed, and a gallery of every candidate tried - including
 the images captured and the OCR text found in each, for ones that didn't
 match too. Runs on localhost only.
 
+Click any thumbnail to open it full-size in a lightbox with a small live
+map (OpenStreetMap via Leaflet, no extra API key needed) showing exactly
+where that image was captured and which way the camera was pointed (an
+arrow rotated to the image's compass heading: 0=N, 90=E, 180=S, 270=W).
+Use the on-screen arrows, the ← / → keys, or Esc to navigate between a
+candidate's images or close the viewer.
+
 Additional options on the form:
 
 - **Selection criteria** - each of the criteria listed under "Query" above
