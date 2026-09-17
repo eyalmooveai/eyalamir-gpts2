@@ -125,6 +125,24 @@ through all candidates), both the CLI and the web app surface:
   the detected sign text, saved under
   `output/<STATE>_<YEAR>_<MONTH>/<here_segment_id>/`.
 
+## Caching
+
+Both APIs are billed per call, so a given segment's images and OCR results
+are cached to disk and reused rather than re-fetched:
+
+- **Street View images**: named deterministically by heading
+  (`streetview_heading<N>.jpg`) under a segment's output directory. If the
+  file already exists there, it's reused - the image at a fixed lat/lon/
+  heading never changes.
+- **Vision OCR results**: cached to a `<image>.ocr.json` sidecar file next
+  to each image. If present, it's loaded instead of calling Vision again.
+
+This means re-running the same state/year/month, revisiting a segment with
+`--segment-id`, or `--walk-all` scanning candidates that share images with
+a prior run all skip the API calls for anything already on disk. Delete a
+segment's directory under `output/` (or the whole `output/` tree) to force
+a fresh fetch.
+
 ## How sign reading works
 
 Google Cloud Vision's `TEXT_DETECTION` is run against Street View images

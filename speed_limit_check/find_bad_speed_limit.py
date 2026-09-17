@@ -271,14 +271,25 @@ def streetview_coverage(lat: float, lon: float, api_key: str) -> Optional[dict]:
     raise StreetViewAuthError(f"Street View metadata request failed: status={status} error_message={meta.get('error_message')!r}")
 
 
-def fetch_streetview_images(lat: float, lon: float, api_key: str, out_dir: Path, headings=DEFAULT_HEADINGS) -> list[Path]:
+def fetch_streetview_images(
+    lat: float, lon: float, api_key: str, out_dir: Path, headings=DEFAULT_HEADINGS, log=lambda msg: None
+) -> list[Path]:
+    """Downloads one Street View Static image per heading into `out_dir`,
+    named deterministically by heading (streetview_heading<N>.jpg). If a
+    file already exists there (e.g. from a prior run over the same segment),
+    it's reused instead of re-fetching - the API is billed per call, and the
+    image at a given lat/lon/heading never changes."""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for heading in headings:
+        path = out_dir / f"streetview_heading{heading}.jpg"
+        if path.exists() and path.stat().st_size > 0:
+            log(f"    {path.name}: using cached image")
+            paths.append(path)
+            continue
         params = {"size": "640x640", "location": f"{lat},{lon}", "heading": heading, "fov": 90, "pitch": 0, "key": api_key}
         resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
         resp.raise_for_status()
-        path = out_dir / f"streetview_heading{heading}.jpg"
         path.write_bytes(resp.content)
         paths.append(path)
     return paths
@@ -303,7 +314,51 @@ def _center(box) -> tuple[float, float]:
     return (l + r) / 2, (t + b) / 2
 
 
-def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: Path) -> tuple[Optional[SignReading], str]:
+def _ocr_cache_path(image_path: Path) -> Path:
+    return image_path.with_name(image_path.name + ".ocr.json")
+
+
+def _get_ocr_data(vision_client: vision.ImageAnnotatorClient, image_path: Path, log=lambda msg: None) -> dict:
+    """Runs (or reuses a cached) Vision text_detection on `image_path`,
+    returning {"img_h": int, "full_text": str, "words": [[text, [l,t,r,b]], ...]}.
+
+    Cached to a `<image>.ocr.json` sidecar file next to the image, since
+    Vision is billed per call and the OCR result for a given image never
+    changes - a re-run (or --walk-all revisiting a prior run's images)
+    should never re-call it for the same file.
+    """
+    cache_path = _ocr_cache_path(image_path)
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text())
+            log(f"    {image_path.name}: using cached OCR result")
+            return data
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            pass  # corrupt cache file - fall through and re-fetch
+
+    content = image_path.read_bytes()
+    with Image.open(image_path) as im:
+        img_h = im.height
+    response = vision_client.text_detection(image=vision.Image(content=content))
+    if response.error.message:
+        print(f"  Vision API error on {image_path.name}: {response.error.message}", file=sys.stderr)
+        data = {"img_h": img_h, "full_text": "", "words": []}
+    else:
+        annotations = response.text_annotations
+        full_text = annotations[0].description if annotations else ""
+        words = [[w.description, list(_bbox(w.bounding_poly.vertices))] for w in annotations[1:]]
+        data = {"img_h": img_h, "full_text": full_text, "words": words}
+
+    try:
+        cache_path.write_text(json.dumps(data))
+    except OSError:
+        pass  # caching is an optimization, not a requirement - don't fail the run over it
+    return data
+
+
+def find_sign_in_image(
+    vision_client: vision.ImageAnnotatorClient, image_path: Path, log=lambda msg: None
+) -> tuple[Optional[SignReading], str]:
     """Look for a 'SPEED LIMIT NN' sign in the image via OCR.
 
     Prefers a number token that sits directly below SPEED/LIMIT word tokens
@@ -314,21 +369,16 @@ def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: P
     on a miss, so callers can log what Vision actually saw for debugging
     (e.g. no sign in frame at all, vs. a sign OCR'd in an unexpected layout).
     """
-    content = image_path.read_bytes()
-    with Image.open(image_path) as im:
-        img_h = im.height
-    response = vision_client.text_detection(image=vision.Image(content=content))
-    if response.error.message:
-        print(f"  Vision API error on {image_path.name}: {response.error.message}", file=sys.stderr)
-        return None, ""
-    annotations = response.text_annotations
-    if not annotations:
+    data = _get_ocr_data(vision_client, image_path, log=log)
+    img_h = data["img_h"]
+    full_text = data["full_text"]
+    words = [(text, tuple(box)) for text, box in data["words"]]
+    if not full_text and not words:
         return None, ""
 
-    words = annotations[1:]  # [0] is the full-text block
-    speed_boxes = [_bbox(w.bounding_poly.vertices) for w in words if SPEED_TOKEN_RE.match(w.description)]
-    limit_boxes = [_bbox(w.bounding_poly.vertices) for w in words if LIMIT_TOKEN_RE.match(w.description)]
-    number_words = [(w.description, _bbox(w.bounding_poly.vertices)) for w in words if NUMBER_TOKEN_RE.match(w.description)]
+    speed_boxes = [box for text, box in words if SPEED_TOKEN_RE.match(text)]
+    limit_boxes = [box for text, box in words if LIMIT_TOKEN_RE.match(text)]
+    number_words = [(text, box) for text, box in words if NUMBER_TOKEN_RE.match(text)]
 
     anchor_boxes = limit_boxes or speed_boxes
     best = None
@@ -350,8 +400,6 @@ def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: P
                     b = max(anchor_box[3], num_box[3])
                     best = SignReading(speed, image_path, (l, t, r, b), f"OCR found '{text}' below a SPEED/LIMIT word on the sign")
                     best_dist = dist
-
-    full_text = annotations[0].description
 
     if best:
         return best, full_text
@@ -503,13 +551,13 @@ def run_pipeline(
 
         seg_dir = out_root / safe_segment_dirname(seg_id)
         progress(base + 0.3 * span, f"{tag} Downloading Street View imagery...")
-        image_paths = fetch_streetview_images(lat, lon, api_key, seg_dir)
+        image_paths = fetch_streetview_images(lat, lon, api_key, seg_dir, log=log)
 
         reading = None
         ocr_snippets: list[str] = []
         for k, image_path in enumerate(image_paths):
             progress(base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * span, f"{tag} Running OCR on image {k + 1}/{len(image_paths)}...")
-            reading, ocr_text = find_sign_in_image(vision_client, image_path)
+            reading, ocr_text = find_sign_in_image(vision_client, image_path, log=log)
             snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
             ocr_snippets.append(snippet)
             log(f"    {image_path.name}: OCR saw: {snippet}")
