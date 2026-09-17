@@ -19,11 +19,13 @@ from flask import Flask, jsonify, redirect, render_template, request, send_from_
 from find_bad_speed_limit import (
     CRITERIA_DEFS,
     DEFAULT_DATASET,
+    DEFAULT_HEADINGS,
     DEFAULT_KEYS_FILE,
     DEFAULT_PROJECT,
     NoUsableApiKey,
     StreetViewAuthError,
     load_keys_file,
+    parse_headings,
     run_pipeline,
 )
 
@@ -114,6 +116,7 @@ def _run_job(
     walk_segment_spacing_m: float,
     check_both_sides: bool,
     side_offset_m: float,
+    headings: tuple[int, ...],
 ) -> None:
     def log(msg: str) -> None:
         with JOBS_LOCK:
@@ -138,6 +141,7 @@ def _run_job(
             walk_segment_spacing_m=walk_segment_spacing_m,
             check_both_sides=check_both_sides,
             side_offset_m=side_offset_m,
+            headings=headings,
             out_dir=OUT_DIR,
             keys_file=DEFAULT_KEYS_FILE,
             log=log,
@@ -169,6 +173,7 @@ def index():
         default_project=DEFAULT_PROJECT,
         default_dataset=DEFAULT_DATASET,
         criteria_defs=CRITERIA_DEFS,
+        default_headings=",".join(str(h) for h in DEFAULT_HEADINGS),
     )
 
 
@@ -192,6 +197,11 @@ def run():
         side_offset_m = float(request.form.get("side_offset_m") or 20.0)
     except ValueError:
         side_offset_m = 20.0
+    headings_raw = request.form.get("headings", "").strip()
+    try:
+        headings = parse_headings(headings_raw) if headings_raw else DEFAULT_HEADINGS
+    except ValueError:
+        headings = DEFAULT_HEADINGS
     criteria = _read_criteria_from_form(request.form)
 
     if not (state and year and month):
@@ -203,7 +213,7 @@ def run():
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
             criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
-            check_both_sides, side_offset_m,
+            check_both_sides, side_offset_m, headings,
         ),
         daemon=True,
     )

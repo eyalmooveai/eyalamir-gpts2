@@ -115,6 +115,13 @@ Additional options on the form:
 
 - **Selection criteria** - each of the criteria listed under "Query" above
   has its own checkbox and editable threshold; any combination can be on.
+- **Headings to capture per position** - comma-separated compass degrees
+  (default `0,90,180,270` = N/E/S/W), applied at every position checked
+  (centroid, walked positions, and side offsets alike). More headings
+  costs one more Street View + Vision call per position each, but
+  improves the odds of catching a sign at an angle that falls between the
+  default four - e.g. `0,45,90,135,180,225,270,315` for 8 directions.
+  Capped at 24 headings.
 - **Check one specific segment** - paste a `here_segment_id` (e.g.
   `here:cm:segment:412644259`) to check just that segment directly,
   bypassing the criteria entirely.
@@ -168,6 +175,7 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--walk-segment-spacing-m` | `15` | Target distance in meters between sampled positions when `--walk-segment` is set (point count is derived from this and each segment's actual length, clamped to 2-40 points) |
 | `--check-both-sides` | off | At each checked position, also probe points offset perpendicular to the road on both sides |
 | `--side-offset-m` | `20` | Perpendicular offset in meters for `--check-both-sides` |
+| `--headings` | `0,90,180,270` | Comma-separated compass headings (0-359) to capture per position (max 24) |
 | `--out-dir` | `output` | Where Street View images are saved |
 | `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 

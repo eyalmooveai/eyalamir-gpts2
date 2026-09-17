@@ -53,6 +53,13 @@
 </div>
 
 <div class="card">
+  <h3 style="margin-top:0;">Image capture</h3>
+  <label for="headings">Headings to capture per position (degrees, comma-separated)</label>
+  <input type="text" id="headings" name="headings" form="run-form" value="{{ default_headings }}" placeholder="0,90,180,270">
+  <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">0=N, 90=E, 180=S, 270=W. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.</p>
+</div>
+
+<div class="card">
   <h3 style="margin-top:0;">Walking options</h3>
   <div class="criterion-row">
     <input type="checkbox" id="walk_all" name="walk_all" form="run-form">

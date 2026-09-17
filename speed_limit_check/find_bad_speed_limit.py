@@ -172,6 +172,14 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--out-dir", default="output", help="Directory to save Street View images into (default: ./output)")
     p.add_argument(
+        "--headings",
+        type=parse_headings,
+        default=DEFAULT_HEADINGS,
+        help=f"Comma-separated compass headings (0-359) to capture per position (default: "
+        f"{','.join(str(h) for h in DEFAULT_HEADINGS)}). More headings costs more Street View + Vision "
+        f"calls per position but improves the odds of catching a sign at an odd angle.",
+    )
+    p.add_argument(
         "--keys-file",
         default=DEFAULT_KEYS_FILE,
         type=Path,
@@ -204,6 +212,31 @@ def safe_segment_dirname(segment_id: str) -> str:
     awkward in file paths (esp. Windows) and needs escaping in URLs, so swap
     it out for a plain filesystem/URL-safe directory name."""
     return re.sub(r"[^A-Za-z0-9_.-]", "_", segment_id)
+
+
+MAX_HEADINGS = 24
+
+
+def parse_headings(raw: str) -> tuple[int, ...]:
+    """Parses a comma-separated list of compass headings (e.g. "0,90,180,270")
+    into a deduped, order-preserving tuple of ints normalized to [0, 359).
+    Raises ValueError on anything that doesn't parse, is empty, or exceeds
+    MAX_HEADINGS (a runaway list would multiply Street View + Vision calls
+    per position by that many)."""
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("No headings given (expected e.g. '0,90,180,270')")
+    seen: list[int] = []
+    for p in parts:
+        try:
+            v = int(round(float(p))) % 360
+        except ValueError:
+            raise ValueError(f"Invalid heading {p!r} (expected a number 0-359)")
+        if v not in seen:
+            seen.append(v)
+    if len(seen) > MAX_HEADINGS:
+        raise ValueError(f"Too many headings ({len(seen)}) - {MAX_HEADINGS} max")
+    return tuple(seen)
 
 
 HEADING_FROM_FILENAME_RE = re.compile(r"heading(\d+)")
@@ -652,6 +685,7 @@ def run_pipeline(
     walk_segment_spacing_m: float = 15.0,
     check_both_sides: bool = False,
     side_offset_m: float = 20.0,
+    headings: tuple[int, ...] = DEFAULT_HEADINGS,
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
@@ -683,6 +717,11 @@ def run_pipeline(
     centerline can keep returning the same one carriageway of a divided
     road even as you walk its length - a sign on the other carriageway,
     a short perpendicular distance away, is otherwise never reached.
+
+    `headings` (default 0/90/180/270, i.e. N/E/S/W) sets which compass
+    directions get captured at every position checked. More headings costs
+    more Street View + Vision calls per position but improves the odds of
+    catching a sign at an angle that falls between the default four.
 
     `progress(fraction, message)` is called throughout with fraction in
     [0, 1] and a human-readable status - e.g. for a web UI progress bar.
@@ -792,7 +831,7 @@ def run_pipeline(
             if side_label:
                 point_dir = point_dir / side_label
             progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
-            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, log=log)
+            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=headings, log=log)
 
             for k, image_path in enumerate(image_paths):
                 progress(
@@ -873,6 +912,7 @@ def main() -> int:
             walk_segment_spacing_m=args.walk_segment_spacing_m,
             check_both_sides=args.check_both_sides,
             side_offset_m=args.side_offset_m,
+            headings=args.headings,
             out_dir=Path(args.out_dir),
             keys_file=args.keys_file,
             log=print,
