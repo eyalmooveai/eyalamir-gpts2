@@ -9,6 +9,7 @@ See README.md for the API keys/credentials this needs.
 """
 from __future__ import annotations
 
+import itertools
 import os
 from pathlib import Path
 
@@ -21,12 +22,15 @@ from find_bad_speed_limit import (
     NoUsableApiKey,
     StreetViewAuthError,
     run_pipeline,
-    safe_segment_dirname,
 )
 
 OUT_DIR = Path("output")
 
 app = Flask(__name__)
+
+
+def _image_url(path: Path) -> str:
+    return "/images/" + str(Path(path).relative_to(OUT_DIR)).replace(os.sep, "/")
 
 
 @app.route("/", methods=["GET"])
@@ -79,12 +83,25 @@ def run():
     except Exception as e:  # BigQuery/Vision auth errors etc. - surface rather than 500
         return render_template("error.html", message=f"{type(e).__name__}: {e}", log=log_lines)
 
-    image_urls = None
     annotated_url = None
-    if result.match_row:
-        segment_dir = f"{state}_{year}_{month}/{safe_segment_dirname(result.match_row['here_segment_id'])}"
-        image_urls = [f"/images/{segment_dir}/{p.name}" for p in (result.match_all_images or [])]
-        annotated_url = f"/images/{segment_dir}/{result.match_annotated_image.name}"
+    if result.match_row and result.match_annotated_image:
+        annotated_url = _image_url(result.match_annotated_image)
+
+    # Build a per-candidate view pairing each captured image with the OCR
+    # snippet found in it, so the page shows what every attempt actually saw
+    # - not just the winning one - which is what makes "no sign read" cases
+    # debuggable without digging through the output/ directory by hand.
+    attempts_view = []
+    for a in result.attempts:
+        image_urls = [_image_url(p) for p in a.images]
+        pairs = list(itertools.zip_longest(image_urls, a.ocr_snippets))
+        attempts_view.append(
+            {
+                "attempt": a,
+                "pairs": pairs,
+                "annotated_url": annotated_url if a.status == "match" else None,
+            }
+        )
 
     return render_template(
         "result.html",
@@ -93,8 +110,7 @@ def run():
         month=month,
         result=result,
         log=log_lines,
-        image_urls=image_urls,
-        annotated_url=annotated_url,
+        attempts_view=attempts_view,
     )
 
 

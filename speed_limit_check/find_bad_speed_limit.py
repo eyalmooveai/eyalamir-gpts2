@@ -269,6 +269,8 @@ class CandidateAttempt:
     lon: float
     status: str  # "no_coverage" | "no_sign_read" | "match"
     note: str = ""
+    images: list[Path] = dataclasses.field(default_factory=list)
+    ocr_snippets: list[str] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -334,22 +336,28 @@ def run_pipeline(
         image_paths = fetch_streetview_images(lat, lon, api_key, seg_dir)
 
         reading = None
+        ocr_snippets: list[str] = []
         for image_path in image_paths:
             reading, ocr_text = find_sign_in_image(vision_client, image_path)
             snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
+            ocr_snippets.append(snippet)
             log(f"    {image_path.name}: OCR saw: {snippet}")
             if reading:
                 break
 
         if not reading:
-            result.attempts.append(CandidateAttempt(i + 1, segment_id, lat, lon, "no_sign_read"))
+            result.attempts.append(
+                CandidateAttempt(i + 1, segment_id, lat, lon, "no_sign_read", images=image_paths, ocr_snippets=ocr_snippets)
+            )
             log("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.")
             continue
 
         annotated_path = seg_dir / "sign_detected.jpg"
         save_annotated_image(reading, annotated_path)
 
-        result.attempts.append(CandidateAttempt(i + 1, segment_id, lat, lon, "match", reading.evidence))
+        result.attempts.append(
+            CandidateAttempt(i + 1, segment_id, lat, lon, "match", reading.evidence, images=image_paths, ocr_snippets=ocr_snippets)
+        )
         result.match_row = _jsonable_row(row)
         result.match_row["centroid_lat"] = lat
         result.match_row["centroid_lon"] = lon

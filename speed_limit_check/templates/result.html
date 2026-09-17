@@ -16,17 +16,6 @@
   </div>
 
   <div class="card">
-    <h3 style="margin-top:0;">Sign detected</h3>
-    <img class="sign" src="{{ annotated_url }}" alt="Street View image with detected sign boxed in red">
-    <p style="color:var(--muted); font-size:0.85rem; margin-bottom:0;">All captured headings:</p>
-    <div class="thumbs">
-      {% for url in image_urls %}
-        <a href="{{ url }}" target="_blank"><img src="{{ url }}"></a>
-      {% endfor %}
-    </div>
-  </div>
-
-  <div class="card">
     <h3 style="margin-top:0;">Full row</h3>
     <table>
       {% for key, value in result.match_row.items() %}
@@ -41,24 +30,38 @@
   </div>
 {% endif %}
 
-{% if result.attempts %}
+{% if attempts_view %}
   <div class="card">
     <h3 style="margin-top:0;">Candidates tried</h3>
-    <table>
-      <tr><th>#</th><th>Segment</th><th>Location</th><th>Result</th></tr>
-      {% for a in result.attempts %}
-        <tr>
-          <td>{{ a.index }}</td>
-          <td>{{ a.segment_id }}</td>
-          <td>{{ "%.5f"|format(a.lat) }}, {{ "%.5f"|format(a.lon) }}</td>
-          <td>
-            {% if a.status == "match" %}<span class="badge ok">sign read</span>
-            {% elif a.status == "no_coverage" %}<span class="badge warn">no Street View coverage</span>
-            {% else %}<span class="badge warn">no sign read</span>{% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-    </table>
+    <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Every image fetched, and what OCR read in it - useful for telling "no sign in frame" apart from "OCR missed it".</p>
+    {% for entry in attempts_view %}
+      {% set a = entry.attempt %}
+      <div style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
+        <p style="margin:0 0 6px;">
+          <strong>#{{ a.index }}</strong> <code>{{ a.segment_id }}</code>
+          {% if a.status == "match" %}<span class="badge ok">sign read</span>
+          {% elif a.status == "no_coverage" %}<span class="badge warn">no Street View coverage</span>
+          {% else %}<span class="badge warn">no sign read</span>{% endif %}
+        </p>
+        <p style="color:var(--muted); font-size:0.85rem; margin:0 0 8px;">
+          {{ "%.5f"|format(a.lat) }}, {{ "%.5f"|format(a.lon) }}
+          {% if a.note %} &middot; {{ a.note }}{% endif %}
+        </p>
+        {% if entry.annotated_url %}
+          <img class="sign" style="max-width:280px; display:block; margin-bottom:8px;" src="{{ entry.annotated_url }}" alt="Annotated Street View image">
+        {% endif %}
+        {% if entry.pairs %}
+          <div class="thumbs">
+            {% for url, snippet in entry.pairs %}
+              <div style="width:140px;">
+                <a href="{{ url }}" target="_blank"><img src="{{ url }}"></a>
+                <p style="font-size:0.72rem; color:var(--muted); margin:4px 0 0; word-break:break-word;">{{ snippet or "(not checked - match found earlier)" }}</p>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
   </div>
 {% endif %}
 
