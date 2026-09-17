@@ -104,13 +104,23 @@
   let lbMarker = null;
 
   function openLightbox(galleryEl, index) {
-    LB_IMAGES = JSON.parse(galleryEl.dataset.images);
+    let images;
+    try {
+      images = JSON.parse(galleryEl.dataset.images || '[]');
+    } catch (err) {
+      console.error('Lightbox: failed to parse data-images', err, galleryEl.dataset.images);
+      images = [];
+    }
+    if (!Array.isArray(images) || images.length === 0) {
+      console.error('Lightbox: no images to show for this candidate', galleryEl);
+      return;
+    }
+    LB_IMAGES = images;
     LB_LAT = parseFloat(galleryEl.dataset.lat);
     LB_LON = parseFloat(galleryEl.dataset.lon);
-    LB_INDEX = index;
+    LB_INDEX = Math.min(Math.max(index, 0), LB_IMAGES.length - 1);
     document.getElementById('lightbox').hidden = false;
     renderLightbox();
-    if (lbMap) setTimeout(() => lbMap.invalidateSize(), 0);
   }
 
   function closeLightbox() {
@@ -146,6 +156,10 @@
 
   function renderLightbox() {
     const item = LB_IMAGES[LB_INDEX];
+    if (!item) {
+      console.error('Lightbox: no item at index', LB_INDEX, 'of', LB_IMAGES);
+      return;
+    }
     document.getElementById('lb-img').src = item.url;
     document.getElementById('lb-snippet').textContent = item.snippet || '';
     document.getElementById('lb-heading-label').textContent =
@@ -154,16 +168,29 @@
     document.getElementById('lb-prev').disabled = LB_INDEX <= 0;
     document.getElementById('lb-next').disabled = LB_INDEX >= LB_IMAGES.length - 1;
 
-    if (!lbMap) {
-      lbMap = L.map('lb-map', { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false });
+    if (typeof L === 'undefined') {
+      console.error('Lightbox: Leaflet (L) did not load - check network access to cdnjs.cloudflare.com');
+      return;
     }
-    lbMap.setView([LB_LAT, LB_LON], 17);
-    if (!lbMap._speedLimitTiles) {
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(lbMap);
-      lbMap._speedLimitTiles = true;
+    if (Number.isNaN(LB_LAT) || Number.isNaN(LB_LON)) {
+      console.error('Lightbox: invalid lat/lon', LB_LAT, LB_LON);
+      return;
     }
-    if (lbMarker) lbMap.removeLayer(lbMarker);
-    lbMarker = L.marker([LB_LAT, LB_LON], { icon: arrowIcon(item.heading) }).addTo(lbMap);
+    try {
+      if (!lbMap) {
+        lbMap = L.map('lb-map', { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false });
+      }
+      lbMap.setView([LB_LAT, LB_LON], 17);
+      if (!lbMap._speedLimitTiles) {
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(lbMap);
+        lbMap._speedLimitTiles = true;
+      }
+      if (lbMarker) lbMap.removeLayer(lbMarker);
+      lbMarker = L.marker([LB_LAT, LB_LON], { icon: arrowIcon(item.heading) }).addTo(lbMap);
+      setTimeout(() => lbMap.invalidateSize(), 0);
+    } catch (err) {
+      console.error('Lightbox: failed to render map', err);
+    }
   }
 
   document.addEventListener('keydown', (e) => {
