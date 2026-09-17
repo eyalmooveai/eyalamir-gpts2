@@ -59,7 +59,7 @@
   <p id="headings-help" style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">0=N, 90=E, 180=S, 270=W. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.</p>
 
   <div class="criterion-row" style="margin-top:10px;">
-    <input type="checkbox" id="headings_relative" name="headings_relative" form="run-form" onchange="onHeadingsRelativeChange()">
+    <input type="checkbox" id="headings_relative" name="headings_relative" form="run-form" onchange="onHeadingsRelativeChange()" {% if default_headings_relative %}checked{% endif %}>
     <label for="headings_relative" style="font-size:0.9rem;">Headings are relative to direction of travel, not compass degrees</label>
   </div>
   <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">When checked, each heading is rotated by the road's own local bearing at the position it's captured from (0=straight ahead along the road, 90=right, 180=behind, 270=left) instead of a fixed compass direction - useful since a sign usually faces along the road, not a specific compass point, and the road's bearing can vary along a walked segment.</p>
@@ -72,25 +72,25 @@
 <div class="card">
   <h3 style="margin-top:0;">Walking options</h3>
   <div class="criterion-row">
-    <input type="checkbox" id="walk_all" name="walk_all" form="run-form">
+    <input type="checkbox" id="walk_all" name="walk_all" form="run-form" {% if default_walk_all %}checked{% endif %}>
     <label for="walk_all" style="font-size:0.9rem;">Walk through all candidates (don't stop at the first readable sign - try every one and report every match)</label>
   </div>
   <div class="criterion-row" style="margin-top:10px;">
-    <input type="checkbox" id="walk_segment" name="walk_segment" form="run-form" onchange="onWalkSegmentChange()">
+    <input type="checkbox" id="walk_segment" name="walk_segment" form="run-form" onchange="onWalkSegmentChange()" {% if default_walk_segment %}checked{% endif %}>
     <label for="walk_segment" style="font-size:0.9rem;">Slow-walk each segment's full length (a sign may sit away from the centroid, which is all that's checked by default)</label>
   </div>
   <div id="walk-segment-points-row" style="margin-top:8px; opacity:0.45;">
     <label for="walk_segment_spacing_m" style="display:inline; margin:0;">Spacing between positions (meters)</label>
-    <input type="number" id="walk_segment_spacing_m" name="walk_segment_spacing_m" form="run-form" value="15" min="2" max="200" style="width:80px; display:inline-block; margin-left:8px;" disabled>
+    <input type="number" id="walk_segment_spacing_m" name="walk_segment_spacing_m" form="run-form" value="{{ default_walk_segment_spacing_m }}" min="2" max="200" style="width:80px; display:inline-block; margin-left:8px;" disabled>
     <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">The number of positions sampled is derived from this and each segment's actual length (2-40 points), rather than a fixed count - a short segment gets fewer, a long one gets more. Smaller spacing costs more API calls and runs slower; if a sign keeps getting missed, try a smaller value here.</p>
   </div>
 
   <div style="margin-top:14px;">
     <label for="side_mode" style="display:block; margin-bottom:4px;">Which side(s) of the road to check, at every position checked</label>
     <select id="side_mode" name="side_mode" form="run-form" onchange="onSideModeChange()">
-      <option value="center" selected>Center only (default) - just the position itself</option>
-      <option value="sides">Sides only, skip center - offset perpendicular points on each side</option>
-      <option value="both">Center + both sides - all three</option>
+      <option value="center" {% if default_side_mode == 'center' %}selected{% endif %}>Center only - just the position itself</option>
+      <option value="sides" {% if default_side_mode == 'sides' %}selected{% endif %}>Sides only, skip center - offset perpendicular points on each side</option>
+      <option value="both" {% if default_side_mode == 'both' %}selected{% endif %}>Center + both sides - all three</option>
     </select>
     <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">A road can have two physically distinct, separately-surveyed-by-Google carriageways or trunks a short distance apart while sharing one here_segment_id - Street View's nearest-panorama snapping means centerline sampling alone can keep missing a sign on the other one. "Center only" checks just the position(s) themselves. "Sides only" offsets each position perpendicular to the road on both sides and skips the center entirely - useful once you know the center's own coverage isn't the carriageway/trunk you care about, since it wastes no calls on it. "Center + both sides" checks all three when you're not sure which one has the sign; roughly triples API calls per position.</p>
   </div>
@@ -106,7 +106,68 @@
 </div>
 
 <script>
+  const REMEMBERED_VALUES_KEY = 'speedLimitChecker.lastFormValues';
+
+  function rememberedFormFields() {
+    return document.querySelectorAll('#run-form [id], [form="run-form"][id]');
+  }
+
+  function saveFormValues() {
+    try {
+      const values = {};
+      rememberedFormFields().forEach(el => {
+        values[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+      });
+      localStorage.setItem(REMEMBERED_VALUES_KEY, JSON.stringify(values));
+    } catch (e) {
+      // localStorage unavailable (private browsing, etc.) - not critical, just skip remembering.
+    }
+  }
+
+  function restoreFormValues() {
+    let values;
+    try {
+      const raw = localStorage.getItem(REMEMBERED_VALUES_KEY);
+      if (!raw) return;
+      values = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+    rememberedFormFields().forEach(el => {
+      if (!(el.id in values)) return;
+      if (el.type === 'checkbox') {
+        el.checked = !!values[el.id];
+      } else {
+        el.value = values[el.id];
+      }
+    });
+  }
+
+  function syncDependentUI() {
+    // Re-syncs the enabled/disabled and help-text state that depends on
+    // current field values (e.g. a checked walk_segment should leave its
+    // spacing input enabled, not greyed out) - needed both after restoring
+    // remembered values and after the page's own server-rendered defaults,
+    // since either can leave a dependent control out of sync until this runs.
+    onSegmentIdInput();
+    onWalkSegmentChange();
+    onSideModeChange();
+    onHeadingsRelativeChange();
+  }
+
+  function initForm() {
+    restoreFormValues();
+    syncDependentUI();
+    // Remember every field as soon as it changes (not just on submit), so
+    // settings are saved and resumable even if the run isn't started yet.
+    rememberedFormFields().forEach(el => {
+      el.addEventListener('input', saveFormValues);
+      el.addEventListener('change', saveFormValues);
+    });
+  }
+
   function onSubmit() {
+    saveFormValues();
     document.getElementById('submit-btn').disabled = true;
     document.getElementById('submit-btn').textContent = 'Starting…';
   }
@@ -135,5 +196,7 @@
       ? '0=straight ahead along the road, 90=right, 180=behind, 270=left, rotated per-position by the road\'s own local bearing. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.'
       : '0=N, 90=E, 180=S, 270=W. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.';
   }
+
+  document.addEventListener('DOMContentLoaded', initForm);
 </script>
 {% endblock %}

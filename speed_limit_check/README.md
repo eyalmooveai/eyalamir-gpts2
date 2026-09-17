@@ -111,26 +111,48 @@ there to switch to satellite - the same pegman-drag/walk/switch experience
 as maps.google.com, embedded in the page. Requires the Maps JavaScript
 API key from setup step 3 above.
 
+The form remembers every value you enter, saved to that browser's
+`localStorage` as soon as you change anything - not only when you submit -
+so settings survive a page reload or reopening the tab later, no server-side
+account or file needed. This only affects that one browser; a different
+browser or a cleared site data starts back at the built-in defaults below.
+The first time you ever open the page (nothing saved yet), the form starts
+with the settings this tool has actually converged on for reliably catching
+a sign: headings `10` (relative to direction of travel), camera zoom `50`,
+walk through all candidates, slow-walk each segment at `2`m spacing, and
+sides-only. This is a lot more API calls per candidate than a conservative
+starting point would be (roughly `segment_length / 2 × 2 sides` Street View
++ Vision calls each) - lower "Candidates to try" if a run is taking too
+long or costing more than expected.
+
 Additional options on the form:
 
 - **Selection criteria** - each of the criteria listed under "Query" above
   has its own checkbox and editable threshold; any combination can be on.
-- **Headings to capture per position** - comma-separated compass degrees
-  (default `0,90,180,270` = N/E/S/W), applied at every position checked
-  (centroid, walked positions, and side offsets alike). More headings
-  costs one more Street View + Vision call per position each, but
-  improves the odds of catching a sign at an angle that falls between the
-  default four - e.g. `0,45,90,135,180,225,270,315` for 8 directions.
-  Capped at 24 headings.
-- **Headings are relative to direction of travel** - off by default, so
-  headings are fixed compass degrees (0=N, 90=E, 180=S, 270=W). Check this
-  to instead rotate each heading by the road's own local bearing at the
+- **Headings to capture per position** - comma-separated degrees, applied
+  at every position checked (centroid, walked positions, and side offsets
+  alike). More headings costs one more Street View + Vision call per
+  position each, but improves the odds of catching a sign at an angle
+  that falls between the ones already captured - e.g.
+  `0,45,90,135,180,225,270,315` for 8 evenly-spaced directions. Capped at
+  24 headings.
+- **Headings are relative to direction of travel** - unchecked, headings
+  are fixed compass degrees (0=N, 90=E, 180=S, 270=W). Checked, each
+  heading is instead rotated by the road's own local bearing at the
   position it's captured from (0=straight ahead along the road, 90=right,
   180=behind, 270=left) - useful since a sign usually faces along the road
   it's posted on rather than a fixed compass point, and a walked segment's
-  bearing can vary from one end to the other.
-- **Camera zoom (field of view)** - default `90` degrees (Google's normal
-  full-width shot). A narrower value zooms in, making a distant or small
+  bearing can vary from one end to the other. Combined with "slow-walk"
+  and "sides only"/"both sides", a side position is only a guess at where
+  a separate, unmapped trunk might be, and that trunk isn't guaranteed to
+  run parallel to the centerline it was guessed from (e.g. a diverging
+  ramp) - so its own actual direction of travel is derived instead from
+  consecutive real Street View panorama positions Google snaps to along
+  that side, wherever at least two resolve to coverage; otherwise it falls
+  back to the centerline's bearing (including whenever slow-walk is off,
+  since there's then only one point per side to begin with).
+- **Camera zoom (field of view)** - Google's normal shot is 90 degrees
+  wide. A narrower value zooms in, making a distant or small
   sign occupy more of the fixed 640x640 image and so easier for OCR to
   read - try this when a sign is visibly present in a captured image at
   the right position/heading but still isn't being detected, which
@@ -149,14 +171,14 @@ Additional options on the form:
   centroid is checked, which can miss a sign positioned elsewhere along a
   longer segment. Check this to instead sample the segment's actual line
   geometry (fetched from BigQuery) at positions roughly "Spacing between
-  positions (meters)" (default 15) apart, from one end to the other, and
-  check each in turn, stopping at the first one with a readable sign. The
-  number of positions is derived from that spacing and the segment's own
-  length (clamped to 2-40 points), not a fixed count, so a short segment
-  isn't over-sampled and a long one isn't under-sampled by one setting.
-  If a sign keeps getting missed, try a smaller spacing - a 15m default
-  still leaves plenty of room to walk past a sign that's only clearly
-  legible within a narrower window. This costs more API calls the smaller
+  positions (meters)" apart, from one end to the other, and check each in
+  turn, stopping at the first one with a readable sign. The number of
+  positions is derived from that spacing and the segment's own length
+  (clamped to 2-40 points), not a fixed count, so a short segment isn't
+  over-sampled and a long one isn't under-sampled by one setting. If a
+  sign keeps getting missed, try a smaller spacing - a wider one leaves
+  more room to walk past a sign that's only clearly legible within a
+  narrow window. This costs more API calls the smaller
   the spacing (roughly `segment_length / spacing` calls per segment), so
   it runs slower - keep "candidates to try" modest when it's on. Images/
   results are cached per position (under a `point<N>/` subdirectory),
@@ -168,11 +190,10 @@ Additional options on the form:
   snapping to ever reach the far one from centerline sampling alone.
   Applies to every position checked (whether just the centroid or every
   walked point):
-  - **Center only** (default) - just the position(s) themselves, same as
-    always.
+  - **Center only** - just the position(s) themselves, same as always.
   - **Sides only** - skips the center and instead offsets each position
-    by "Offset distance (meters)" (default 20) perpendicular to the road
-    on both sides. Useful once you already know the center point's own
+    by "Offset distance (meters)" perpendicular to the road on both
+    sides. Useful once you already know the center point's own
     Street View coverage isn't the carriageway/trunk you care about, so
     it wastes no calls checking it.
   - **Center + both sides** - checks all three, for when you're not sure

@@ -36,6 +36,22 @@ from find_bad_speed_limit import (
 OUT_DIR = Path("output")
 MAX_JOBS = 20  # cap in-memory job history for this long-lived local process
 
+# Web UI form defaults - deliberately different from find_bad_speed_limit's
+# own general-purpose CLI defaults (a single heading, narrower zoom, and
+# walking every candidate's full length at close spacing is a lot more API
+# calls than a sensible CLI baseline, but is what this tool's actual usage
+# here has converged on for reliably catching a sign). Only take effect on
+# a browser with nothing remembered yet in localStorage - see the "remember
+# my last values" JS in index.html, which overrides these once anything's
+# been saved.
+WEB_DEFAULT_HEADINGS = "10"
+WEB_DEFAULT_HEADINGS_RELATIVE = True
+WEB_DEFAULT_FOV = 50
+WEB_DEFAULT_WALK_ALL = True
+WEB_DEFAULT_WALK_SEGMENT = True
+WEB_DEFAULT_WALK_SEGMENT_SPACING_M = 2
+WEB_DEFAULT_SIDE_MODE = "sides"
+
 # Load once at startup (not just inside run_pipeline's background thread) so
 # GOOGLE_MAPS_API_KEY is available for embedding in a page - e.g. the
 # Google Maps JavaScript API script tag - even before any job has run.
@@ -181,10 +197,15 @@ def index():
         default_project=DEFAULT_PROJECT,
         default_dataset=DEFAULT_DATASET,
         criteria_defs=CRITERIA_DEFS,
-        default_headings=",".join(str(h) for h in DEFAULT_HEADINGS),
-        default_fov=DEFAULT_FOV,
+        default_headings=WEB_DEFAULT_HEADINGS,
+        default_headings_relative=WEB_DEFAULT_HEADINGS_RELATIVE,
+        default_fov=WEB_DEFAULT_FOV,
         min_fov=MIN_FOV,
         max_fov=MAX_FOV,
+        default_walk_all=WEB_DEFAULT_WALK_ALL,
+        default_walk_segment=WEB_DEFAULT_WALK_SEGMENT,
+        default_walk_segment_spacing_m=WEB_DEFAULT_WALK_SEGMENT_SPACING_M,
+        default_side_mode=WEB_DEFAULT_SIDE_MODE,
     )
 
 

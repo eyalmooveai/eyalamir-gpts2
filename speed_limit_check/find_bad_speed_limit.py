@@ -393,6 +393,35 @@ def sample_points_along_line(coords: list[tuple[float, float]], num_points: int)
     return points
 
 
+def bearings_from_actual_positions(
+    actual: list[Optional[tuple[float, float]]], fallback: list[float]
+) -> list[float]:
+    """Given the real Street View panorama position resolved at each of a
+    sequence of walked positions along one side/trunk ((lat, lon), or None
+    where none was resolved - e.g. no coverage there), returns a per-
+    position local bearing derived from the neighboring resolved positions:
+    the trunk's actual direction of travel, which can differ from the
+    queried segment's own centerline bearing when the two are genuinely
+    separate roads (e.g. a divided road's other carriageway, or a
+    diverging ramp) rather than truly parallel to it. Falls back to the
+    corresponding `fallback` entry wherever fewer than two resolved
+    positions exist to derive a bearing from at all (e.g. side_mode is on
+    without walk_segment, so there's only a single point on that side)."""
+    resolved = [i for i, p in enumerate(actual) if p is not None]
+    bearings = list(fallback)
+    if len(resolved) < 2:
+        return bearings
+    for j, i in enumerate(resolved):
+        prev_i = resolved[j - 1] if j > 0 else i
+        next_i = resolved[j + 1] if j < len(resolved) - 1 else i
+        if prev_i == next_i:
+            continue
+        lat1, lon1 = actual[prev_i]
+        lat2, lon2 = actual[next_i]
+        bearings[i] = _bearing_deg((lon1, lat1), (lon2, lat2))
+    return bearings
+
+
 def load_keys_file(path: Path) -> None:
     """Load KEY=VALUE lines from `path` into os.environ, without overriding
     anything already set in the environment. Blank lines and lines starting
@@ -775,6 +804,19 @@ def run_pipeline(
     own Street View coverage is on neither one of interest, in which case
     `"sides"` avoids wasting calls on it.
 
+    With `headings_relative=True` and `walk_segment` both on, each side's
+    headings are rotated by that trunk's own actual direction of travel
+    rather than the queried segment's centerline bearing: the real Street
+    View panorama position Google snaps to at each walked position on a
+    side is resolved first, and consecutive resolved positions on the same
+    side are used to derive its true local bearing - since an offset
+    "sides" point is a guess at where a separate, unmapped trunk might be,
+    and that trunk isn't guaranteed to run parallel to the centerline it
+    was guessed from (e.g. a diverging ramp). Falls back to the
+    centerline's own bearing wherever fewer than two positions on that
+    side resolve to real coverage (including whenever `walk_segment` is
+    off, since there's then only one point per side to begin with).
+
     `headings` (default 0/90/180/270, i.e. N/E/S/W) sets which directions
     get captured at every position checked. More headings costs more
     Street View + Vision calls per position but improves the odds of
@@ -882,16 +924,16 @@ def run_pipeline(
         # fixed compass direction.
         include_center = side_mode in ("center", "both")
         include_sides = side_mode in ("sides", "both")
-        sample_points = []  # (lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing)
+        sample_points = []  # [lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing] - bearing may be corrected below
         for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
             point_prefix = f"point{p_idx}" if walked else None
             if include_center:
-                sample_points.append((p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing))
+                sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
             if include_sides:
                 l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, side_offset_m)
                 r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, side_offset_m)
-                sample_points.append((l_lat, l_lon, point_prefix, "left", p_idx, p_bearing))
-                sample_points.append((r_lat, r_lon, point_prefix, "right", p_idx, p_bearing))
+                sample_points.append([l_lat, l_lon, point_prefix, "left", p_idx, p_bearing])
+                sample_points.append([r_lat, r_lon, point_prefix, "right", p_idx, p_bearing])
 
         mode_desc = []
         if walked:
@@ -908,13 +950,41 @@ def run_pipeline(
         num_pts = len(sample_points)
         point_span = span / num_pts
 
+        # With headings_relative + a walked side, each offset point is only
+        # a guess at where a separate, unmapped trunk might be - it isn't
+        # guaranteed to run parallel to the centerline it was guessed from
+        # (e.g. a diverging ramp). Resolve every point's actual Street View
+        # coverage up front (still exactly one call per point overall - the
+        # main loop below reuses these results instead of re-querying) so
+        # each side's real local bearing can be derived from its own
+        # consecutive resolved panorama positions before any images are
+        # captured, rather than reusing the centerline's bearing.
+        coverage_by_point: dict[int, Optional[dict]] = {}
+        if headings_relative and include_sides and walked:
+            progress(base, f"{tag} Resolving Street View coverage to determine each side's actual direction of travel...")
+            for pt_i, sp in enumerate(sample_points):
+                coverage_by_point[pt_i] = streetview_coverage(sp[0], sp[1], api_key)
+            for side_label in ("left", "right"):
+                idxs = [pt_i for pt_i, sp in enumerate(sample_points) if sp[3] == side_label]
+                actual_positions = []
+                for pt_i in idxs:
+                    loc = (coverage_by_point.get(pt_i) or {}).get("location") or {}
+                    actual_positions.append((loc["lat"], loc["lng"]) if "lat" in loc and "lng" in loc else None)
+                fallback = [sample_points[pt_i][5] for pt_i in idxs]
+                corrected = bearings_from_actual_positions(actual_positions, fallback)
+                if sum(1 for p in actual_positions if p is not None) >= 2:
+                    log(f"  {tag} {side_label}: derived this trunk's actual direction of travel from its own "
+                        f"resolved Street View panorama positions, rather than the queried segment's centerline bearing.")
+                for local_j, pt_i in enumerate(idxs):
+                    sample_points[pt_i][5] = corrected[local_j]
+
         for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx, p_bearing) in enumerate(sample_points):
             point_base = base + pt_i * point_span
             label_bits = [b for b in (f"position {base_idx + 1}/{len(base_points)}" if walked else None, side_label) if b]
             ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
             progress(point_base, f"{ptag} Checking Street View coverage...")
 
-            coverage = streetview_coverage(p_lat, p_lon, api_key)  # StreetViewAuthError propagates to caller
+            coverage = coverage_by_point[pt_i] if pt_i in coverage_by_point else streetview_coverage(p_lat, p_lon, api_key)
             if not coverage:
                 log(f"  {ptag}: no Street View coverage here.")
                 progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
