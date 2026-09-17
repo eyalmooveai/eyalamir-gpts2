@@ -102,6 +102,70 @@ def _throttle_streetview_call() -> None:
             time.sleep(wait)
         _last_streetview_call_ts = time.monotonic()
 
+
+# Set to enable a GCS-backed persistent cache on top of the local-disk one
+# below - local disk is always checked/written first and is all that's
+# used when this isn't set (the default, e.g. for local/CLI use), but a
+# deployment whose local disk doesn't survive restarts or isn't shared
+# across instances (Cloud Run) needs a persistent backing store so the
+# whole point of caching - not re-billing Street View/Vision for the same
+# image - still holds across those restarts. Uses the file's own path
+# (e.g. "output/NC_2026_08/<segment>/streetview_heading10.jpg") as its GCS
+# object name directly, so it's portable across machines as long as
+# --out-dir/OUT_DIR is left at its default "output".
+GCS_CACHE_BUCKET = os.environ.get("GCS_CACHE_BUCKET")
+
+_gcs_bucket_obj = None
+
+
+def _gcs_bucket():
+    """Lazily constructs the GCS bucket handle - the google-cloud-storage
+    package is only imported, and the bucket only touched, when
+    GCS_CACHE_BUCKET is actually set, so local/CLI use is never affected
+    by it being absent, misconfigured, or unreachable."""
+    global _gcs_bucket_obj
+    if _gcs_bucket_obj is None:
+        from google.cloud import storage
+        _gcs_bucket_obj = storage.Client().bucket(GCS_CACHE_BUCKET)
+    return _gcs_bucket_obj
+
+
+def gcs_cache_pull(path: Path, log=lambda msg: None) -> bool:
+    """If `path` doesn't already exist locally but GCS_CACHE_BUCKET is set
+    and has a copy, downloads it to `path` first - lets an instance whose
+    local disk doesn't persist (or is a fresh one) recover a file a prior
+    run already fetched/generated instead of re-fetching (and re-billing
+    for) it. Returns whether `path` exists locally after this call. Any
+    GCS error is logged and treated as a cache miss - caching is an
+    optimization, not a requirement, so this never raises."""
+    if path.exists():
+        return True
+    if not GCS_CACHE_BUCKET:
+        return False
+    try:
+        blob = _gcs_bucket().blob(str(path).replace(os.sep, "/"))
+        if not blob.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(path))
+        log(f"    {path.name}: pulled from GCS cache")
+        return True
+    except Exception as e:
+        log(f"    {path.name}: GCS cache lookup failed ({e}) - treating as a cache miss")
+        return False
+
+
+def gcs_cache_push(path: Path, log=lambda msg: None) -> None:
+    """Best-effort upload of a freshly-fetched/generated file at `path` to
+    the GCS cache (if configured), so a future instance can recover it via
+    gcs_cache_pull instead of re-fetching/regenerating it. Never raises."""
+    if not GCS_CACHE_BUCKET:
+        return
+    try:
+        _gcs_bucket().blob(str(path).replace(os.sep, "/")).upload_from_filename(str(path))
+    except Exception as e:
+        log(f"    {path.name}: failed to push to GCS cache ({e}) - continuing without it")
+
 SPEED_TOKEN_RE = re.compile(r"^speed$", re.IGNORECASE)
 LIMIT_TOKEN_RE = re.compile(r"^limit$", re.IGNORECASE)
 NUMBER_TOKEN_RE = re.compile(r"^\d{2,3}$")
@@ -617,7 +681,7 @@ def fetch_streetview_images(
     for heading in headings:
         suffix = "" if fov == DEFAULT_FOV else f"_fov{fov}"
         path = out_dir / f"streetview_heading{heading}{suffix}.jpg"
-        if path.exists() and path.stat().st_size > 0:
+        if gcs_cache_pull(path, log=log) and path.stat().st_size > 0:
             log(f"    {path.name}: using cached image")
             paths.append(path)
             continue
@@ -637,6 +701,7 @@ def fetch_streetview_images(
             continue
         resp.raise_for_status()
         path.write_bytes(resp.content)
+        gcs_cache_push(path, log=log)
         paths.append(path)
     return paths
 
@@ -714,7 +779,7 @@ def _get_ocr_data(vision_client: vision.ImageAnnotatorClient, image_path: Path, 
     should never re-call it for the same file.
     """
     cache_path = _ocr_cache_path(image_path)
-    if cache_path.exists():
+    if gcs_cache_pull(cache_path, log=log):
         try:
             data = json.loads(cache_path.read_text())
             log(f"    {image_path.name}: using cached OCR result")
@@ -737,6 +802,7 @@ def _get_ocr_data(vision_client: vision.ImageAnnotatorClient, image_path: Path, 
 
     try:
         cache_path.write_text(json.dumps(data))
+        gcs_cache_push(cache_path, log=log)
     except OSError:
         pass  # caching is an optimization, not a requirement - don't fail the run over it
     return data
@@ -1188,6 +1254,7 @@ def run_pipeline(
         matched_index = len(image_details) - 1
         annotated_path = reading.image_path.parent / "sign_detected.jpg"
         save_annotated_image(reading, annotated_path)
+        gcs_cache_push(annotated_path, log=log)
 
         result.attempts.append(
             CandidateAttempt(

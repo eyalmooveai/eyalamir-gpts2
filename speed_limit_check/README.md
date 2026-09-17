@@ -328,3 +328,141 @@ unrelated numbers (addresses, other signage). This is a heuristic, not a
 dedicated sign detector — it works well on clear, unobstructed shots of
 standard signs but can miss non-standard signage or signs outside the
 captured field of view.
+
+## Deploying to Cloud Run
+
+The web app (not the CLI) can run as a Cloud Run service instead of on
+your own machine. This changes a few things from local use, covered
+below: where the API key comes from, whether the image/OCR cache
+survives a restart, and who can reach the page at all - the app itself
+has no login of its own, so that last one matters.
+
+**Two architectural facts that shape the setup**, both because a run
+happens in a background thread that outlives the request that started
+it (`POST /run` returns immediately; the actual work continues while the
+browser polls `/status/<job_id>`):
+
+- **`--no-cpu-throttling` is required, not optional.** Cloud Run's
+  default billing model only allocates CPU to an instance while it's
+  actively handling a request; a background thread with no request in
+  flight would get starved of CPU between polls instead of actually
+  making progress. Without this flag, runs will stall or crawl.
+- **`--max-instances=1`.** Job/progress state lives in an in-memory dict
+  in the one process that started the job (see `app.py`'s `JOBS`) - it
+  isn't shared across instances. A second instance handling a `/status`
+  poll for a job it never started would report "unknown job". This
+  caps the service at one run at a time, which matches how it's meant to
+  be used anyway.
+
+### 1. Build and enable APIs
+
+```bash
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com storage.googleapis.com secretmanager.googleapis.com \
+  bigquery.googleapis.com vision.googleapis.com
+```
+
+### 2. Create a GCS bucket for the persistent cache
+
+Cloud Run's local disk doesn't survive a restart or a new revision, which
+would otherwise throw away the whole point of the image/OCR cache - not
+re-billing Street View/Vision for the same image. Setting `GCS_CACHE_BUCKET`
+makes the app write every fetched image and OCR result there too (best
+effort - a GCS error is logged and treated as a cache miss, never fails
+the run), and check there first when the local copy is missing.
+
+```bash
+gcloud storage buckets create gs://YOUR_BUCKET_NAME --location=YOUR_REGION
+```
+
+### 3. Put the Maps API key in Secret Manager
+
+```bash
+printf '%s' 'AIza...your real key...' | gcloud secrets create speed-limit-check-maps-key --data-file=-
+```
+
+### 4. Create a runtime service account and grant it access
+
+```bash
+gcloud iam service-accounts create speed-limit-check-runner \
+  --display-name="Speed limit sign checker (Cloud Run)"
+
+SA=speed-limit-check-runner@YOUR_PROJECT_ID.iam.gserviceaccount.com
+
+# BigQuery - read the table and run queries (same roles as local ADC setup, step 2 above)
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/bigquery.dataViewer"
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
+# Vision API
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/cloudvision.user"
+# The cache bucket only, not project-wide storage access
+gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET_NAME --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
+# Read the Maps API key secret
+gcloud secrets add-iam-policy-binding speed-limit-check-maps-key --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+```
+
+### 5. Deploy
+
+Run this from the `speed_limit_check/` directory (it builds the
+`Dockerfile` there via Cloud Build, no local Docker needed):
+
+```bash
+gcloud run deploy speed-limit-check \
+  --source . \
+  --region YOUR_REGION \
+  --service-account "$SA" \
+  --no-allow-unauthenticated \
+  --no-cpu-throttling \
+  --max-instances=1 \
+  --memory=1Gi \
+  --set-env-vars="GCS_CACHE_BUCKET=YOUR_BUCKET_NAME" \
+  --set-secrets="GOOGLE_MAPS_API_KEY=speed-limit-check-maps-key:latest"
+```
+
+### 6. Grant access
+
+`--no-allow-unauthenticated` means every request needs a valid Google
+identity token in its `Authorization` header - there's no app-level
+login, this is Cloud Run's own IAM check in front of it. Grant the
+people who should be able to use it:
+
+```bash
+gcloud run services add-iam-policy-binding speed-limit-check \
+  --region YOUR_REGION \
+  --member="user:someone@example.com" \
+  --role="roles/run.invoker"
+```
+
+**This is important and easy to get wrong**: plain browser navigation to
+the service URL will 403 even for a granted user, since a normal page
+load doesn't attach an identity token the way an authenticated `curl` or
+`gcloud` call does. To actually open it in a browser as yourself:
+
+```bash
+gcloud run services proxy speed-limit-check --region YOUR_REGION
+```
+
+which opens an authenticated tunnel at `http://127.0.0.1:8080` using
+your own `gcloud` login - open that URL in your browser. This is the
+simplest way to use it as a single person. If you want a real "click the
+link, sign in with Google, land on the page" experience for a team
+instead of a CLI tunnel per person, that's what [Identity-Aware
+Proxy](https://cloud.google.com/iap) is for, which Cloud Run supports
+enabling directly - the exact command/toggle has changed as the feature
+has matured, so check `gcloud run services update --help` or the Cloud
+Console's "Security" tab for the service rather than trusting a specific
+flag here going stale.
+
+### After deploying
+
+Every run since has assumed `python app.py` locally; on Cloud Run, use
+the service URL (through the proxy above, or with a bearer token) instead
+of `http://127.0.0.1:5050`, and check logs with:
+
+```bash
+gcloud run services logs read speed-limit-check --region YOUR_REGION
+```
+
+The CLI (`find_bad_speed_limit.py` run directly) is unaffected by any of
+this and keeps working exactly as documented above - it isn't part of
+what gets deployed.

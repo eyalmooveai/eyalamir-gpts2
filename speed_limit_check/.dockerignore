@@ -1,0 +1,10 @@
+output/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.venv/
+venv/
+keys.env
+keys.env.example
+README.md

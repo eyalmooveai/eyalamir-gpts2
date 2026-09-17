@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Local web UI for the speed limit sign checker.
+"""Web UI for the speed limit sign checker.
 
-Run:
+Local:
     python app.py
 
 Then open http://127.0.0.1:5050 in a browser. Runs on localhost only.
-See README.md for the API keys/credentials this needs.
+
+Can also run as a Cloud Run service instead (via gunicorn, see
+Dockerfile) - see README.md's "Deploying to Cloud Run" section for setup,
+and the API keys/credentials this needs either way.
 """
 from __future__ import annotations
 
@@ -23,11 +26,13 @@ from find_bad_speed_limit import (
     DEFAULT_HEADINGS,
     DEFAULT_KEYS_FILE,
     DEFAULT_PROJECT,
+    GCS_CACHE_BUCKET,
     MAX_FOV,
     MIN_FOV,
     SIDE_MODES,
     NoUsableApiKey,
     StreetViewAuthError,
+    gcs_cache_pull,
     load_keys_file,
     parse_headings,
     run_pipeline,
@@ -362,6 +367,18 @@ def error_page(job_id):
 
 @app.route("/images/<path:filename>")
 def images(filename):
+    # When a GCS-backed cache is configured (e.g. Cloud Run, whose local
+    # disk doesn't survive restarts or is per-instance), a file missing
+    # locally may still exist there from a prior run/instance - pull it
+    # down before serving. Contained to OUT_DIR (resolved/checked before
+    # any filesystem operation) so a crafted filename can't be used to
+    # probe or write outside it; send_from_directory below independently
+    # guards the actual response the same way regardless.
+    if GCS_CACHE_BUCKET:
+        local_path = (OUT_DIR / filename).resolve()
+        out_root = OUT_DIR.resolve()
+        if local_path == out_root or out_root in local_path.parents:
+            gcs_cache_pull(local_path)
     return send_from_directory(OUT_DIR, filename)
 
 
