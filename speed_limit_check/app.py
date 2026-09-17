@@ -19,9 +19,12 @@ from flask import Flask, jsonify, redirect, render_template, request, send_from_
 from find_bad_speed_limit import (
     CRITERIA_DEFS,
     DEFAULT_DATASET,
+    DEFAULT_FOV,
     DEFAULT_HEADINGS,
     DEFAULT_KEYS_FILE,
     DEFAULT_PROJECT,
+    MAX_FOV,
+    MIN_FOV,
     SIDE_MODES,
     NoUsableApiKey,
     StreetViewAuthError,
@@ -119,6 +122,7 @@ def _run_job(
     side_offset_m: float,
     headings: tuple[int, ...],
     headings_relative: bool,
+    fov: int,
 ) -> None:
     def log(msg: str) -> None:
         with JOBS_LOCK:
@@ -145,6 +149,7 @@ def _run_job(
             side_offset_m=side_offset_m,
             headings=headings,
             headings_relative=headings_relative,
+            fov=fov,
             out_dir=OUT_DIR,
             keys_file=DEFAULT_KEYS_FILE,
             log=log,
@@ -177,6 +182,9 @@ def index():
         default_dataset=DEFAULT_DATASET,
         criteria_defs=CRITERIA_DEFS,
         default_headings=",".join(str(h) for h in DEFAULT_HEADINGS),
+        default_fov=DEFAULT_FOV,
+        min_fov=MIN_FOV,
+        max_fov=MAX_FOV,
     )
 
 
@@ -208,6 +216,12 @@ def run():
     except ValueError:
         headings = DEFAULT_HEADINGS
     headings_relative = request.form.get("headings_relative") is not None
+    try:
+        fov = int(float(request.form.get("fov") or DEFAULT_FOV))
+    except ValueError:
+        fov = DEFAULT_FOV
+    if not (MIN_FOV <= fov <= MAX_FOV):
+        fov = DEFAULT_FOV
     criteria = _read_criteria_from_form(request.form)
 
     if not (state and year and month):
@@ -219,7 +233,7 @@ def run():
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
             criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
-            side_mode, side_offset_m, headings, headings_relative,
+            side_mode, side_offset_m, headings, headings_relative, fov,
         ),
         daemon=True,
     )

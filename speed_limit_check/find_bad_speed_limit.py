@@ -55,6 +55,9 @@ STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 DEFAULT_HEADINGS = (0, 90, 180, 270)
 SIDE_MODES = ("center", "sides", "both")
 STREETVIEW_IMAGE_RETRIES = 3
+DEFAULT_FOV = 90
+MIN_FOV = 10
+MAX_FOV = 120
 
 SPEED_TOKEN_RE = re.compile(r"^speed$", re.IGNORECASE)
 LIMIT_TOKEN_RE = re.compile(r"^limit$", re.IGNORECASE)
@@ -191,6 +194,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Interpret --headings relative to the road's local direction of travel (0=ahead, 90=right, "
         "180=behind, 270=left) instead of as fixed compass degrees",
+    )
+    p.add_argument(
+        "--fov",
+        type=int,
+        default=DEFAULT_FOV,
+        help=f"Street View camera field of view in degrees, {MIN_FOV}-{MAX_FOV} (default: {DEFAULT_FOV}) - "
+        f"a narrower value zooms in, making a distant/small sign bigger (and so more legible to OCR) in the "
+        f"fixed 640x640 frame, at the cost of a narrower cone around each heading",
     )
     p.add_argument(
         "--keys-file",
@@ -477,13 +488,21 @@ def streetview_coverage(lat: float, lon: float, api_key: str) -> Optional[dict]:
 
 
 def fetch_streetview_images(
-    lat: float, lon: float, api_key: str, out_dir: Path, headings=DEFAULT_HEADINGS, log=lambda msg: None
+    lat: float, lon: float, api_key: str, out_dir: Path, headings=DEFAULT_HEADINGS, fov: int = DEFAULT_FOV, log=lambda msg: None
 ) -> list[Path]:
     """Downloads one Street View Static image per heading into `out_dir`,
-    named deterministically by heading (streetview_heading<N>.jpg). If a
+    named deterministically by heading (streetview_heading<N>.jpg, or
+    streetview_heading<N>_fov<F>.jpg when `fov` isn't the default 90). If a
     file already exists there (e.g. from a prior run over the same segment),
     it's reused instead of re-fetching - the API is billed per call, and the
-    image at a given lat/lon/heading never changes.
+    image at a given lat/lon/heading/fov never changes.
+
+    `fov` (10-120, default 90) is the camera's field of view in degrees - a
+    narrower value "zooms in", making a distant/small sign occupy more
+    pixels of the fixed 640x640 output and so easier for OCR to read, at
+    the cost of a smaller field of view around each heading (an off-axis
+    sign that fit inside the default 90 deg cone may fall outside a
+    narrower one, so it isn't free - more headings can compensate).
 
     A transient 5xx from Google's own server (as opposed to a 4xx from a
     bad key/request) is retried a few times and then just skipped, logging
@@ -492,12 +511,13 @@ def fetch_streetview_images(
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for heading in headings:
-        path = out_dir / f"streetview_heading{heading}.jpg"
+        suffix = "" if fov == DEFAULT_FOV else f"_fov{fov}"
+        path = out_dir / f"streetview_heading{heading}{suffix}.jpg"
         if path.exists() and path.stat().st_size > 0:
             log(f"    {path.name}: using cached image")
             paths.append(path)
             continue
-        params = {"size": "640x640", "location": f"{lat},{lon}", "heading": heading, "fov": 90, "pitch": 0, "key": api_key}
+        params = {"size": "640x640", "location": f"{lat},{lon}", "heading": heading, "fov": fov, "pitch": 0, "key": api_key}
         resp = None
         for attempt in range(STREETVIEW_IMAGE_RETRIES):
             resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
@@ -716,6 +736,7 @@ def run_pipeline(
     side_offset_m: float = 20.0,
     headings: tuple[int, ...] = DEFAULT_HEADINGS,
     headings_relative: bool = False,
+    fov: int = DEFAULT_FOV,
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
@@ -767,6 +788,18 @@ def run_pipeline(
     (computed per point when walking; the segment's overall start-to-end
     bearing otherwise).
 
+    `fov` (10-120, default 90) is the Street View camera's field of view
+    in degrees at every position/heading captured. A narrower value zooms
+    in, making a distant or small sign occupy more of the fixed 640x640
+    frame and so easier for OCR to read - useful when a sign is visibly
+    present in a captured image but too small/low-resolution for the
+    "SPEED"/"LIMIT" text or the number itself to be read reliably, even
+    though the position and heading are already correct. It comes at the
+    cost of a narrower cone around each heading, so a sign that was
+    off-axis enough to still fit the default 90 deg view may fall outside
+    a much narrower one - pair a narrow fov with more headings if signs
+    might be caught at an angle.
+
     `progress(fraction, message)` is called throughout with fraction in
     [0, 1] and a human-readable status - e.g. for a web UI progress bar.
     It's a coarse estimate (evenly dividing 1.0 across candidates, and each
@@ -786,6 +819,9 @@ def run_pipeline(
     _validate_identifier(dataset, DATASET_RE, "dataset")
     if side_mode not in SIDE_MODES:
         raise ValueError(f"Invalid side_mode {side_mode!r} - must be one of {SIDE_MODES}")
+    fov = int(fov)
+    if not (MIN_FOV <= fov <= MAX_FOV):
+        raise ValueError(f"Invalid fov {fov} - must be between {MIN_FOV} and {MAX_FOV}")
     table = table_name(state, year, month)
     criteria = criteria if criteria is not None else default_criteria()
     walk_segment_spacing_m = max(1.0, float(walk_segment_spacing_m))
@@ -891,7 +927,7 @@ def run_pipeline(
                 point_dir = point_dir / side_label
             actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
             progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
-            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, log=log)
+            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, fov=fov, log=log)
 
             for k, image_path in enumerate(image_paths):
                 progress(
@@ -974,6 +1010,7 @@ def main() -> int:
             side_offset_m=args.side_offset_m,
             headings=args.headings,
             headings_relative=args.headings_relative,
+            fov=args.fov,
             out_dir=Path(args.out_dir),
             keys_file=args.keys_file,
             log=print,

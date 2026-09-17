@@ -129,6 +129,16 @@ Additional options on the form:
   180=behind, 270=left) - useful since a sign usually faces along the road
   it's posted on rather than a fixed compass point, and a walked segment's
   bearing can vary from one end to the other.
+- **Camera zoom (field of view)** - default `90` degrees (Google's normal
+  full-width shot). A narrower value zooms in, making a distant or small
+  sign occupy more of the fixed 640x640 image and so easier for OCR to
+  read - try this when a sign is visibly present in a captured image at
+  the right position/heading but still isn't being detected, which
+  usually means it's too small/low-resolution in frame rather than
+  missing entirely. Comes at the cost of a narrower cone around each
+  heading, so a sign that was off-axis enough to still fit the default
+  view may fall outside a much narrower one - pair a narrow zoom with
+  more headings if a sign might be caught at an angle. Range 10-120.
 - **Check one specific segment** - paste a `here_segment_id` (e.g.
   `here:cm:segment:412644259`) to check just that segment directly,
   bypassing the criteria entirely.
@@ -192,6 +202,7 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--side-offset-m` | `20` | Perpendicular offset in meters for `--side-mode sides`/`both` |
 | `--headings` | `0,90,180,270` | Comma-separated headings (0-359) to capture per position (max 24) - compass degrees, or relative angles if `--headings-relative` is set |
 | `--headings-relative` | off | Treat `--headings` as relative to each position's local road bearing (0=ahead, 90=right, 180=behind, 270=left) instead of fixed compass degrees |
+| `--fov` | `90` | Street View camera field of view in degrees (10-120) - narrower zooms in, making a distant/small sign more legible to OCR at the cost of a narrower cone per heading |
 | `--out-dir` | `output` | Where Street View images are saved |
 | `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 
@@ -226,9 +237,13 @@ Both APIs are billed per call, so a given segment's images and OCR results
 are cached to disk and reused rather than re-fetched:
 
 - **Street View images**: named deterministically by heading
-  (`streetview_heading<N>.jpg`) under a segment's output directory. If the
-  file already exists there, it's reused - the image at a fixed lat/lon/
-  heading never changes.
+  (`streetview_heading<N>.jpg`, or `streetview_heading<N>_fov<F>.jpg` when
+  "Camera zoom"/`--fov` isn't the default 90) under a segment's output
+  directory. If the file already exists there, it's reused - the image at
+  a fixed lat/lon/heading/fov never changes. Changing the fov gets its own
+  filename rather than overwriting the default-fov one, so re-running with
+  a narrower zoom to chase a hard-to-read sign doesn't throw away the
+  wider shots already fetched, and a plain re-run still reuses them too.
 - **Vision OCR results**: cached to a `<image>.ocr.json` sidecar file next
   to each image. If present, it's loaded instead of calling Vision again.
 

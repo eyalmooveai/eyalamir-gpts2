@@ -63,6 +63,10 @@
     <label for="headings_relative" style="font-size:0.9rem;">Headings are relative to direction of travel, not compass degrees</label>
   </div>
   <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">When checked, each heading is rotated by the road's own local bearing at the position it's captured from (0=straight ahead along the road, 90=right, 180=behind, 270=left) instead of a fixed compass direction - useful since a sign usually faces along the road, not a specific compass point, and the road's bearing can vary along a walked segment.</p>
+
+  <label for="fov" style="margin-top:14px; display:block;">Camera zoom (field of view, degrees)</label>
+  <input type="number" id="fov" name="fov" form="run-form" value="{{ default_fov }}" min="{{ min_fov }}" max="{{ max_fov }}" style="width:100px;">
+  <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Default {{ default_fov }} (Google's full-width shot). A narrower value zooms in, making a distant or small sign occupy more of the fixed image and so easier for OCR to read - try this if a sign is visibly in frame at the right position/heading but still isn't being detected. Comes at the cost of a narrower cone per heading, so a sign that was off to the side enough to still fit the default view may fall outside a much narrower one - pair a narrow zoom with more headings if a sign might be caught at an angle. Range {{ min_fov }}-{{ max_fov }}.</p>
 </div>
 
 <div class="card">
