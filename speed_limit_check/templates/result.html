@@ -40,7 +40,7 @@
     <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Every image fetched, and what OCR read in it - useful for telling "no sign in frame" apart from "OCR missed it". Click any image to see where it was taken and which way the camera was facing.</p>
     {% for entry in attempts_view %}
       {% set a = entry.attempt %}
-      <div class="candidate-gallery" data-images='{{ entry.images_js | tojson }}' data-lat="{{ a.lat }}" data-lon="{{ a.lon }}" data-heading="{{ entry.default_heading }}" style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
+      <div class="candidate-gallery" data-images='{{ entry.images_js | tojson }}' data-lat="{{ entry.explore_lat }}" data-lon="{{ entry.explore_lon }}" data-heading="{{ entry.explore_heading }}" style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
         <p style="margin:0 0 6px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           <strong>#{{ a.index }}</strong> <code>{{ a.segment_id }}</code>
           {% if a.status == "match" %}<span class="badge ok">sign read</span>
@@ -93,6 +93,7 @@
     <div class="lightbox-bottom">
       <div class="lightbox-caption">
         <div class="heading-label" id="lb-heading-label"></div>
+        <div id="lb-position" style="color:#bbb; font-size:0.75rem;"></div>
         <div id="lb-snippet"></div>
       </div>
       <div class="lightbox-map-wrap"><div id="lb-map"></div></div>
@@ -115,7 +116,6 @@
 <script>
   let LB_IMAGES = [];
   let LB_INDEX = 0;
-  let LB_LAT = 0, LB_LON = 0;
   let lbMap = null;
   let lbMarker = null;
   let LB_OPEN_COUNT = 0;
@@ -156,8 +156,6 @@
       return;
     }
     LB_IMAGES = images;
-    LB_LAT = parseFloat(galleryEl.dataset.lat);
-    LB_LON = parseFloat(galleryEl.dataset.lon);
     LB_INDEX = Math.min(Math.max(index, 0), LB_IMAGES.length - 1);
     renderLightbox();
   }
@@ -204,6 +202,8 @@
     document.getElementById('lb-snippet').textContent = item.snippet || '';
     document.getElementById('lb-heading-label').textContent =
       (item.heading !== null && item.heading !== undefined) ? `Heading ${item.heading}° (0=N, 90=E, 180=S, 270=W)` : 'Heading unknown';
+    document.getElementById('lb-position').textContent =
+      (item.lat !== undefined && item.lon !== undefined) ? `${Number(item.lat).toFixed(6)}, ${Number(item.lon).toFixed(6)}` : '';
     document.getElementById('lb-counter').textContent = `${LB_INDEX + 1} / ${LB_IMAGES.length}`;
     document.getElementById('lb-prev').disabled = LB_INDEX <= 0;
     document.getElementById('lb-next').disabled = LB_INDEX >= LB_IMAGES.length - 1;
@@ -212,21 +212,23 @@
       showLightboxError('The map library (Leaflet, loaded from cdnjs.cloudflare.com) did not load. This is usually an ad/content blocker, or no internet access from this machine. The image above should still be visible even though the map cannot load.');
       return;
     }
-    if (Number.isNaN(LB_LAT) || Number.isNaN(LB_LON)) {
-      console.error('[lightbox] invalid lat/lon', LB_LAT, LB_LON);
+    const lat = parseFloat(item.lat);
+    const lon = parseFloat(item.lon);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      console.error('[lightbox] invalid lat/lon for this image', item);
       return;
     }
     try {
       if (!lbMap) {
         lbMap = L.map('lb-map', { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false });
       }
-      lbMap.setView([LB_LAT, LB_LON], 17);
+      lbMap.setView([lat, lon], 17);
       if (!lbMap._speedLimitTiles) {
         L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(lbMap);
         lbMap._speedLimitTiles = true;
       }
       if (lbMarker) lbMap.removeLayer(lbMarker);
-      lbMarker = L.marker([LB_LAT, LB_LON], { icon: arrowIcon(item.heading) }).addTo(lbMap);
+      lbMarker = L.marker([lat, lon], { icon: arrowIcon(item.heading) }).addTo(lbMap);
       setTimeout(() => lbMap.invalidateSize(), 0);
     } catch (err) {
       console.error('[lightbox] failed to render map', err);

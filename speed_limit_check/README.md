@@ -121,6 +121,16 @@ Additional options on the form:
 - **Walk through all candidates** - by default the run stops at the first
   segment with a readable sign; check this to instead try every candidate
   up to "Candidates to try" and report every match found.
+- **Slow-walk each segment's full length** - by default only the segment's
+  centroid is checked, which can miss a sign positioned elsewhere along a
+  longer segment. Check this to instead sample the segment's actual line
+  geometry (fetched from BigQuery) at N evenly-spaced positions from one
+  end to the other ("Positions to sample per segment", default 5, 2-20)
+  and check each in turn, stopping at the first one with a readable sign.
+  This roughly multiplies Street View + Vision API calls per segment by
+  that many, so it costs more and runs slower - keep "candidates to try"
+  modest when it's on. Images/results are cached per position (under a
+  `point<N>/` subdirectory), same as the default single-point mode.
 
 ### CLI
 
@@ -135,6 +145,8 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--candidates` | `10` | How many top-mismatch rows to try before giving up |
 | `--segment-id` | none | Check one specific `here_segment_id` instead of running the mismatch query |
 | `--walk-all` | off | Don't stop at the first readable sign - try every candidate and report every match |
+| `--walk-segment` | off | Sample several positions along each segment's full length instead of just its centroid |
+| `--walk-segment-points` | `5` | How many positions to sample when `--walk-segment` is set (clamped to 2-20) |
 | `--out-dir` | `output` | Where Street View images are saved |
 | `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 

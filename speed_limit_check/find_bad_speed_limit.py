@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import os
 import re
 import sys
@@ -143,6 +144,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Don't stop at the first readable sign - process every candidate and report every match found",
     )
+    p.add_argument(
+        "--walk-segment",
+        action="store_true",
+        help="Instead of checking only the segment's centroid, sample several positions along its full length "
+        "(a sign may be located away from the centroid)",
+    )
+    p.add_argument(
+        "--walk-segment-points",
+        type=int,
+        default=5,
+        help="How many positions to sample along each segment when --walk-segment is set (default: 5)",
+    )
     p.add_argument("--out-dir", default="output", help="Directory to save Street View images into (default: ./output)")
     p.add_argument(
         "--keys-file",
@@ -190,6 +203,75 @@ def heading_from_filename(path: Path) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _haversine_m(p1: tuple[float, float], p2: tuple[float, float]) -> float:
+    """Distance in meters between two (lon, lat) points."""
+    lon1, lat1 = p1
+    lon2, lat2 = p2
+    r = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def line_coords_from_geojson(geojson_str: Optional[str]) -> list[tuple[float, float]]:
+    """Extracts [(lon, lat), ...] vertices, in order, from a GeoJSON string
+    (as produced by BigQuery's ST_ASGEOJSON). Handles LineString and
+    MultiLineString (HERE/OSM segments are sometimes split into multiple
+    parts - concatenated here into one path); anything else (e.g. a bare
+    Point) yields an empty list, meaning "no line to walk"."""
+    if not geojson_str:
+        return []
+    try:
+        geom = json.loads(geojson_str)
+    except (TypeError, ValueError):
+        return []
+    gtype = geom.get("type")
+    if gtype == "LineString":
+        return [tuple(c[:2]) for c in geom.get("coordinates", [])]
+    if gtype == "MultiLineString":
+        coords: list[tuple[float, float]] = []
+        for part in geom.get("coordinates", []):
+            coords.extend(tuple(c[:2]) for c in part)
+        return coords
+    return []
+
+
+def sample_points_along_line(coords: list[tuple[float, float]], num_points: int) -> list[tuple[float, float]]:
+    """Given [(lon, lat), ...] line vertices, returns `num_points` (lat, lon)
+    points evenly spaced BY DISTANCE along the line (not by vertex index,
+    since a line's vertices are rarely evenly spaced), always including the
+    first and last vertex."""
+    num_points = max(2, num_points)
+    if len(coords) < 2:
+        if not coords:
+            return []
+        lon, lat = coords[0]
+        return [(lat, lon)] * num_points
+
+    seg_lengths = [_haversine_m(coords[i], coords[i + 1]) for i in range(len(coords) - 1)]
+    total = sum(seg_lengths)
+    if total == 0:
+        lon, lat = coords[0]
+        return [(lat, lon)] * num_points
+
+    points = []
+    seg_idx = 0
+    cum_before_seg = 0.0
+    for i in range(num_points):
+        target = total * i / (num_points - 1)
+        while seg_idx < len(seg_lengths) - 1 and cum_before_seg + seg_lengths[seg_idx] < target:
+            cum_before_seg += seg_lengths[seg_idx]
+            seg_idx += 1
+        seg_len = seg_lengths[seg_idx] or 1e-9
+        t = min(max((target - cum_before_seg) / seg_len, 0.0), 1.0)
+        lon1, lat1 = coords[seg_idx]
+        lon2, lat2 = coords[seg_idx + 1]
+        points.append((lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t))
+    return points
+
+
 def load_keys_file(path: Path) -> None:
     """Load KEY=VALUE lines from `path` into os.environ, without overriding
     anything already set in the environment. Blank lines and lines starting
@@ -229,7 +311,8 @@ def build_candidates_query(
         SELECT
           *,
           ST_Y(ST_CENTROID(geom)) AS centroid_lat,
-          ST_X(ST_CENTROID(geom)) AS centroid_lon
+          ST_X(ST_CENTROID(geom)) AS centroid_lon,
+          ST_ASGEOJSON(geom) AS geom_geojson
         FROM `{project}.{dataset}.{table}`
         WHERE {where_sql}
         {order_sql}
@@ -254,7 +337,8 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
         SELECT
           *,
           ST_Y(ST_CENTROID(geom)) AS centroid_lat,
-          ST_X(ST_CENTROID(geom)) AS centroid_lon
+          ST_X(ST_CENTROID(geom)) AS centroid_lon,
+          ST_ASGEOJSON(geom) AS geom_geojson
         FROM `{project}.{dataset}.{table}`
         WHERE here_segment_id = @segment_id
         LIMIT 1
@@ -439,7 +523,7 @@ def print_row(row: dict) -> None:
 
 
 def _jsonable_row(row: bigquery.table.Row) -> dict:
-    return {k: v for k, v in row.items() if k != "geom"}
+    return {k: v for k, v in row.items() if k not in ("geom", "geom_geojson")}
 
 
 class NoUsableApiKey(RuntimeError):
@@ -447,17 +531,29 @@ class NoUsableApiKey(RuntimeError):
 
 
 @dataclasses.dataclass
+class ImageDetail:
+    """One fetched Street View image and what OCR found in it, including
+    where it was actually taken - which, with --walk-segment, can differ
+    per image within the same candidate segment."""
+
+    path: Path
+    lat: float
+    lon: float
+    heading: Optional[int]
+    ocr_snippet: str = ""
+
+
+@dataclasses.dataclass
 class CandidateAttempt:
     index: int
     segment_id: str
-    lat: float
+    lat: float  # the segment's centroid - used for the summary line/ordering
     lon: float
     status: str  # "no_coverage" | "no_sign_read" | "match"
     note: str = ""
-    images: list[Path] = dataclasses.field(default_factory=list)
-    ocr_snippets: list[str] = dataclasses.field(default_factory=list)
+    image_details: list[ImageDetail] = dataclasses.field(default_factory=list)
     annotated_image: Optional[Path] = None
-    matched_heading: Optional[int] = None
+    matched_image_index: Optional[int] = None  # index into image_details
 
 
 @dataclasses.dataclass
@@ -465,7 +561,8 @@ class Match:
     row: dict
     reading: SignReading
     annotated_image: Path
-    all_images: list[Path]
+    image_details: list[ImageDetail]
+    matched_image_index: int
 
 
 @dataclasses.dataclass
@@ -487,6 +584,8 @@ def run_pipeline(
     criteria: Optional[dict[str, tuple[bool, float]]] = None,
     segment_id: Optional[str] = None,
     walk_all: bool = False,
+    walk_segment: bool = False,
+    walk_segment_points: int = 5,
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
@@ -502,11 +601,18 @@ def run_pipeline(
     returns normally (with matches=[]) if no candidate yields a readable
     sign.
 
+    By default each candidate is checked only at its centroid. With
+    `walk_segment=True`, its full line geometry is instead sampled at
+    `walk_segment_points` (clamped to [2, 20]) evenly-spaced positions from
+    one end to the other, and each is checked in turn - a sign relevant to
+    the segment may sit well away from its centroid. This multiplies API
+    calls by roughly that many points, so it costs more and takes longer.
+
     `progress(fraction, message)` is called throughout with fraction in
     [0, 1] and a human-readable status - e.g. for a web UI progress bar.
     It's a coarse estimate (evenly dividing 1.0 across candidates, and each
-    candidate's slice across its coverage-check/download/OCR steps), not a
-    measurement of actual API latency.
+    candidate's slice across its sample points and their coverage-check/
+    download/OCR steps), not a measurement of actual API latency.
     """
     progress(0.0, "Starting...")
     load_keys_file(keys_file)
@@ -521,6 +627,7 @@ def run_pipeline(
     _validate_identifier(dataset, DATASET_RE, "dataset")
     table = table_name(state, year, month)
     criteria = criteria if criteria is not None else default_criteria()
+    walk_segment_points = max(2, min(int(walk_segment_points), 20))
 
     if segment_id:
         segment_id = segment_id.strip()
@@ -551,53 +658,82 @@ def run_pipeline(
         seg_id = row["here_segment_id"]
         base = i * span
         tag = f"[{i + 1}/{n}]"
-        log(f"{tag} here_segment_id={seg_id} at ({lat:.6f}, {lon:.6f})")
-        progress(base, f"{tag} Checking Street View coverage for {seg_id}...")
+        seg_dir_root = out_root / safe_segment_dirname(seg_id)
 
-        coverage = streetview_coverage(lat, lon, api_key)  # StreetViewAuthError propagates to caller
-        if not coverage:
+        if walk_segment:
+            coords = line_coords_from_geojson(row.get("geom_geojson"))
+            sample_points = sample_points_along_line(coords, walk_segment_points) if coords else [(lat, lon)]
+            log(f"{tag} here_segment_id={seg_id} - walking {len(sample_points)} position(s) along the segment")
+        else:
+            sample_points = [(lat, lon)]
+            log(f"{tag} here_segment_id={seg_id} at ({lat:.6f}, {lon:.6f})")
+
+        image_details: list[ImageDetail] = []
+        reading = None
+        num_pts = len(sample_points)
+        point_span = span / num_pts
+
+        for p_idx, (p_lat, p_lon) in enumerate(sample_points):
+            point_base = base + p_idx * point_span
+            ptag = f"{tag} point {p_idx + 1}/{num_pts}" if walk_segment else tag
+            progress(point_base, f"{ptag} Checking Street View coverage...")
+
+            coverage = streetview_coverage(p_lat, p_lon, api_key)  # StreetViewAuthError propagates to caller
+            if not coverage:
+                log(f"  {ptag}: no Street View coverage here.")
+                progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
+                continue
+
+            point_dir = (seg_dir_root / f"point{p_idx}") if walk_segment else seg_dir_root
+            progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
+            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, log=log)
+
+            for k, image_path in enumerate(image_paths):
+                progress(
+                    point_base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * point_span,
+                    f"{ptag} Running OCR on image {k + 1}/{len(image_paths)}...",
+                )
+                reading, ocr_text = find_sign_in_image(vision_client, image_path, log=log)
+                snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
+                log(f"    {image_path.name}: OCR saw: {snippet}")
+                image_details.append(
+                    ImageDetail(path=image_path, lat=p_lat, lon=p_lon, heading=heading_from_filename(image_path), ocr_snippet=snippet)
+                )
+                if reading:
+                    break
+
+            if reading:
+                break
+            progress(point_base + point_span, f"{ptag} No readable sign, trying next position...")
+
+        if not image_details:
             result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_coverage"))
-            log("  No Street View coverage here, trying next candidate.")
+            log("  No Street View coverage at any checked position, trying next candidate.")
             progress(base + span, f"{tag} No Street View coverage, trying next candidate...")
             continue
 
-        seg_dir = out_root / safe_segment_dirname(seg_id)
-        progress(base + 0.3 * span, f"{tag} Downloading Street View imagery...")
-        image_paths = fetch_streetview_images(lat, lon, api_key, seg_dir, log=log)
-
-        reading = None
-        ocr_snippets: list[str] = []
-        for k, image_path in enumerate(image_paths):
-            progress(base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * span, f"{tag} Running OCR on image {k + 1}/{len(image_paths)}...")
-            reading, ocr_text = find_sign_in_image(vision_client, image_path, log=log)
-            snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
-            ocr_snippets.append(snippet)
-            log(f"    {image_path.name}: OCR saw: {snippet}")
-            if reading:
-                break
-
         if not reading:
-            result.attempts.append(
-                CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", images=image_paths, ocr_snippets=ocr_snippets)
-            )
+            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", image_details=image_details))
             log("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.")
             progress(base + span, f"{tag} No readable sign, trying next candidate...")
             continue
 
-        annotated_path = seg_dir / "sign_detected.jpg"
+        matched_index = len(image_details) - 1
+        annotated_path = reading.image_path.parent / "sign_detected.jpg"
         save_annotated_image(reading, annotated_path)
 
         result.attempts.append(
             CandidateAttempt(
                 i + 1, seg_id, lat, lon, "match", reading.evidence,
-                images=image_paths, ocr_snippets=ocr_snippets, annotated_image=annotated_path,
-                matched_heading=heading_from_filename(reading.image_path),
+                image_details=image_details, annotated_image=annotated_path, matched_image_index=matched_index,
             )
         )
         match_row = _jsonable_row(row)
         match_row["centroid_lat"] = lat
         match_row["centroid_lon"] = lon
-        result.matches.append(Match(row=match_row, reading=reading, annotated_image=annotated_path, all_images=image_paths))
+        result.matches.append(
+            Match(row=match_row, reading=reading, annotated_image=annotated_path, image_details=image_details, matched_image_index=matched_index)
+        )
         log(f"Match found: {reading.speed_mph} mph on segment {seg_id}.")
 
         if not walk_all:
@@ -627,6 +763,8 @@ def main() -> int:
             max_candidates=args.candidates,
             segment_id=args.segment_id,
             walk_all=args.walk_all,
+            walk_segment=args.walk_segment,
+            walk_segment_points=args.walk_segment_points,
             out_dir=Path(args.out_dir),
             keys_file=args.keys_file,
             log=print,
@@ -648,9 +786,11 @@ def main() -> int:
         return 1
 
     for m in result.matches:
+        matched_detail = m.image_details[m.matched_image_index]
         print("\n=== Match found ===")
         print(f"Segment: here_segment_id={m.row['here_segment_id']}  street_name={m.row['street_name']}")
-        print(f"Location: {m.row['centroid_lat']:.6f}, {m.row['centroid_lon']:.6f}")
+        print(f"Segment centroid: {m.row['centroid_lat']:.6f}, {m.row['centroid_lon']:.6f}")
+        print(f"Sign location: {matched_detail.lat:.6f}, {matched_detail.lon:.6f}  (heading {matched_detail.heading}°)")
         print(f"Sign reading: {m.reading.speed_mph} mph  ({m.reading.evidence})")
         print(f"Annotated image: {m.annotated_image}")
         print(f"Raw Street View image: {m.reading.image_path}")

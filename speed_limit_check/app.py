@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import threading
 import uuid
-from itertools import zip_longest
 from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
@@ -24,7 +23,6 @@ from find_bad_speed_limit import (
     DEFAULT_PROJECT,
     NoUsableApiKey,
     StreetViewAuthError,
-    heading_from_filename,
     load_keys_file,
     run_pipeline,
 )
@@ -67,7 +65,7 @@ def _read_criteria_from_form(form) -> dict[str, tuple[bool, float]]:
     return criteria
 
 
-def _new_job(state: str, year: str, month: str, segment_id: str | None, walk_all: bool) -> str:
+def _new_job(state: str, year: str, month: str, segment_id: str | None, walk_all: bool, walk_segment: bool) -> str:
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
         JOBS[job_id] = {
@@ -82,6 +80,7 @@ def _new_job(state: str, year: str, month: str, segment_id: str | None, walk_all
             "month": month,
             "segment_id": segment_id,
             "walk_all": walk_all,
+            "walk_segment": walk_segment,
         }
         while len(JOBS) > MAX_JOBS:
             del JOBS[next(iter(JOBS))]
@@ -111,6 +110,8 @@ def _run_job(
     criteria: dict[str, tuple[bool, float]],
     segment_id: str | None,
     walk_all: bool,
+    walk_segment: bool,
+    walk_segment_points: int,
 ) -> None:
     def log(msg: str) -> None:
         with JOBS_LOCK:
@@ -131,6 +132,8 @@ def _run_job(
             criteria=criteria,
             segment_id=segment_id,
             walk_all=walk_all,
+            walk_segment=walk_segment,
+            walk_segment_points=walk_segment_points,
             out_dir=OUT_DIR,
             keys_file=DEFAULT_KEYS_FILE,
             log=log,
@@ -175,15 +178,23 @@ def run():
     max_candidates = int(request.form.get("candidates") or 10)
     segment_id = request.form.get("segment_id", "").strip() or None
     walk_all = request.form.get("walk_all") is not None
+    walk_segment = request.form.get("walk_segment") is not None
+    try:
+        walk_segment_points = int(request.form.get("walk_segment_points") or 5)
+    except ValueError:
+        walk_segment_points = 5
     criteria = _read_criteria_from_form(request.form)
 
     if not (state and year and month):
         return render_template("error.html", message="State, year, and month are all required.", log=[])
 
-    job_id = _new_job(state, year, month, segment_id, walk_all)
+    job_id = _new_job(state, year, month, segment_id, walk_all, walk_segment)
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, state, year, month, project, dataset, max_candidates, criteria, segment_id, walk_all),
+        args=(
+            job_id, state, year, month, project, dataset, max_candidates,
+            criteria, segment_id, walk_all, walk_segment, walk_segment_points,
+        ),
         daemon=True,
     )
     thread.start()
@@ -236,30 +247,30 @@ def result_page(job_id):
 
     result = job["result"]
 
-    # Pair each candidate's captured images with the OCR snippet found in
-    # each and its compass heading, so the page shows what every attempt
-    # actually saw (not just the winning one(s)) and can plot each image's
-    # location/direction on a map in the lightbox.
+    # Each candidate's images now carry their own lat/lon (not just the
+    # segment's shared centroid), since --walk-segment can fetch them from
+    # different positions along the segment - so the page can plot each
+    # image's actual location/direction, not an approximation.
     attempts_view = []
     for a in result.attempts:
         images_js = [
-            {"url": _image_url(p), "heading": heading_from_filename(p), "snippet": snippet}
-            for p, snippet in zip_longest(a.images, a.ocr_snippets)
+            {"url": _image_url(d.path), "heading": d.heading, "snippet": d.ocr_snippet, "lat": d.lat, "lon": d.lon}
+            for d in a.image_details
         ]
-        matched_index = next((i for i, im in enumerate(images_js) if im["heading"] == a.matched_heading), 0) if a.matched_heading is not None else 0
-        # Which way to face when dropping into the interactive Street View
-        # panorama: the heading of the matched sign if there is one, else
-        # whichever heading was captured first.
-        default_heading = a.matched_heading
-        if default_heading is None and images_js:
-            default_heading = images_js[0]["heading"]
+        matched_index = a.matched_image_index if a.matched_image_index is not None else 0
+        # Where/which way to start the interactive Street View panorama:
+        # the matched sign's position if there is one, else the first
+        # position checked.
+        explore_detail = a.image_details[matched_index] if images_js else None
         attempts_view.append(
             {
                 "attempt": a,
                 "images_js": images_js,
                 "annotated_url": _image_url(a.annotated_image) if a.annotated_image else None,
                 "matched_index": matched_index,
-                "default_heading": default_heading or 0,
+                "explore_lat": explore_detail.lat if explore_detail else a.lat,
+                "explore_lon": explore_detail.lon if explore_detail else a.lon,
+                "explore_heading": (explore_detail.heading or 0) if explore_detail else 0,
             }
         )
 

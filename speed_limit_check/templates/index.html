@@ -50,10 +50,22 @@
 
   <label for="candidates">Candidates to try</label>
   <input type="number" id="candidates" name="candidates" form="run-form" value="10" min="1" max="50">
+</div>
 
-  <div class="criterion-row" style="margin-top:14px;">
+<div class="card">
+  <h3 style="margin-top:0;">Walking options</h3>
+  <div class="criterion-row">
     <input type="checkbox" id="walk_all" name="walk_all" form="run-form">
     <label for="walk_all" style="font-size:0.9rem;">Walk through all candidates (don't stop at the first readable sign - try every one and report every match)</label>
+  </div>
+  <div class="criterion-row" style="margin-top:10px;">
+    <input type="checkbox" id="walk_segment" name="walk_segment" form="run-form" onchange="onWalkSegmentChange()">
+    <label for="walk_segment" style="font-size:0.9rem;">Slow-walk each segment's full length (a sign may sit away from the centroid, which is all that's checked by default)</label>
+  </div>
+  <div id="walk-segment-points-row" style="margin-top:8px; opacity:0.45;">
+    <label for="walk_segment_points" style="display:inline; margin:0;">Positions to sample per segment</label>
+    <input type="number" id="walk_segment_points" name="walk_segment_points" form="run-form" value="5" min="2" max="20" style="width:80px; display:inline-block; margin-left:8px;" disabled>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Roughly multiplies Street View + OCR API calls by this many per segment - keep "candidates to try" modest when this is on.</p>
   </div>
 </div>
 
@@ -71,6 +83,12 @@
     const hasSegmentId = document.getElementById('segment_id').value.trim().length > 0;
     document.getElementById('criteria-card').style.opacity = hasSegmentId ? '0.45' : '1';
     document.querySelectorAll('#criteria-card input').forEach(el => { el.disabled = hasSegmentId; });
+  }
+
+  function onWalkSegmentChange() {
+    const on = document.getElementById('walk_segment').checked;
+    document.getElementById('walk-segment-points-row').style.opacity = on ? '1' : '0.45';
+    document.getElementById('walk_segment_points').disabled = !on;
   }
 </script>
 {% endblock %}
