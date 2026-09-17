@@ -209,6 +209,17 @@ through all candidates), both the CLI and the web app surface:
   the detected sign text, saved under
   `output/<STATE>_<YEAR>_<MONTH>/<here_segment_id>/`.
 
+## Resilience
+
+A transient 5xx from the Street View Static (image) API - Google's own
+server hiccupping, not a bad key or request - is retried a few times and
+then that one heading is skipped (logged, not fatal) rather than aborting
+the whole run. This matters most on a long walk-segment/side-mode run
+with many positions: one flaky image no longer throws away everything
+already fetched for the other dozens of positions. A 4xx (bad key,
+billing, or malformed request) still fails immediately without retrying,
+since that will keep failing identically on every position.
+
 ## Caching
 
 Both APIs are billed per call, so a given segment's images and OCR results

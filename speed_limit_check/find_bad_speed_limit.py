@@ -39,6 +39,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -53,6 +54,7 @@ STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metad
 STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 DEFAULT_HEADINGS = (0, 90, 180, 270)
 SIDE_MODES = ("center", "sides", "both")
+STREETVIEW_IMAGE_RETRIES = 3
 
 SPEED_TOKEN_RE = re.compile(r"^speed$", re.IGNORECASE)
 LIMIT_TOKEN_RE = re.compile(r"^limit$", re.IGNORECASE)
@@ -481,7 +483,12 @@ def fetch_streetview_images(
     named deterministically by heading (streetview_heading<N>.jpg). If a
     file already exists there (e.g. from a prior run over the same segment),
     it's reused instead of re-fetching - the API is billed per call, and the
-    image at a given lat/lon/heading never changes."""
+    image at a given lat/lon/heading never changes.
+
+    A transient 5xx from Google's own server (as opposed to a 4xx from a
+    bad key/request) is retried a few times and then just skipped, logging
+    a warning - one flaky image shouldn't abort an otherwise-successful
+    walk over dozens of positions."""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for heading in headings:
@@ -491,7 +498,18 @@ def fetch_streetview_images(
             paths.append(path)
             continue
         params = {"size": "640x640", "location": f"{lat},{lon}", "heading": heading, "fov": 90, "pitch": 0, "key": api_key}
-        resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
+        resp = None
+        for attempt in range(STREETVIEW_IMAGE_RETRIES):
+            resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
+            if resp.status_code < 500:
+                break
+            if attempt < STREETVIEW_IMAGE_RETRIES - 1:
+                log(f"    {path.name}: Street View image API returned {resp.status_code}, retrying...")
+                time.sleep(2**attempt)
+        if resp.status_code >= 500:
+            log(f"    {path.name}: Street View image API still failing after {STREETVIEW_IMAGE_RETRIES} tries "
+                f"({resp.status_code}) - skipping this heading.")
+            continue
         resp.raise_for_status()
         path.write_bytes(resp.content)
         paths.append(path)
