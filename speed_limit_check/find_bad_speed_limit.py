@@ -175,9 +175,16 @@ def parse_args() -> argparse.Namespace:
         "--headings",
         type=parse_headings,
         default=DEFAULT_HEADINGS,
-        help=f"Comma-separated compass headings (0-359) to capture per position (default: "
+        help=f"Comma-separated headings (0-359) to capture per position (default: "
         f"{','.join(str(h) for h in DEFAULT_HEADINGS)}). More headings costs more Street View + Vision "
-        f"calls per position but improves the odds of catching a sign at an odd angle.",
+        f"calls per position but improves the odds of catching a sign at an odd angle. Compass degrees "
+        f"unless --headings-relative is set.",
+    )
+    p.add_argument(
+        "--headings-relative",
+        action="store_true",
+        help="Interpret --headings relative to the road's local direction of travel (0=ahead, 90=right, "
+        "180=behind, 270=left) instead of as fixed compass degrees",
     )
     p.add_argument(
         "--keys-file",
@@ -686,6 +693,7 @@ def run_pipeline(
     check_both_sides: bool = False,
     side_offset_m: float = 20.0,
     headings: tuple[int, ...] = DEFAULT_HEADINGS,
+    headings_relative: bool = False,
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
@@ -718,10 +726,18 @@ def run_pipeline(
     road even as you walk its length - a sign on the other carriageway,
     a short perpendicular distance away, is otherwise never reached.
 
-    `headings` (default 0/90/180/270, i.e. N/E/S/W) sets which compass
-    directions get captured at every position checked. More headings costs
-    more Street View + Vision calls per position but improves the odds of
-    catching a sign at an angle that falls between the default four.
+    `headings` (default 0/90/180/270, i.e. N/E/S/W) sets which directions
+    get captured at every position checked. More headings costs more
+    Street View + Vision calls per position but improves the odds of
+    catching a sign at an angle that falls between the default four. With
+    `headings_relative=True`, each value is instead interpreted relative
+    to the road's own local direction of travel at that position (0=ahead,
+    90=right, 180=behind, 270=left) rather than as a fixed compass degree
+    - useful since "which compass direction the sign faces" varies with
+    how the road happens to run, but "the sign is off to the right ahead"
+    doesn't. The local bearing comes from the segment's line geometry
+    (computed per point when walking; the segment's overall start-to-end
+    bearing otherwise).
 
     `progress(fraction, message)` is called throughout with fraction in
     [0, 1] and a human-readable status - e.g. for a web UI progress bar.
@@ -775,7 +791,7 @@ def run_pipeline(
         tag = f"[{i + 1}/{n}]"
         seg_dir_root = out_root / safe_segment_dirname(seg_id)
 
-        coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or check_both_sides) else []
+        coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or check_both_sides or headings_relative) else []
         if walk_segment and coords:
             point_count = points_for_spacing(coords, walk_segment_spacing_m)
             base_points = sample_points_along_line(coords, point_count)  # [(lat, lon, bearing), ...]
@@ -789,16 +805,19 @@ def run_pipeline(
         # exact prior layout when a mode is off, so existing caches on disk
         # are still reused: flat seg_dir_root with neither mode, point<N>
         # with only walk_segment, so only combinations actually using a new
-        # mode get new subdirectories.
-        sample_points = []  # (lat, lon, point_prefix_or_None, side_label_or_None, base_idx)
+        # mode get new subdirectories. Each point carries the road's local
+        # bearing there, so headings_relative can rotate the requested
+        # headings to face "forward along this point's direction of travel"
+        # rather than a fixed compass direction.
+        sample_points = []  # (lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing)
         for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
             point_prefix = f"point{p_idx}" if walked else None
-            sample_points.append((p_lat, p_lon, point_prefix, "center" if check_both_sides else None, p_idx))
+            sample_points.append((p_lat, p_lon, point_prefix, "center" if check_both_sides else None, p_idx, p_bearing))
             if check_both_sides:
                 l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, side_offset_m)
                 r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, side_offset_m)
-                sample_points.append((l_lat, l_lon, point_prefix, "left", p_idx))
-                sample_points.append((r_lat, r_lon, point_prefix, "right", p_idx))
+                sample_points.append((l_lat, l_lon, point_prefix, "left", p_idx, p_bearing))
+                sample_points.append((r_lat, r_lon, point_prefix, "right", p_idx, p_bearing))
 
         mode_desc = []
         if walked:
@@ -813,7 +832,7 @@ def run_pipeline(
         num_pts = len(sample_points)
         point_span = span / num_pts
 
-        for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx) in enumerate(sample_points):
+        for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx, p_bearing) in enumerate(sample_points):
             point_base = base + pt_i * point_span
             label_bits = [b for b in (f"position {base_idx + 1}/{len(base_points)}" if walked else None, side_label) if b]
             ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
@@ -830,8 +849,9 @@ def run_pipeline(
                 point_dir = point_dir / point_prefix
             if side_label:
                 point_dir = point_dir / side_label
+            actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
             progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
-            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=headings, log=log)
+            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, log=log)
 
             for k, image_path in enumerate(image_paths):
                 progress(
@@ -913,6 +933,7 @@ def main() -> int:
             check_both_sides=args.check_both_sides,
             side_offset_m=args.side_offset_m,
             headings=args.headings,
+            headings_relative=args.headings_relative,
             out_dir=Path(args.out_dir),
             keys_file=args.keys_file,
             log=print,

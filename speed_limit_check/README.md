@@ -122,6 +122,13 @@ Additional options on the form:
   improves the odds of catching a sign at an angle that falls between the
   default four - e.g. `0,45,90,135,180,225,270,315` for 8 directions.
   Capped at 24 headings.
+- **Headings are relative to direction of travel** - off by default, so
+  headings are fixed compass degrees (0=N, 90=E, 180=S, 270=W). Check this
+  to instead rotate each heading by the road's own local bearing at the
+  position it's captured from (0=straight ahead along the road, 90=right,
+  180=behind, 270=left) - useful since a sign usually faces along the road
+  it's posted on rather than a fixed compass point, and a walked segment's
+  bearing can vary from one end to the other.
 - **Check one specific segment** - paste a `here_segment_id` (e.g.
   `here:cm:segment:412644259`) to check just that segment directly,
   bypassing the criteria entirely.
@@ -175,7 +182,8 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--walk-segment-spacing-m` | `15` | Target distance in meters between sampled positions when `--walk-segment` is set (point count is derived from this and each segment's actual length, clamped to 2-40 points) |
 | `--check-both-sides` | off | At each checked position, also probe points offset perpendicular to the road on both sides |
 | `--side-offset-m` | `20` | Perpendicular offset in meters for `--check-both-sides` |
-| `--headings` | `0,90,180,270` | Comma-separated compass headings (0-359) to capture per position (max 24) |
+| `--headings` | `0,90,180,270` | Comma-separated headings (0-359) to capture per position (max 24) - compass degrees, or relative angles if `--headings-relative` is set |
+| `--headings-relative` | off | Treat `--headings` as relative to each position's local road bearing (0=ahead, 90=right, 180=behind, 270=left) instead of fixed compass degrees |
 | `--out-dir` | `output` | Where Street View images are saved |
 | `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 

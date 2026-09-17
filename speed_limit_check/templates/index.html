@@ -56,7 +56,13 @@
   <h3 style="margin-top:0;">Image capture</h3>
   <label for="headings">Headings to capture per position (degrees, comma-separated)</label>
   <input type="text" id="headings" name="headings" form="run-form" value="{{ default_headings }}" placeholder="0,90,180,270">
-  <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">0=N, 90=E, 180=S, 270=W. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.</p>
+  <p id="headings-help" style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">0=N, 90=E, 180=S, 270=W. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.</p>
+
+  <div class="criterion-row" style="margin-top:10px;">
+    <input type="checkbox" id="headings_relative" name="headings_relative" form="run-form" onchange="onHeadingsRelativeChange()">
+    <label for="headings_relative" style="font-size:0.9rem;">Headings are relative to direction of travel, not compass degrees</label>
+  </div>
+  <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">When checked, each heading is rotated by the road's own local bearing at the position it's captured from (0=straight ahead along the road, 90=right, 180=behind, 270=left) instead of a fixed compass direction - useful since a sign usually faces along the road, not a specific compass point, and the road's bearing can vary along a walked segment.</p>
 </div>
 
 <div class="card">
@@ -112,6 +118,13 @@
     const on = document.getElementById('check_both_sides').checked;
     document.getElementById('side-offset-row').style.opacity = on ? '1' : '0.45';
     document.getElementById('side_offset_m').disabled = !on;
+  }
+
+  function onHeadingsRelativeChange() {
+    const on = document.getElementById('headings_relative').checked;
+    document.getElementById('headings-help').textContent = on
+      ? '0=straight ahead along the road, 90=right, 180=behind, 270=left, rotated per-position by the road\'s own local bearing. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.'
+      : '0=N, 90=E, 180=S, 270=W. Applies to every position checked (centroid, walked positions, and side offsets alike). More headings costs one more Street View + Vision call per position each, but improves the odds of catching a sign at an angle that falls between the default four - e.g. try "0,45,90,135,180,225,270,315" for 8 directions.';
   }
 </script>
 {% endblock %}

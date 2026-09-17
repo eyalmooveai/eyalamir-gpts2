@@ -117,6 +117,7 @@ def _run_job(
     check_both_sides: bool,
     side_offset_m: float,
     headings: tuple[int, ...],
+    headings_relative: bool,
 ) -> None:
     def log(msg: str) -> None:
         with JOBS_LOCK:
@@ -142,6 +143,7 @@ def _run_job(
             check_both_sides=check_both_sides,
             side_offset_m=side_offset_m,
             headings=headings,
+            headings_relative=headings_relative,
             out_dir=OUT_DIR,
             keys_file=DEFAULT_KEYS_FILE,
             log=log,
@@ -202,6 +204,7 @@ def run():
         headings = parse_headings(headings_raw) if headings_raw else DEFAULT_HEADINGS
     except ValueError:
         headings = DEFAULT_HEADINGS
+    headings_relative = request.form.get("headings_relative") is not None
     criteria = _read_criteria_from_form(request.form)
 
     if not (state and year and month):
@@ -213,7 +216,7 @@ def run():
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
             criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
-            check_both_sides, side_offset_m, headings,
+            check_both_sides, side_offset_m, headings, headings_relative,
         ),
         daemon=True,
     )
