@@ -177,12 +177,16 @@ def _center(box) -> tuple[float, float]:
     return (l + r) / 2, (t + b) / 2
 
 
-def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: Path) -> Optional[SignReading]:
+def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: Path) -> tuple[Optional[SignReading], str]:
     """Look for a 'SPEED LIMIT NN' sign in the image via OCR.
 
     Prefers a number token that sits directly below SPEED/LIMIT word tokens
     (the standard US sign layout) over a bare regex match on the whole page,
     since street scenes are full of other numbers (addresses, other signs).
+
+    Returns (reading_or_None, raw_ocr_text) - the raw text is returned even
+    on a miss, so callers can log what Vision actually saw for debugging
+    (e.g. no sign in frame at all, vs. a sign OCR'd in an unexpected layout).
     """
     content = image_path.read_bytes()
     with Image.open(image_path) as im:
@@ -190,10 +194,10 @@ def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: P
     response = vision_client.text_detection(image=vision.Image(content=content))
     if response.error.message:
         print(f"  Vision API error on {image_path.name}: {response.error.message}", file=sys.stderr)
-        return None
+        return None, ""
     annotations = response.text_annotations
     if not annotations:
-        return None
+        return None, ""
 
     words = annotations[1:]  # [0] is the full-text block
     speed_boxes = [_bbox(w.bounding_poly.vertices) for w in words if SPEED_TOKEN_RE.match(w.description)]
@@ -221,17 +225,18 @@ def find_sign_in_image(vision_client: vision.ImageAnnotatorClient, image_path: P
                     best = SignReading(speed, image_path, (l, t, r, b), f"OCR found '{text}' below a SPEED/LIMIT word on the sign")
                     best_dist = dist
 
-    if best:
-        return best
-
     full_text = annotations[0].description
+
+    if best:
+        return best, full_text
+
     m = INLINE_SIGN_RE.search(full_text)
     if m:
         speed = int(m.group(1))
         if 15 <= speed <= 80:
-            return SignReading(speed, image_path, (0, 0, 0, 0), f"OCR text contained 'SPEED LIMIT {speed}' (no bounding box available)")
+            return SignReading(speed, image_path, (0, 0, 0, 0), f"OCR text contained 'SPEED LIMIT {speed}' (no bounding box available)"), full_text
 
-    return None
+    return None, full_text
 
 
 def save_annotated_image(reading: SignReading, out_path: Path) -> None:
@@ -330,7 +335,9 @@ def run_pipeline(
 
         reading = None
         for image_path in image_paths:
-            reading = find_sign_in_image(vision_client, image_path)
+            reading, ocr_text = find_sign_in_image(vision_client, image_path)
+            snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
+            log(f"    {image_path.name}: OCR saw: {snippet}")
             if reading:
                 break
 
