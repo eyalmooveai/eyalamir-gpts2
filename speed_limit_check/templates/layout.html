@@ -117,6 +117,11 @@
       overflow-y: auto;
       padding: 40px 20px;
     }
+    /* An ID selector beats the browser's built-in `[hidden] { display: none }`
+       rule, so #lightbox{display:flex} above was overriding the `hidden`
+       attribute and showing the modal on every page load regardless of it.
+       This restores it at matching specificity. */
+    #lightbox[hidden] { display: none; }
     .lightbox-inner { max-width: 1000px; width: 100%; display: flex; flex-direction: column; gap: 12px; }
     .lightbox-topbar { display: flex; justify-content: space-between; align-items: center; color: #fff; font-size: 0.85rem; gap: 12px; }
     .lightbox-close, .lightbox-arrow {
