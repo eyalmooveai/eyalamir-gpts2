@@ -1,0 +1,102 @@
+{% extends "layout.html" %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / Speed-Limits Quality</p>{% endblock %}
+{% block heading %}Speed-Limits Quality{% endblock %}
+{% block subtitle %}Nationwide inferred speed-limit quality vs. OSM/HERE/observed speeds{% endblock %}
+{% block content %}
+<div class="card">
+  <a href="/sign-checker" class="btn-secondary" style="text-decoration:none; display:inline-block;">Open the Street View Sign Checker &rarr;</a>
+  <p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Checks one segment's real-world sign by reading it in Street View imagery. The metrics below are a nationwide, table-only view - no imagery involved.</p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Filters</h3>
+  <form method="get" action="/speed-limits">
+    <div class="row-2">
+      <div>
+        <label for="year">Year</label>
+        <input type="text" id="year" name="year" value="{{ filters.year }}" placeholder="2026" required>
+      </div>
+      <div>
+        <label for="month">Month</label>
+        <input type="text" id="month" name="month" value="{{ filters.month }}" placeholder="08" required>
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="param1">param1 - mph gap counted as a mismatch</label>
+        <input type="number" id="param1" name="param1" value="{{ filters.param1 }}" step="1" min="0">
+      </div>
+      <div>
+        <label for="param2">param2 - mph counted as implausibly fast</label>
+        <input type="number" id="param2" name="param2" value="{{ filters.param2 }}" step="1" min="0">
+      </div>
+    </div>
+    <label for="states">States (comma-separated, blank = all 50)</label>
+    <input type="text" id="states" name="states" value="{{ filters.states }}" placeholder="e.g. NC,SC,VA" list="state-list">
+    <datalist id="state-list">
+      {% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}
+    </datalist>
+    <label for="fc">Functional class(es) (comma-separated, blank = all)</label>
+    <input type="text" id="fc" name="fc" value="{{ filters.functional_classes }}" placeholder="e.g. 1,2,3">
+    <label for="group_by">Break down by</label>
+    <select id="group_by" name="group_by">
+      <option value="none" {% if filters.group_by == 'none' %}selected{% endif %}>Nothing - one nationwide (or filtered) number</option>
+      <option value="state" {% if filters.group_by == 'state' %}selected{% endif %}>State</option>
+      <option value="functional_class" {% if filters.group_by == 'functional_class' %}selected{% endif %}>Functional class</option>
+      <option value="state,functional_class" {% if filters.group_by == 'state,functional_class' %}selected{% endif %}>State and functional class</option>
+    </select>
+    <button type="submit">Run metrics</button>
+  </form>
+</div>
+
+{% if error %}
+  <div class="card">
+    <span class="badge err">Error</span>
+    <pre class="log">{{ error }}</pre>
+  </div>
+{% endif %}
+
+{% if metrics %}
+  <div class="card">
+    <h3 style="margin-top:0;">
+      {% if filters.states or filters.functional_classes %}Filtered{% else %}Nationwide{% endif %}
+      summary - {{ "{:,}".format(metrics.total_segments) }} segments
+    </h3>
+    <div class="stat-grid">
+      {% for m in quality_metric_defs %}
+        <div class="stat-tile">
+          <div class="stat-value">{{ "%.1f"|format(metrics["pct_" + m.key]) }}%</div>
+          <div class="stat-label">{{ m.label }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% elif has_query and not error %}
+  <div class="card">
+    <span class="badge warn">No data</span>
+    <p>No segments matched these filters for {{ filters.year }}-{{ filters.month }}.</p>
+  </div>
+{% endif %}
+
+{% if breakdown %}
+  <div class="card">
+    <h3 style="margin-top:0;">Breakdown</h3>
+    <table>
+      <tr>
+        {% if filters.group_by in ('state', 'state,functional_class') %}<th>State</th>{% endif %}
+        {% if filters.group_by in ('functional_class', 'state,functional_class') %}<th>Functional class</th>{% endif %}
+        <th>Segments</th>
+        {% for m in quality_metric_defs %}<th>{{ m.label }}</th>{% endfor %}
+      </tr>
+      {% for row in breakdown %}
+        <tr>
+          {% if filters.group_by in ('state', 'state,functional_class') %}<td>{{ row.state }}</td>{% endif %}
+          {% if filters.group_by in ('functional_class', 'state,functional_class') %}<td>{{ row.functional_class }}</td>{% endif %}
+          <td>{{ "{:,}".format(row.total_segments) }}</td>
+          {% for m in quality_metric_defs %}<td>{{ "%.1f"|format(row["pct_" + m.key]) }}%</td>{% endfor %}
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

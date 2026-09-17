@@ -208,13 +208,39 @@
       font-size: 0.85rem;
       white-space: pre-wrap;
     }
+
+    .breadcrumb { font-size: 0.82rem; color: var(--muted); margin-bottom: 10px; }
+    .breadcrumb a { color: var(--muted); text-decoration: none; }
+    .breadcrumb a:hover { text-decoration: underline; }
+
+    .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+    .model-card {
+      display: block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .model-card.active { border-color: var(--accent); cursor: pointer; }
+    .model-card.active:hover { border-width: 2px; padding: 15px; }
+    .model-card.placeholder { opacity: 0.55; cursor: default; }
+    .model-card h3 { margin: 0 0 4px; font-size: 1rem; }
+    .model-card p { margin: 0; font-size: 0.8rem; color: var(--muted); }
+
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+    .stat-tile { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+    .stat-tile .stat-value { font-size: 1.7rem; font-weight: 700; line-height: 1.15; }
+    .stat-tile .stat-label { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
   </style>
   {% block extra_head %}{% endblock %}
 </head>
 <body>
   <div class="wrap">
-    <h1>Speed Limit Sign Checker</h1>
-    <p class="subtitle">calc_out.speed_limits_&lt;STATE&gt;_&lt;YEAR&gt;_&lt;MONTH&gt;_details vs. Street View</p>
+    {% block breadcrumb %}{% endblock %}
+    <h1>{% block heading %}Speed Limit Sign Checker{% endblock %}</h1>
+    <p class="subtitle">{% block subtitle %}calc_out.speed_limits_&lt;STATE&gt;_&lt;YEAR&gt;_&lt;MONTH&gt;_details vs. Street View{% endblock %}</p>
     {% block content %}{% endblock %}
   </div>
 </body>

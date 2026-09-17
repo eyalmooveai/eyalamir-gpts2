@@ -3,8 +3,9 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 {% endblock %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / <a href="/speed-limits">Speed-Limits Quality</a> / Sign Checker</p>{% endblock %}
 {% block content %}
-<p><a href="/">&larr; Run another query</a></p>
+<p><a href="/sign-checker">&larr; Run another query</a></p>
 
 {% if result.matches %}
   <div class="card">

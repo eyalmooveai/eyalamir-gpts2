@@ -1,6 +1,7 @@
 {% extends "layout.html" %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / <a href="/speed-limits">Speed-Limits Quality</a> / Sign Checker</p>{% endblock %}
 {% block content %}
-<p><a href="/">&larr; Back</a></p>
+<p><a href="/sign-checker">&larr; Back</a></p>
 <div class="card">
   <span class="badge err">Error</span>
   <pre class="log">{{ message }}</pre>

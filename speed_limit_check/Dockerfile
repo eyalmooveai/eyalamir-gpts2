@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY find_bad_speed_limit.py app.py ./
+COPY find_bad_speed_limit.py quality_metrics.py app.py ./
 COPY templates/ templates/
 
 # Cloud Run injects PORT; gunicorn binds to it. One worker (the app keeps

@@ -1,9 +1,23 @@
-# Speed limit sign checker
+# Archimedes
 
-Finds road segments in `calc_out.speed_limits_<STATE>_<YEAR>_<MONTH>_details`
-where the inferred speed limit disagrees sharply with both HERE and OSM (while
-HERE and OSM agree with each other), then tries to verify the real speed
-limit by reading a sign in Google Street View imagery at that location.
+MooveAI's hub for data quality tools, currently covering speed limits (one
+app, one deployment - see `app.py`):
+
+- **`/`** - the hub itself: a catalog of MooveAI's models, linking to
+  whichever ones have tools built here (today, just Speed Limits).
+- **`/speed-limits`** - **Speed-Limits Quality**: nationwide BigQuery
+  metrics on how often the inferred speed limit disagrees with OSM, HERE,
+  observed average speed, or freeflow speed (or is itself implausibly
+  fast), with optional state/functional_class filtering and breakdown.
+  See "Speed-Limits Quality" below.
+- **`/sign-checker`** - the original tool this repo started as: finds
+  road segments in `calc_out.speed_limits_<STATE>_<YEAR>_<MONTH>_details`
+  where the inferred speed limit disagrees sharply with both HERE and OSM
+  (while HERE and OSM agree with each other), then tries to verify the
+  real speed limit by reading a sign in Google Street View imagery at
+  that location. Linked from the Speed-Limits Quality page. Most of this
+  README (Query/Setup/Usage/Output/Resilience/Caching/How sign reading
+  works) is about this tool specifically.
 
 ## Query
 
@@ -243,6 +257,41 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 
 The CLI always uses the default selection criteria - per-criterion
 enable/threshold customization is currently web-UI only.
+
+## Speed-Limits Quality
+
+`/speed-limits` is a nationwide, no-imagery, table-only counterpart to the
+sign checker - instead of verifying one segment's actual sign, it reports
+what fraction of *all* road segments show a large enough mismatch to be
+worth caring about, computed directly by BigQuery aggregate queries
+against `calc_out.speed_limits_US_<YEAR>_<MONTH>_details` (the nationwide
+version of the same table family the sign checker queries per-state).
+
+Six metrics, each the percent of segments meeting a condition:
+
+| Metric | Condition |
+|---|---|
+| vs. OSM | `abs(speed_limit_infer_mph_corrected - speed_limit_osm_mph) >= param1` |
+| vs. HERE | `abs(speed_limit_infer_mph_corrected - speed_limit_here_mph) >= param1` |
+| vs. observed avg speed | `abs(speed_limit_infer_mph_corrected - speed_AVG_mph) >= param1` |
+| vs. freeflow speed | `abs(speed_limit_infer_mph_corrected - freeflow_mph) >= param1` |
+| Observed avg speed implausible | `speed_AVG_mph > param2` |
+| Freeflow speed implausible | `freeflow_mph > param2` |
+
+`param1` (default 10 mph) and `param2` (default 80 mph) are both
+adjustable on the page. Optional filters narrow the same query to
+specific states and/or `functional_class` values (comma-separated;
+blank = everything); "Break down by" additionally groups the results by
+state, functional_class, or both, showing a breakdown table under the
+always-shown nationwide (or filtered-nationwide) summary tiles. Every
+run is exactly one or two BigQuery queries (the top-line summary, plus
+one more only when a breakdown is requested) - no per-segment iteration
+or Street View/Vision calls, so it's fast and comparatively cheap even
+though it scans the full nationwide table (tens of millions of rows;
+under 1.5GB processed per query in practice).
+
+Filters are plain GET query parameters (`/speed-limits?year=2026&month=08&param1=15&states=NC,SC&group_by=state`),
+so a particular view is directly linkable/bookmarkable.
 
 ## Output
 

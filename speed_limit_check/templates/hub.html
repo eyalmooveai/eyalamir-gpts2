@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{% block heading %}Archimedes{% endblock %}
+{% block subtitle %}MooveAI's hub for data quality tools and models{% endblock %}
+{% block content %}
+<div class="card">
+  <h3 style="margin-top:0;">Models</h3>
+  <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Click a model to open its quality tools. Greyed-out ones aren't built yet.</p>
+  <div class="model-grid">
+    {% for m in models %}
+      {% if m.href %}
+        <a class="model-card active" href="{{ m.href }}">
+          <h3>{{ m.name }}</h3>
+          <p>{{ m.description }}</p>
+        </a>
+      {% else %}
+        <div class="model-card placeholder">
+          <h3>{{ m.name }}</h3>
+          <p>{{ m.description }}</p>
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
