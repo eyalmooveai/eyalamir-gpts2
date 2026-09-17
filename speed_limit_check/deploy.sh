@@ -9,8 +9,13 @@
 #   INVOKER_EMAIL  Google account allowed to use the deployed app (roles/run.invoker)
 #
 # Optional:
-#   BQ_PROJECT_ID  GCP project that owns the speed_limits_..._details BigQuery
-#                  table, if different from PROJECT_ID (default: moove-platform-testing-data)
+#   BQ_PROJECT_ID    GCP project that owns the speed_limits_..._details
+#                    BigQuery table, if different from PROJECT_ID
+#                    (default: moove-platform-testing-data)
+#   BUCKET_LOCATION  GCS bucket location, e.g. "US" (a multi-region) or a
+#                    single region - separate from REGION because Cloud
+#                    Run needs a specific region (no "US") while a GCS
+#                    bucket can use a broader multi-region (default: REGION)
 #
 # Usage:
 #   PROJECT_ID=my-project REGION=us-central1 BUCKET_NAME=my-bucket \
@@ -27,6 +32,7 @@ set -euo pipefail
 : "${MAPS_API_KEY:?Set MAPS_API_KEY to your Google Maps Platform API key}"
 : "${INVOKER_EMAIL:?Set INVOKER_EMAIL to the Google account that should be allowed to use the deployed app}"
 BQ_PROJECT_ID="${BQ_PROJECT_ID:-moove-platform-testing-data}"
+BUCKET_LOCATION="${BUCKET_LOCATION:-$REGION}"
 
 if ! command -v gcloud >/dev/null 2>&1; then
   echo "gcloud CLI not found - install the Google Cloud SDK first: https://cloud.google.com/sdk/docs/install" >&2
@@ -59,7 +65,7 @@ echo "-- GCS cache bucket --"
 if gcloud storage buckets describe "gs://$BUCKET_NAME" >/dev/null 2>&1; then
   echo "gs://$BUCKET_NAME already exists, skipping creation."
 else
-  gcloud storage buckets create "gs://$BUCKET_NAME" --location="$REGION"
+  gcloud storage buckets create "gs://$BUCKET_NAME" --location="$BUCKET_LOCATION"
 fi
 
 echo "-- Maps API key secret --"
