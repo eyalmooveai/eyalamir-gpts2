@@ -1,0 +1,44 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <form id="run-form" action="/run" method="post" onsubmit="onSubmit()">
+    <div class="row">
+      <div>
+        <label for="state">State</label>
+        <input type="text" id="state" name="state" placeholder="NC" maxlength="2" required>
+      </div>
+      <div>
+        <label for="year">Year</label>
+        <input type="text" id="year" name="year" placeholder="2026" required>
+      </div>
+      <div>
+        <label for="month">Month</label>
+        <input type="text" id="month" name="month" placeholder="08" required>
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="project">BigQuery project</label>
+        <input type="text" id="project" name="project" value="{{ default_project }}">
+      </div>
+      <div>
+        <label for="dataset">Dataset</label>
+        <input type="text" id="dataset" name="dataset" value="{{ default_dataset }}">
+      </div>
+    </div>
+    <label for="candidates">Candidates to try (largest mismatch first)</label>
+    <input type="number" id="candidates" name="candidates" value="10" min="1" max="50">
+
+    <button type="submit" id="submit-btn">Find a mismatched sign</button>
+    <div id="status">Querying BigQuery, fetching Street View imagery, and running OCR&hellip; this can take up to a minute.</div>
+  </form>
+</div>
+
+<script>
+  function onSubmit() {
+    document.getElementById('submit-btn').disabled = true;
+    document.getElementById('submit-btn').textContent = 'Running…';
+    document.getElementById('status').style.display = 'block';
+  }
+</script>
+{% endblock %}

@@ -60,11 +60,28 @@ ranked list until one works.
 
 ## Usage
 
+### Web app
+
+```bash
+python app.py
+```
+
+Then open **http://127.0.0.1:5050** in a browser. Fill in state/year/month
+(project/dataset default to `moove-platform-testing-data`/`calc_out`, and
+can be overridden per run) and submit - the page shows the matched segment's
+full row, the sign-read speed, the annotated Street View image with the
+sign boxed, all captured headings, and the list of candidates tried. Runs
+on localhost only; a single request can take up to a minute since it's
+doing the BigQuery query plus several Street View + Vision calls
+synchronously.
+
+### CLI
+
 ```bash
 python find_bad_speed_limit.py --state NC --year 2026 --month 08
 ```
 
-Options:
+Options (shared by both `app.py` and the CLI where applicable):
 
 | Flag | Default | Description |
 |---|---|---|
@@ -76,12 +93,13 @@ Options:
 
 ## Output
 
-For the first segment where a sign can be read, the script prints:
+For the first segment where a sign can be read, both the CLI and the web
+app surface:
 
 - The segment's location and full BigQuery row.
 - The speed limit read off the sign, and how it was found (OCR match).
-- Paths to the raw Street View images and an annotated copy with a red box
-  around the detected sign text, saved under
+- The raw Street View images and an annotated copy with a red box around
+  the detected sign text, saved under
   `output/<STATE>_<YEAR>_<MONTH>/<here_segment_id>/`.
 
 ## How sign reading works

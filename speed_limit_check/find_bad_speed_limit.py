@@ -81,6 +81,13 @@ def table_name(state: str, year: str, month: str) -> str:
     return f"speed_limits_{state.upper()}_{year}_{month_padded}_details"
 
 
+def safe_segment_dirname(segment_id: str) -> str:
+    """here_segment_id values look like 'here:cm:segment:412644259' - ':' is
+    awkward in file paths (esp. Windows) and needs escaping in URLs, so swap
+    it out for a plain filesystem/URL-safe directory name."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", segment_id)
+
+
 def load_keys_file(path: Path) -> None:
     """Load KEY=VALUE lines from `path` into os.environ, without overriding
     anything already set in the environment. Blank lines and lines starting
@@ -236,55 +243,89 @@ def save_annotated_image(reading: SignReading, out_path: Path) -> None:
         im.save(out_path)
 
 
-def print_row(row: bigquery.table.Row) -> None:
+def print_row(row: dict) -> None:
     for key, value in row.items():
         print(f"  {key}: {value}")
 
 
-def main() -> int:
-    args = parse_args()
+def _jsonable_row(row: bigquery.table.Row) -> dict:
+    return {k: v for k, v in row.items() if k != "geom"}
 
-    load_keys_file(args.keys_file)
+
+class NoUsableApiKey(RuntimeError):
+    pass
+
+
+@dataclasses.dataclass
+class CandidateAttempt:
+    index: int
+    segment_id: str
+    lat: float
+    lon: float
+    status: str  # "no_coverage" | "no_sign_read" | "match"
+    note: str = ""
+
+
+@dataclasses.dataclass
+class PipelineResult:
+    table: str
+    project: str
+    dataset: str
+    attempts: list[CandidateAttempt]
+    match_row: Optional[dict] = None
+    match_reading: Optional[SignReading] = None
+    match_annotated_image: Optional[Path] = None
+    match_all_images: Optional[list[Path]] = None
+
+
+def run_pipeline(
+    state: str,
+    year: str,
+    month: str,
+    project: str = DEFAULT_PROJECT,
+    dataset: str = DEFAULT_DATASET,
+    max_candidates: int = 10,
+    out_dir: Path = Path("output"),
+    keys_file: Path = DEFAULT_KEYS_FILE,
+    log=lambda msg: None,
+) -> PipelineResult:
+    """Core pipeline, shared by the CLI and the web app: query BigQuery for
+    mismatched segments, then walk candidates trying to read a sign at each
+    via Street View + Vision OCR. Raises NoUsableApiKey / StreetViewAuthError
+    on setup or auth problems; returns normally (with match_row=None) if no
+    candidate yields a readable sign."""
+    load_keys_file(keys_file)
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     if not api_key or api_key == "your-key-here":
-        print(
-            f"ERROR: no usable GOOGLE_MAPS_API_KEY. Set it in the environment, or add a line "
-            f"GOOGLE_MAPS_API_KEY=... to {args.keys_file}.",
-            file=sys.stderr,
+        raise NoUsableApiKey(
+            f"No usable GOOGLE_MAPS_API_KEY. Set it in the environment, or add a line "
+            f"GOOGLE_MAPS_API_KEY=... to {keys_file}."
         )
-        return 1
 
-    table = table_name(args.state, args.year, args.month)
-    print(f"Querying `{args.project}.{args.dataset}.{table}` ...")
-    candidates = fetch_candidates(args.project, args.dataset, table, args.candidates)
+    table = table_name(state, year, month)
+    log(f"Querying `{project}.{dataset}.{table}` ...")
+    candidates = fetch_candidates(project, dataset, table, max_candidates)
+    result = PipelineResult(table=table, project=project, dataset=dataset, attempts=[])
     if not candidates:
-        print("No road segments matched the mismatch criteria.")
-        return 0
-    print(f"Found {len(candidates)} candidate segment(s); trying them in order of largest mismatch.\n")
+        log("No road segments matched the mismatch criteria.")
+        return result
+    log(f"Found {len(candidates)} candidate segment(s); trying them in order of largest mismatch.")
 
     vision_client = vision.ImageAnnotatorClient()
-    out_root = Path(args.out_dir) / f"{args.state.upper()}_{args.year}_{args.month}"
+    out_root = Path(out_dir) / f"{state.upper()}_{year}_{month}"
 
     for i, row in enumerate(candidates):
         lat, lon = row["centroid_lat"], row["centroid_lon"]
-        print(f"[{i + 1}/{len(candidates)}] here_segment_id={row['here_segment_id']} at ({lat:.6f}, {lon:.6f})")
+        segment_id = row["here_segment_id"]
+        log(f"[{i + 1}/{len(candidates)}] here_segment_id={segment_id} at ({lat:.6f}, {lon:.6f})")
 
-        try:
-            coverage = streetview_coverage(lat, lon, api_key)
-        except StreetViewAuthError as e:
-            print(f"\nERROR: {e}", file=sys.stderr)
-            print(
-                "This means the API key, billing, or API enablement is broken - not that "
-                "there's no imagery. Check that GOOGLE_MAPS_API_KEY is a real key with the "
-                "Street View Static API enabled and billing active on its project.",
-                file=sys.stderr,
-            )
-            return 1
+        coverage = streetview_coverage(lat, lon, api_key)  # StreetViewAuthError propagates to caller
         if not coverage:
-            print("  No Street View coverage here, trying next candidate.\n")
+            result.attempts.append(CandidateAttempt(i + 1, segment_id, lat, lon, "no_coverage"))
+            log("  No Street View coverage here, trying next candidate.")
             continue
 
-        seg_dir = out_root / str(row["here_segment_id"])
+        seg_dir = out_root / safe_segment_dirname(segment_id)
         image_paths = fetch_streetview_images(lat, lon, api_key, seg_dir)
 
         reading = None
@@ -294,25 +335,69 @@ def main() -> int:
                 break
 
         if not reading:
-            print("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.\n")
+            result.attempts.append(CandidateAttempt(i + 1, segment_id, lat, lon, "no_sign_read"))
+            log("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.")
             continue
 
         annotated_path = seg_dir / "sign_detected.jpg"
         save_annotated_image(reading, annotated_path)
 
-        print("\n=== Match found ===")
-        print(f"Segment: here_segment_id={row['here_segment_id']}  street_name={row['street_name']}")
-        print(f"Location: {lat:.6f}, {lon:.6f}")
-        print(f"Sign reading: {reading.speed_mph} mph  ({reading.evidence})")
-        print(f"Annotated image: {annotated_path}")
-        print(f"Raw Street View image: {reading.image_path}")
-        print("\nFull row data:")
-        print_row(row)
-        print(f"\nRow as JSON: {json.dumps({k: (v if not hasattr(v, 'isoformat') else v.isoformat()) for k, v in row.items() if k != 'geom'}, default=str)}")
-        return 0
+        result.attempts.append(CandidateAttempt(i + 1, segment_id, lat, lon, "match", reading.evidence))
+        result.match_row = _jsonable_row(row)
+        result.match_row["centroid_lat"] = lat
+        result.match_row["centroid_lon"] = lon
+        result.match_reading = reading
+        result.match_annotated_image = annotated_path
+        result.match_all_images = image_paths
+        log(f"Match found: {reading.speed_mph} mph on segment {segment_id}.")
+        return result
 
-    print("Exhausted all candidates without finding a readable speed limit sign.")
-    return 1
+    log("Exhausted all candidates without finding a readable speed limit sign.")
+    return result
+
+
+def main() -> int:
+    args = parse_args()
+
+    try:
+        result = run_pipeline(
+            args.state,
+            args.year,
+            args.month,
+            project=args.project,
+            dataset=args.dataset,
+            max_candidates=args.candidates,
+            out_dir=Path(args.out_dir),
+            keys_file=args.keys_file,
+            log=print,
+        )
+    except NoUsableApiKey as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    except StreetViewAuthError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        print(
+            "This means the API key, billing, or API enablement is broken - not that "
+            "there's no imagery. Check that GOOGLE_MAPS_API_KEY is a real key with the "
+            "Street View Static API enabled and billing active on its project.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not result.match_row:
+        return 1
+
+    reading = result.match_reading
+    print("\n=== Match found ===")
+    print(f"Segment: here_segment_id={result.match_row['here_segment_id']}  street_name={result.match_row['street_name']}")
+    print(f"Location: {result.match_row['centroid_lat']:.6f}, {result.match_row['centroid_lon']:.6f}")
+    print(f"Sign reading: {reading.speed_mph} mph  ({reading.evidence})")
+    print(f"Annotated image: {result.match_annotated_image}")
+    print(f"Raw Street View image: {reading.image_path}")
+    print("\nFull row data:")
+    print_row(result.match_row)
+    print(f"\nRow as JSON: {json.dumps(result.match_row, default=str)}")
+    return 0
 
 
 if __name__ == "__main__":

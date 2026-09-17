@@ -1,0 +1,14 @@
+{% extends "layout.html" %}
+{% block content %}
+<p><a href="/">&larr; Back</a></p>
+<div class="card">
+  <span class="badge err">Error</span>
+  <pre class="log">{{ message }}</pre>
+</div>
+{% if log %}
+<div class="card">
+  <h3 style="margin-top:0;">Run log</h3>
+  <pre class="log">{{ log|join("\n") }}</pre>
+</div>
+{% endif %}
+{% endblock %}
