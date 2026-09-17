@@ -354,6 +354,25 @@ browser polls `/status/<job_id>`):
   caps the service at one run at a time, which matches how it's meant to
   be used anyway.
 
+### Scripted (recommended)
+
+`deploy.sh` runs every step below (APIs, bucket, secret, service account,
+IAM roles, deploy, invoker grant) in one shot, and is safe to re-run -
+existing resources are detected and left alone rather than recreated.
+Set the required environment variables and run it from the
+`speed_limit_check/` directory:
+
+```bash
+PROJECT_ID=your-deploy-project-id REGION=us-central1 BUCKET_NAME=your-bucket-name MAPS_API_KEY=AIza...your-real-key... INVOKER_EMAIL=you@example.com ./deploy.sh
+```
+
+`BQ_PROJECT_ID` is also settable if the `speed_limits_..._details` table
+lives in a different project than `PROJECT_ID` (defaults to
+`moove-platform-testing-data`). See the top of `deploy.sh` for the full
+list of variables. The manual step-by-step version below is exactly what
+it runs, useful if you want to understand or customize any individual
+piece.
+
 ### 1. Build and enable APIs
 
 ```bash
