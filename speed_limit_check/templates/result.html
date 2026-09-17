@@ -84,6 +84,7 @@
     <div class="lightbox-stage">
       <button type="button" class="lightbox-arrow prev" id="lb-prev" onclick="lbPrev()" aria-label="Previous image">&#8249;</button>
       <img id="lb-img" src="" alt="Street View image">
+      <div id="lb-error"></div>
       <button type="button" class="lightbox-arrow next" id="lb-next" onclick="lbNext()" aria-label="Next image">&#8250;</button>
     </div>
     <div class="lightbox-bottom">
@@ -102,24 +103,47 @@
   let LB_LAT = 0, LB_LON = 0;
   let lbMap = null;
   let lbMarker = null;
+  let LB_OPEN_COUNT = 0;
+
+  function showLightboxError(msg) {
+    const err = document.getElementById('lb-error');
+    err.textContent = msg;
+    err.style.display = 'block';
+    document.getElementById('lb-img').style.display = 'none';
+    console.error('[lightbox]', msg);
+  }
+
+  function clearLightboxError() {
+    document.getElementById('lb-error').style.display = 'none';
+    document.getElementById('lb-img').style.display = 'block';
+  }
 
   function openLightbox(galleryEl, index) {
+    LB_OPEN_COUNT += 1;
+    clearLightboxError();
+    document.getElementById('lightbox').hidden = false;
+    document.getElementById('lb-counter').textContent = `open #${LB_OPEN_COUNT}`;
+
+    if (!galleryEl) {
+      showLightboxError('openLightbox() was called with no gallery element (this.closest(".candidate-gallery") returned null). This should be impossible from a thumbnail click - if you did not click a thumbnail to get here, that itself is the bug to report.');
+      return;
+    }
+    const raw = galleryEl.dataset.images;
     let images;
     try {
-      images = JSON.parse(galleryEl.dataset.images || '[]');
+      images = JSON.parse(raw || '[]');
     } catch (err) {
-      console.error('Lightbox: failed to parse data-images', err, galleryEl.dataset.images);
-      images = [];
+      showLightboxError('Failed to parse image data as JSON.\n\nError: ' + err.message + '\n\nRaw data (first 500 chars):\n' + String(raw).slice(0, 500));
+      return;
     }
     if (!Array.isArray(images) || images.length === 0) {
-      console.error('Lightbox: no images to show for this candidate', galleryEl);
+      showLightboxError('Parsed image data is empty or not a list.\n\nParsed: ' + JSON.stringify(images) + '\n\nRaw data (first 500 chars):\n' + String(raw).slice(0, 500));
       return;
     }
     LB_IMAGES = images;
     LB_LAT = parseFloat(galleryEl.dataset.lat);
     LB_LON = parseFloat(galleryEl.dataset.lon);
     LB_INDEX = Math.min(Math.max(index, 0), LB_IMAGES.length - 1);
-    document.getElementById('lightbox').hidden = false;
     renderLightbox();
   }
 
@@ -157,9 +181,10 @@
   function renderLightbox() {
     const item = LB_IMAGES[LB_INDEX];
     if (!item) {
-      console.error('Lightbox: no item at index', LB_INDEX, 'of', LB_IMAGES);
+      showLightboxError(`No image at index ${LB_INDEX} (have ${LB_IMAGES.length} image(s)).\n\nLB_IMAGES: ` + JSON.stringify(LB_IMAGES));
       return;
     }
+    clearLightboxError();
     document.getElementById('lb-img').src = item.url;
     document.getElementById('lb-snippet').textContent = item.snippet || '';
     document.getElementById('lb-heading-label').textContent =
@@ -169,11 +194,11 @@
     document.getElementById('lb-next').disabled = LB_INDEX >= LB_IMAGES.length - 1;
 
     if (typeof L === 'undefined') {
-      console.error('Lightbox: Leaflet (L) did not load - check network access to cdnjs.cloudflare.com');
+      showLightboxError('The map library (Leaflet, loaded from cdnjs.cloudflare.com) did not load. This is usually an ad/content blocker, or no internet access from this machine. The image above should still be visible even though the map cannot load.');
       return;
     }
     if (Number.isNaN(LB_LAT) || Number.isNaN(LB_LON)) {
-      console.error('Lightbox: invalid lat/lon', LB_LAT, LB_LON);
+      console.error('[lightbox] invalid lat/lon', LB_LAT, LB_LON);
       return;
     }
     try {
@@ -189,7 +214,7 @@
       lbMarker = L.marker([LB_LAT, LB_LON], { icon: arrowIcon(item.heading) }).addTo(lbMap);
       setTimeout(() => lbMap.invalidateSize(), 0);
     } catch (err) {
-      console.error('Lightbox: failed to render map', err);
+      console.error('[lightbox] failed to render map', err);
     }
   }
 
