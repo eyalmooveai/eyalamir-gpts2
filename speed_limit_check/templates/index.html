@@ -67,6 +67,16 @@
     <input type="number" id="walk_segment_points" name="walk_segment_points" form="run-form" value="5" min="2" max="20" style="width:80px; display:inline-block; margin-left:8px;" disabled>
     <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Roughly multiplies Street View + OCR API calls by this many per segment - keep "candidates to try" modest when this is on.</p>
   </div>
+
+  <div class="criterion-row" style="margin-top:14px;">
+    <input type="checkbox" id="check_both_sides" name="check_both_sides" form="run-form" onchange="onCheckBothSidesChange()">
+    <label for="check_both_sides" style="font-size:0.9rem;">Also check both sides of the road (offset perpendicular to it) - a sign may be on a divided road's other carriageway, which centerline sampling alone can't reach</label>
+  </div>
+  <div id="side-offset-row" style="margin-top:8px; opacity:0.45;">
+    <label for="side_offset_m" style="display:inline; margin:0;">Offset distance (meters)</label>
+    <input type="number" id="side_offset_m" name="side_offset_m" form="run-form" value="20" min="1" max="200" step="1" style="width:80px; display:inline-block; margin-left:8px;" disabled>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Roughly triples API calls per position checked (center + left + right). If the other carriageway still isn't reached, try a larger offset.</p>
+  </div>
 </div>
 
 <div class="card">
@@ -89,6 +99,12 @@
     const on = document.getElementById('walk_segment').checked;
     document.getElementById('walk-segment-points-row').style.opacity = on ? '1' : '0.45';
     document.getElementById('walk_segment_points').disabled = !on;
+  }
+
+  function onCheckBothSidesChange() {
+    const on = document.getElementById('check_both_sides').checked;
+    document.getElementById('side-offset-row').style.opacity = on ? '1' : '0.45';
+    document.getElementById('side_offset_m').disabled = !on;
   }
 </script>
 {% endblock %}

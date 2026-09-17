@@ -112,6 +112,8 @@ def _run_job(
     walk_all: bool,
     walk_segment: bool,
     walk_segment_points: int,
+    check_both_sides: bool,
+    side_offset_m: float,
 ) -> None:
     def log(msg: str) -> None:
         with JOBS_LOCK:
@@ -134,6 +136,8 @@ def _run_job(
             walk_all=walk_all,
             walk_segment=walk_segment,
             walk_segment_points=walk_segment_points,
+            check_both_sides=check_both_sides,
+            side_offset_m=side_offset_m,
             out_dir=OUT_DIR,
             keys_file=DEFAULT_KEYS_FILE,
             log=log,
@@ -183,6 +187,11 @@ def run():
         walk_segment_points = int(request.form.get("walk_segment_points") or 5)
     except ValueError:
         walk_segment_points = 5
+    check_both_sides = request.form.get("check_both_sides") is not None
+    try:
+        side_offset_m = float(request.form.get("side_offset_m") or 20.0)
+    except ValueError:
+        side_offset_m = 20.0
     criteria = _read_criteria_from_form(request.form)
 
     if not (state and year and month):
@@ -194,6 +203,7 @@ def run():
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
             criteria, segment_id, walk_all, walk_segment, walk_segment_points,
+            check_both_sides, side_offset_m,
         ),
         daemon=True,
     )

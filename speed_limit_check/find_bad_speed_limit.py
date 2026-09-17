@@ -156,6 +156,18 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="How many positions to sample along each segment when --walk-segment is set (default: 5)",
     )
+    p.add_argument(
+        "--check-both-sides",
+        action="store_true",
+        help="At each checked position, also probe points offset perpendicular to the road (both sides) - "
+        "helps find a sign on a divided road / nearby parallel carriageway that centerline sampling alone misses",
+    )
+    p.add_argument(
+        "--side-offset-m",
+        type=float,
+        default=20.0,
+        help="Perpendicular offset in meters for --check-both-sides (default: 20)",
+    )
     p.add_argument("--out-dir", default="output", help="Directory to save Street View images into (default: ./output)")
     p.add_argument(
         "--keys-file",
@@ -215,6 +227,29 @@ def _haversine_m(p1: tuple[float, float], p2: tuple[float, float]) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _bearing_deg(p1: tuple[float, float], p2: tuple[float, float]) -> float:
+    """Compass bearing (0=N, 90=E, ...) from p1 to p2, both (lon, lat)."""
+    lon1, lat1 = p1
+    lon2, lat2 = p2
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    y = math.sin(dlon) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlon)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
+    """Point `distance_m` meters from (lat, lon) along `bearing_deg` (forward geodesic, spherical)."""
+    r = 6371000.0
+    br = math.radians(bearing_deg)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
+    d_r = distance_m / r
+    lat2 = math.asin(math.sin(lat1) * math.cos(d_r) + math.cos(lat1) * math.sin(d_r) * math.cos(br))
+    lon2 = lon1 + math.atan2(math.sin(br) * math.sin(d_r) * math.cos(lat1), math.cos(d_r) - math.sin(lat1) * math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
+
+
 def line_coords_from_geojson(geojson_str: Optional[str]) -> list[tuple[float, float]]:
     """Extracts [(lon, lat), ...] vertices, in order, from a GeoJSON string
     (as produced by BigQuery's ST_ASGEOJSON). Handles LineString and
@@ -238,23 +273,34 @@ def line_coords_from_geojson(geojson_str: Optional[str]) -> list[tuple[float, fl
     return []
 
 
-def sample_points_along_line(coords: list[tuple[float, float]], num_points: int) -> list[tuple[float, float]]:
-    """Given [(lon, lat), ...] line vertices, returns `num_points` (lat, lon)
-    points evenly spaced BY DISTANCE along the line (not by vertex index,
-    since a line's vertices are rarely evenly spaced), always including the
-    first and last vertex."""
+def overall_bearing(coords: list[tuple[float, float]]) -> float:
+    """Bearing from the first to last vertex of a line - a reasonable
+    approximation of "which way the road runs" for a short segment when a
+    per-point bearing isn't available (e.g. the single-centroid case)."""
+    if len(coords) < 2:
+        return 0.0
+    return _bearing_deg(coords[0], coords[-1])
+
+
+def sample_points_along_line(coords: list[tuple[float, float]], num_points: int) -> list[tuple[float, float, float]]:
+    """Given [(lon, lat), ...] line vertices, returns `num_points`
+    (lat, lon, bearing_deg) points evenly spaced BY DISTANCE along the line
+    (not by vertex index, since a line's vertices are rarely evenly
+    spaced), always including the first and last vertex. `bearing_deg` is
+    the direction of travel at that point (the line segment it falls on),
+    e.g. for offsetting perpendicular to the road."""
     num_points = max(2, num_points)
     if len(coords) < 2:
         if not coords:
             return []
         lon, lat = coords[0]
-        return [(lat, lon)] * num_points
+        return [(lat, lon, 0.0)] * num_points
 
     seg_lengths = [_haversine_m(coords[i], coords[i + 1]) for i in range(len(coords) - 1)]
     total = sum(seg_lengths)
     if total == 0:
         lon, lat = coords[0]
-        return [(lat, lon)] * num_points
+        return [(lat, lon, 0.0)] * num_points
 
     points = []
     seg_idx = 0
@@ -268,7 +314,8 @@ def sample_points_along_line(coords: list[tuple[float, float]], num_points: int)
         t = min(max((target - cum_before_seg) / seg_len, 0.0), 1.0)
         lon1, lat1 = coords[seg_idx]
         lon2, lat2 = coords[seg_idx + 1]
-        points.append((lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t))
+        bearing = _bearing_deg(coords[seg_idx], coords[seg_idx + 1])
+        points.append((lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t, bearing))
     return points
 
 
@@ -586,6 +633,8 @@ def run_pipeline(
     walk_all: bool = False,
     walk_segment: bool = False,
     walk_segment_points: int = 5,
+    check_both_sides: bool = False,
+    side_offset_m: float = 20.0,
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
@@ -607,6 +656,14 @@ def run_pipeline(
     one end to the other, and each is checked in turn - a sign relevant to
     the segment may sit well away from its centroid. This multiplies API
     calls by roughly that many points, so it costs more and takes longer.
+
+    With `check_both_sides=True`, each checked position (whether just the
+    centroid or every walked point) is supplemented by two more points
+    offset `side_offset_m` meters perpendicular to the road on either
+    side. Street View's nearest-panorama snapping means sampling only the
+    centerline can keep returning the same one carriageway of a divided
+    road even as you walk its length - a sign on the other carriageway,
+    a short perpendicular distance away, is otherwise never reached.
 
     `progress(fraction, message)` is called throughout with fraction in
     [0, 1] and a human-readable status - e.g. for a web UI progress bar.
@@ -660,22 +717,47 @@ def run_pipeline(
         tag = f"[{i + 1}/{n}]"
         seg_dir_root = out_root / safe_segment_dirname(seg_id)
 
-        if walk_segment:
-            coords = line_coords_from_geojson(row.get("geom_geojson"))
-            sample_points = sample_points_along_line(coords, walk_segment_points) if coords else [(lat, lon)]
-            log(f"{tag} here_segment_id={seg_id} - walking {len(sample_points)} position(s) along the segment")
+        coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or check_both_sides) else []
+        if walk_segment and coords:
+            base_points = sample_points_along_line(coords, walk_segment_points)  # [(lat, lon, bearing), ...]
+            walked = True
         else:
-            sample_points = [(lat, lon)]
-            log(f"{tag} here_segment_id={seg_id} at ({lat:.6f}, {lon:.6f})")
+            base_points = [(lat, lon, overall_bearing(coords) if coords else 0.0)]
+            walked = False
+
+        # Flatten each base position into center (+ left/right if
+        # check_both_sides) query points. Directory naming preserves the
+        # exact prior layout when a mode is off, so existing caches on disk
+        # are still reused: flat seg_dir_root with neither mode, point<N>
+        # with only walk_segment, so only combinations actually using a new
+        # mode get new subdirectories.
+        sample_points = []  # (lat, lon, point_prefix_or_None, side_label_or_None, base_idx)
+        for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
+            point_prefix = f"point{p_idx}" if walked else None
+            sample_points.append((p_lat, p_lon, point_prefix, "center" if check_both_sides else None, p_idx))
+            if check_both_sides:
+                l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, side_offset_m)
+                r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, side_offset_m)
+                sample_points.append((l_lat, l_lon, point_prefix, "left", p_idx))
+                sample_points.append((r_lat, r_lon, point_prefix, "right", p_idx))
+
+        mode_desc = []
+        if walked:
+            mode_desc.append(f"walking {len(base_points)} position(s)")
+        if check_both_sides:
+            mode_desc.append(f"±{side_offset_m:.0f}m both sides")
+        where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
+        log(f"{tag} here_segment_id={seg_id} - {where}")
 
         image_details: list[ImageDetail] = []
         reading = None
         num_pts = len(sample_points)
         point_span = span / num_pts
 
-        for p_idx, (p_lat, p_lon) in enumerate(sample_points):
-            point_base = base + p_idx * point_span
-            ptag = f"{tag} point {p_idx + 1}/{num_pts}" if walk_segment else tag
+        for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx) in enumerate(sample_points):
+            point_base = base + pt_i * point_span
+            label_bits = [b for b in (f"position {base_idx + 1}/{len(base_points)}" if walked else None, side_label) if b]
+            ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
             progress(point_base, f"{ptag} Checking Street View coverage...")
 
             coverage = streetview_coverage(p_lat, p_lon, api_key)  # StreetViewAuthError propagates to caller
@@ -684,7 +766,11 @@ def run_pipeline(
                 progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
                 continue
 
-            point_dir = (seg_dir_root / f"point{p_idx}") if walk_segment else seg_dir_root
+            point_dir = seg_dir_root
+            if point_prefix:
+                point_dir = point_dir / point_prefix
+            if side_label:
+                point_dir = point_dir / side_label
             progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
             image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, log=log)
 
@@ -765,6 +851,8 @@ def main() -> int:
             walk_all=args.walk_all,
             walk_segment=args.walk_segment,
             walk_segment_points=args.walk_segment_points,
+            check_both_sides=args.check_both_sides,
+            side_offset_m=args.side_offset_m,
             out_dir=Path(args.out_dir),
             keys_file=args.keys_file,
             log=print,

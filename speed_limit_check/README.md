@@ -131,6 +131,19 @@ Additional options on the form:
   that many, so it costs more and runs slower - keep "candidates to try"
   modest when it's on. Images/results are cached per position (under a
   `point<N>/` subdirectory), same as the default single-point mode.
+- **Also check both sides of the road** - a road can have two physically
+  distinct, separately-surveyed-by-Google carriageways (a divided road)
+  a short distance apart, close enough that they're the same "here
+  segment" in the source data but not close enough for Street View's
+  nearest-panorama snapping to ever reach the far one from centerline
+  sampling alone. Checking this offsets every position checked (whether
+  just the centroid or every walked point) by "Offset distance (meters)"
+  (default 20) perpendicular to the road on **both** sides, so the other
+  carriageway's own Street View coverage gets a chance too. Roughly
+  triples API calls per position (center + left + right); if the other
+  carriageway still isn't reached, try a larger offset. Combines with
+  "slow-walk the full length" - each walked position gets both-sides
+  checking too.
 
 ### CLI
 
@@ -147,6 +160,8 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--walk-all` | off | Don't stop at the first readable sign - try every candidate and report every match |
 | `--walk-segment` | off | Sample several positions along each segment's full length instead of just its centroid |
 | `--walk-segment-points` | `5` | How many positions to sample when `--walk-segment` is set (clamped to 2-20) |
+| `--check-both-sides` | off | At each checked position, also probe points offset perpendicular to the road on both sides |
+| `--side-offset-m` | `20` | Perpendicular offset in meters for `--check-both-sides` |
 | `--out-dir` | `output` | Where Street View images are saved |
 | `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 
