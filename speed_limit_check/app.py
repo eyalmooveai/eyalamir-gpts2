@@ -25,11 +25,17 @@ from find_bad_speed_limit import (
     NoUsableApiKey,
     StreetViewAuthError,
     heading_from_filename,
+    load_keys_file,
     run_pipeline,
 )
 
 OUT_DIR = Path("output")
 MAX_JOBS = 20  # cap in-memory job history for this long-lived local process
+
+# Load once at startup (not just inside run_pipeline's background thread) so
+# GOOGLE_MAPS_API_KEY is available for embedding in a page - e.g. the
+# Google Maps JavaScript API script tag - even before any job has run.
+load_keys_file(DEFAULT_KEYS_FILE)
 
 app = Flask(__name__)
 
@@ -41,6 +47,11 @@ JOBS_LOCK = threading.Lock()
 
 def _image_url(path: Path) -> str:
     return "/images/" + str(Path(path).relative_to(OUT_DIR)).replace(os.sep, "/")
+
+
+def _google_maps_js_key() -> str:
+    key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+    return "" if key == "your-key-here" else key
 
 
 def _read_criteria_from_form(form) -> dict[str, tuple[bool, float]]:
@@ -236,12 +247,19 @@ def result_page(job_id):
             for p, snippet in zip_longest(a.images, a.ocr_snippets)
         ]
         matched_index = next((i for i, im in enumerate(images_js) if im["heading"] == a.matched_heading), 0) if a.matched_heading is not None else 0
+        # Which way to face when dropping into the interactive Street View
+        # panorama: the heading of the matched sign if there is one, else
+        # whichever heading was captured first.
+        default_heading = a.matched_heading
+        if default_heading is None and images_js:
+            default_heading = images_js[0]["heading"]
         attempts_view.append(
             {
                 "attempt": a,
                 "images_js": images_js,
                 "annotated_url": _image_url(a.annotated_image) if a.annotated_image else None,
                 "matched_index": matched_index,
+                "default_heading": default_heading or 0,
             }
         )
 
@@ -253,6 +271,7 @@ def result_page(job_id):
         result=result,
         log=job["log"],
         attempts_view=attempts_view,
+        google_maps_js_key=_google_maps_js_key(),
     )
 
 

@@ -51,10 +51,13 @@ through all candidates" checked, tries every one and reports every match).
    Make sure the **Cloud Vision API** is enabled on the project you run jobs
    against (`gcloud services enable vision.googleapis.com`).
 
-3. **Street View Static API key**
+3. **Google Maps Platform API key**
 
-   Create a Google Maps Platform API key with the **Street View Static API**
-   enabled. Store it in a keys file *outside* this git repo, at
+   Create a key with these APIs enabled:
+   - **Street View Static API** - used server-side to fetch the images that get OCR'd.
+   - **Maps JavaScript API** - used client-side (web app only) for the "Explore in Google Maps" interactive map/Street View panorama.
+
+   Store it in a keys file *outside* this git repo, at
    `~/Claude/MooveAI/keys.env` (i.e. one directory above the repo checkout):
 
    ```bash
@@ -66,6 +69,12 @@ through all candidates" checked, tries every one and reports every match).
    The script reads this file automatically. An environment variable of the
    same name, if already set, takes precedence over the file. Use
    `--keys-file` to point at a different path.
+
+   Note: the Maps JavaScript API key is necessarily visible in the web app's
+   page source (that's how the JS API always works, not specific to this
+   app) - fine for a tool bound to `127.0.0.1` that only you use. If you
+   want to be careful anyway, add an HTTP referrer restriction on the key
+   in the Cloud Console for `http://127.0.0.1:5050/*` and `http://localhost:5050/*`.
 
 ## Usage
 
@@ -90,6 +99,17 @@ where that image was captured and which way the camera was pointed (an
 arrow rotated to the image's compass heading: 0=N, 90=E, 180=S, 270=W).
 Use the on-screen arrows, the ← / → keys, or Esc to navigate between a
 candidate's images or close the viewer.
+
+Each candidate also has an **"Explore in Google Maps"** button, which opens
+the actual Google Maps JavaScript API - not just a static image - starting
+you directly inside an interactive Street View panorama at that segment's
+location, facing the direction the sign was read from. From there you can
+drag to look around, click the navigation arrows or double-click the
+ground to walk further down the road, click the small map thumbnail in
+the corner to pop back out to the 2D map, and use the layers control
+there to switch to satellite - the same pegman-drag/walk/switch experience
+as maps.google.com, embedded in the page. Requires the Maps JavaScript
+API key from setup step 3 above.
 
 Additional options on the form:
 

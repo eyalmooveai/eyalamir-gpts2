@@ -106,7 +106,13 @@
     }
     .thumb-btn img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-    #lightbox {
+    /* Shared by every full-screen modal (#lightbox, #gmap-modal, ...).
+       Deliberately a class, not an ID: an ID selector here would beat the
+       browser's built-in `[hidden] { display: none }` rule on specificity
+       and silently override it - exactly the bug that made the lightbox
+       show up on every page load regardless of the hidden attribute. The
+       matching `.modal-overlay[hidden]` rule below restores it correctly. */
+    .modal-overlay {
       position: fixed;
       inset: 0;
       background: rgba(0, 0, 0, 0.88);
@@ -117,11 +123,7 @@
       overflow-y: auto;
       padding: 40px 20px;
     }
-    /* An ID selector beats the browser's built-in `[hidden] { display: none }`
-       rule, so #lightbox{display:flex} above was overriding the `hidden`
-       attribute and showing the modal on every page load regardless of it.
-       This restores it at matching specificity. */
-    #lightbox[hidden] { display: none; }
+    .modal-overlay[hidden] { display: none; }
     .lightbox-inner { max-width: 1000px; width: 100%; display: flex; flex-direction: column; gap: 12px; }
     .lightbox-topbar { display: flex; justify-content: space-between; align-items: center; color: #fff; font-size: 0.85rem; gap: 12px; }
     .lightbox-close, .lightbox-arrow {
@@ -182,6 +184,30 @@
     }
     #lb-map { width: 100%; height: 100%; background: #333; }
     .lb-arrow-icon { display: flex; align-items: center; justify-content: center; }
+
+    .btn-secondary {
+      margin-top: 0;
+      background: none;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    #gmap-modal .lightbox-inner { max-width: 1100px; }
+    #gmap { width: 100%; height: 65vh; min-height: 320px; border-radius: 12px; background: #222; }
+    #gmap-error {
+      display: none;
+      color: #ff8a8a;
+      background: rgba(255, 0, 0, 0.08);
+      border: 1px solid rgba(255, 100, 100, 0.4);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-top: 12px;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+    }
   </style>
   {% block extra_head %}{% endblock %}
 </head>

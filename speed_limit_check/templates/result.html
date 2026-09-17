@@ -40,12 +40,15 @@
     <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Every image fetched, and what OCR read in it - useful for telling "no sign in frame" apart from "OCR missed it". Click any image to see where it was taken and which way the camera was facing.</p>
     {% for entry in attempts_view %}
       {% set a = entry.attempt %}
-      <div class="candidate-gallery" data-images='{{ entry.images_js | tojson }}' data-lat="{{ a.lat }}" data-lon="{{ a.lon }}" style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
-        <p style="margin:0 0 6px;">
+      <div class="candidate-gallery" data-images='{{ entry.images_js | tojson }}' data-lat="{{ a.lat }}" data-lon="{{ a.lon }}" data-heading="{{ entry.default_heading }}" style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
+        <p style="margin:0 0 6px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           <strong>#{{ a.index }}</strong> <code>{{ a.segment_id }}</code>
           {% if a.status == "match" %}<span class="badge ok">sign read</span>
           {% elif a.status == "no_coverage" %}<span class="badge warn">no Street View coverage</span>
           {% else %}<span class="badge warn">no sign read</span>{% endif %}
+          {% if a.status != "no_coverage" %}
+            <button type="button" class="btn-secondary" onclick="openGoogleMap(this.closest('.candidate-gallery'))">&#127758; Explore in Google Maps</button>
+          {% endif %}
         </p>
         <p style="color:var(--muted); font-size:0.85rem; margin:0 0 8px;">
           {{ "%.5f"|format(a.lat) }}, {{ "%.5f"|format(a.lon) }}
@@ -75,7 +78,7 @@
   <pre class="log">{{ log|join("\n") }}</pre>
 </div>
 
-<div id="lightbox" hidden>
+<div id="lightbox" class="modal-overlay" hidden>
   <div class="lightbox-inner">
     <div class="lightbox-topbar">
       <span id="lb-counter"></span>
@@ -94,6 +97,18 @@
       </div>
       <div class="lightbox-map-wrap"><div id="lb-map"></div></div>
     </div>
+  </div>
+</div>
+
+<div id="gmap-modal" class="modal-overlay" hidden>
+  <div class="lightbox-inner">
+    <div class="lightbox-topbar">
+      <span>Interactive map &amp; Street View</span>
+      <button type="button" class="lightbox-close" onclick="closeGoogleMap()" aria-label="Close">&times;</button>
+    </div>
+    <div id="gmap"></div>
+    <div id="gmap-error"></div>
+    <p style="color:#ccc; font-size:0.78rem; margin:0;">Drag the pegman (bottom-right of the map) onto a street to enter Street View, or use the arrows/drag to look around and walk. Click the small map thumbnail in the corner of Street View to return to the map; use the layers control there to switch to satellite.</p>
   </div>
 </div>
 
@@ -228,6 +243,93 @@
 
   document.getElementById('lightbox').addEventListener('click', (e) => {
     if (e.target.id === 'lightbox') closeLightbox();
+  });
+
+  // --- Interactive Google Map + Street View panorama ---
+  const GOOGLE_MAPS_JS_KEY = {{ google_maps_js_key | tojson }};
+  let gMap = null;
+  let gPano = null;
+
+  function showGoogleMapError(msg) {
+    const err = document.getElementById('gmap-error');
+    err.textContent = msg;
+    err.style.display = 'block';
+    console.error('[gmap]', msg);
+  }
+
+  function loadGoogleMapsScript(onload, onerror) {
+    if (window.google && window.google.maps) { onload(); return; }
+    if (document.getElementById('gmaps-script')) {
+      document.getElementById('gmaps-script').addEventListener('load', onload);
+      document.getElementById('gmaps-script').addEventListener('error', () => onerror('script failed to load'));
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = 'gmaps-script';
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_JS_KEY)}&v=weekly`;
+    script.onload = onload;
+    script.onerror = () => onerror('Failed to load the Google Maps script - check the API key, that "Maps JavaScript API" is enabled on it, and your internet connection.');
+    document.head.appendChild(script);
+  }
+
+  function openGoogleMap(galleryEl) {
+    document.getElementById('gmap-modal').hidden = false;
+    document.getElementById('gmap-error').style.display = 'none';
+
+    if (!GOOGLE_MAPS_JS_KEY) {
+      showGoogleMapError('GOOGLE_MAPS_API_KEY is not set, so the interactive map cannot load. Add it to ~/Claude/MooveAI/keys.env and restart the app.');
+      return;
+    }
+    if (!galleryEl) {
+      showGoogleMapError('Could not find this candidate\'s location data.');
+      return;
+    }
+    const lat = parseFloat(galleryEl.dataset.lat);
+    const lon = parseFloat(galleryEl.dataset.lon);
+    const heading = parseFloat(galleryEl.dataset.heading) || 0;
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      showGoogleMapError('Invalid location data for this candidate.');
+      return;
+    }
+
+    const showAt = () => {
+      try {
+        if (!gMap) {
+          gMap = new google.maps.Map(document.getElementById('gmap'), {
+            center: { lat, lng: lon },
+            zoom: 18,
+            mapTypeId: 'roadmap',
+            streetViewControl: true,
+            mapTypeControl: true,
+            fullscreenControl: true,
+          });
+          gPano = gMap.getStreetView();
+        } else {
+          gMap.setCenter({ lat, lng: lon });
+        }
+        new google.maps.Marker({ position: { lat, lng: lon }, map: gMap });
+        gPano.setPosition({ lat, lng: lon });
+        gPano.setPov({ heading: heading, pitch: 0 });
+        gPano.setVisible(true);
+      } catch (err) {
+        showGoogleMapError('Failed to render the map: ' + err.message);
+      }
+    };
+
+    loadGoogleMapsScript(showAt, showGoogleMapError);
+  }
+
+  function closeGoogleMap() {
+    document.getElementById('gmap-modal').hidden = true;
+  }
+
+  document.addEventListener('keydown', (e) => {
+    const gm = document.getElementById('gmap-modal');
+    if (!gm.hidden && e.key === 'Escape') closeGoogleMap();
+  });
+
+  document.getElementById('gmap-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'gmap-modal') closeGoogleMap();
   });
 </script>
 {% endblock %}
