@@ -291,9 +291,24 @@ keep failing identically on every position.
 
 ## Caching
 
-Both APIs are billed per call, so a given segment's images and OCR results
-are cached to disk and reused rather than re-fetched:
+Every billed API this tool calls - BigQuery, Street View, and Vision -
+is cached to disk (and, if `GCS_CACHE_BUCKET` is set, to GCS too - see
+"Deploying to Cloud Run") and reused rather than re-fetched:
 
+- **The candidates query itself**: a `speed_limits_<STATE>_<YEAR>_<MONTH>_details`
+  table is a dated, published monthly snapshot, so the same query against
+  it (same state/year/month, same selection criteria, same "candidates to
+  try") always returns the same rows - and re-running with the same
+  inputs while only tuning something downstream (walk spacing, headings,
+  fov, side mode, ...) is by far the most common way this pipeline
+  actually gets iterated on. Cached under `_candidates_cache/` in a
+  table's output directory, keyed by a hash of the criteria/candidate
+  count (or the `here_segment_id` for a direct lookup). Delete that
+  subdirectory to force a fresh query. The query itself also only
+  requests the columns actually used (`SELECT * EXCEPT (geom)` - the raw
+  geometry is never used once its centroid/GeoJSON are computed from it,
+  only those derived values are) rather than everything including it, to
+  keep each query and its cached result smaller.
 - **Street View images**: named deterministically by heading
   (`streetview_heading<N>.jpg`, or `streetview_heading<N>_fov<F>.jpg` when
   "Camera zoom"/`--fov` isn't the default 90) under a segment's output

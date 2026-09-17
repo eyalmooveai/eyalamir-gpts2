@@ -37,6 +37,7 @@ import dataclasses
 import json
 import math
 import os
+import hashlib
 import re
 import sys
 import threading
@@ -575,7 +576,7 @@ def build_candidates_query(
     order_sql = f"ORDER BY {order_expr} DESC" if order_expr else "ORDER BY here_segment_id"
     query = f"""
         SELECT
-          *,
+          * EXCEPT (geom),
           ST_Y(ST_CENTROID(geom)) AS centroid_lat,
           ST_X(ST_CENTROID(geom)) AS centroid_lon,
           ST_ASGEOJSON(geom) AS geom_geojson
@@ -601,7 +602,7 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
     client = bigquery.Client(project=project)
     query = f"""
         SELECT
-          *,
+          * EXCEPT (geom),
           ST_Y(ST_CENTROID(geom)) AS centroid_lat,
           ST_X(ST_CENTROID(geom)) AS centroid_lon,
           ST_ASGEOJSON(geom) AS geom_geojson
@@ -611,6 +612,40 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("segment_id", "STRING", segment_id)])
     return list(client.query(query, job_config=job_config).result())
+
+
+def _candidates_cache_key(*, segment_id: Optional[str] = None, criteria=None, max_candidates: Optional[int] = None) -> str:
+    """A stable key identifying a candidates query's exact inputs, for
+    caching its result to disk (see _load_candidates_cache/
+    _save_candidates_cache) - a speed_limits_<STATE>_<YEAR>_<MONTH>_details
+    table is a dated, published monthly snapshot, so the same query
+    against it always returns the same rows, exactly the same assumption
+    the Street View/OCR caching elsewhere in this file already relies on
+    for its own inputs never changing."""
+    payload = {"segment_id": segment_id} if segment_id is not None else {"criteria": criteria, "max_candidates": max_candidates}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _candidates_cache_path(out_root: Path, cache_key: str) -> Path:
+    return out_root / "_candidates_cache" / f"{cache_key}.json"
+
+
+def _load_candidates_cache(cache_path: Path, log=lambda msg: None) -> Optional[list[dict]]:
+    if not gcs_cache_pull(cache_path, log=log):
+        return None
+    try:
+        return json.loads(cache_path.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+
+
+def _save_candidates_cache(cache_path: Path, rows: list, log=lambda msg: None) -> None:
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps([dict(row.items()) for row in rows], default=str))
+        gcs_cache_push(cache_path, log=log)
+    except OSError:
+        pass  # caching is an optimization, not a requirement - don't fail the run over it
 
 
 class StreetViewAuthError(RuntimeError):
@@ -1062,16 +1097,42 @@ def run_pipeline(
     table = table_name(state, year, month)
     criteria = criteria if criteria is not None else default_criteria()
     walk_segment_spacing_m = max(1.0, float(walk_segment_spacing_m))
+    out_root = Path(out_dir) / f"{state.upper()}_{year}_{month}"
 
+    # A speed_limits_<STATE>_<YEAR>_<MONTH>_details table is a dated,
+    # published monthly snapshot, so the same query against it always
+    # returns the same rows - caching its result avoids re-running the
+    # same (potentially large) BigQuery query on every re-run over the
+    # same state/year/month/criteria, or the same --segment-id lookup,
+    # which is by far the most common way this pipeline actually gets
+    # iterated on (tuning walk/side/heading/fov settings against the same
+    # candidates repeatedly). Delete a table's `_candidates_cache/`
+    # subdirectory under `output/` to force a fresh query.
     if segment_id:
         segment_id = segment_id.strip()
-        log(f"Looking up segment `{segment_id}` in `{project}.{dataset}.{table}` ...")
-        progress(0.0, f"Looking up segment {segment_id}...")
-        candidates = fetch_candidate_by_id(project, dataset, table, segment_id)
+        cache_key = _candidates_cache_key(segment_id=segment_id)
+        cache_path = _candidates_cache_path(out_root, cache_key)
+        candidates = _load_candidates_cache(cache_path, log=log)
+        if candidates is not None:
+            log(f"Using cached lookup for segment `{segment_id}` (skipping BigQuery).")
+            progress(0.0, f"Using cached lookup for segment {segment_id}...")
+        else:
+            log(f"Looking up segment `{segment_id}` in `{project}.{dataset}.{table}` ...")
+            progress(0.0, f"Looking up segment {segment_id}...")
+            candidates = fetch_candidate_by_id(project, dataset, table, segment_id)
+            _save_candidates_cache(cache_path, candidates, log=log)
     else:
-        log(f"Querying `{project}.{dataset}.{table}` ...")
-        progress(0.0, f"Querying `{project}.{dataset}.{table}` ...")
-        candidates = fetch_candidates(project, dataset, table, criteria, max_candidates)
+        cache_key = _candidates_cache_key(criteria=criteria, max_candidates=max_candidates)
+        cache_path = _candidates_cache_path(out_root, cache_key)
+        candidates = _load_candidates_cache(cache_path, log=log)
+        if candidates is not None:
+            log(f"Using cached query result for `{project}.{dataset}.{table}` (skipping BigQuery).")
+            progress(0.0, f"Using cached query result for `{project}.{dataset}.{table}`...")
+        else:
+            log(f"Querying `{project}.{dataset}.{table}` ...")
+            progress(0.0, f"Querying `{project}.{dataset}.{table}` ...")
+            candidates = fetch_candidates(project, dataset, table, criteria, max_candidates)
+            _save_candidates_cache(cache_path, candidates, log=log)
 
     result = PipelineResult(table=table, project=project, dataset=dataset, attempts=[])
     if not candidates:
@@ -1083,7 +1144,6 @@ def run_pipeline(
     progress(0.02, f"Found {len(candidates)} candidate segment(s).")
 
     vision_client = vision.ImageAnnotatorClient()
-    out_root = Path(out_dir) / f"{state.upper()}_{year}_{month}"
     n = len(candidates)
     span = 1.0 / n
 
