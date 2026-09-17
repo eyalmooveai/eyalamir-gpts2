@@ -26,17 +26,51 @@
         <input type="text" id="dataset" name="dataset" value="{{ default_dataset }}">
       </div>
     </div>
-    <label for="candidates">Candidates to try (largest mismatch first)</label>
-    <input type="number" id="candidates" name="candidates" value="10" min="1" max="50">
-
-    <button type="submit" id="submit-btn">Find a mismatched sign</button>
   </form>
+</div>
+
+<div class="card" id="segment-card">
+  <label for="segment_id">Check one specific segment instead (optional)</label>
+  <input type="text" id="segment_id" name="segment_id" form="run-form" placeholder="here:cm:segment:412644259" oninput="onSegmentIdInput()">
+  <p style="color:var(--muted); font-size:0.8rem; margin:6px 0 0;">
+    When filled in, the criteria below are ignored and only this segment is checked.
+  </p>
+</div>
+
+<div class="card" id="criteria-card">
+  <h3 style="margin-top:0;">Selection criteria</h3>
+  <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">All checked criteria are ANDed together. Candidates are ranked by the first checked "≥ N mph" criterion, largest mismatch first.</p>
+  {% for c in criteria_defs %}
+    <div style="display:flex; align-items:center; gap:10px; margin:8px 0;">
+      <input type="checkbox" name="crit_{{ c.key }}_enabled" id="crit_{{ c.key }}_enabled" form="run-form" {% if c.default_enabled %}checked{% endif %}>
+      <label for="crit_{{ c.key }}_enabled" style="flex:1; margin:0; font-size:0.85rem; color:var(--text);">{{ c.label }}</label>
+      <input type="number" step="0.5" name="crit_{{ c.key }}_value" form="run-form" value="{{ c.default_value }}" style="width:80px;">
+    </div>
+  {% endfor %}
+
+  <label for="candidates">Candidates to try</label>
+  <input type="number" id="candidates" name="candidates" form="run-form" value="10" min="1" max="50">
+
+  <div style="display:flex; align-items:center; gap:10px; margin-top:14px;">
+    <input type="checkbox" id="walk_all" name="walk_all" form="run-form">
+    <label for="walk_all" style="margin:0; font-size:0.9rem; color:var(--text);">Walk through all candidates (don't stop at the first readable sign - try every one and report every match)</label>
+  </div>
+</div>
+
+<div class="card">
+  <button type="submit" form="run-form" id="submit-btn">Find a mismatched sign</button>
 </div>
 
 <script>
   function onSubmit() {
     document.getElementById('submit-btn').disabled = true;
     document.getElementById('submit-btn').textContent = 'Starting…';
+  }
+
+  function onSegmentIdInput() {
+    const hasSegmentId = document.getElementById('segment_id').value.trim().length > 0;
+    document.getElementById('criteria-card').style.opacity = hasSegmentId ? '0.45' : '1';
+    document.querySelectorAll('#criteria-card input').forEach(el => { el.disabled = hasSegmentId; });
   }
 </script>
 {% endblock %}

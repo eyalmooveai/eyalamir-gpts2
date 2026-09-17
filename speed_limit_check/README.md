@@ -7,19 +7,28 @@ limit by reading a sign in Google Street View imagery at that location.
 
 ## Query
 
+The default selection criteria (all editable in the web UI - see below):
+
 ```sql
 SELECT * FROM `<project>.calc_out.speed_limits_<STATE>_<YEAR>_<MONTH>_details`
 WHERE
-  abs(speed_limit_infer_mph - speed_limit_here_mph) >= 10
-  AND abs(speed_limit_infer_mph - speed_limit_osm_mph) >= 10
-  AND functional_class < 6
+  functional_class < 6
   AND abs(speed_limit_here_mph - speed_limit_osm_mph) <= 1
+  AND abs(speed_limit_infer_mph - speed_limit_here_mph) >= 10
+  AND abs(speed_limit_infer_mph - speed_limit_osm_mph) >= 10
 ORDER BY abs(speed_limit_infer_mph - speed_limit_here_mph) DESC
 ```
 
-Candidates are tried in order of largest mismatch. Not every road segment has
-Street View coverage or a legible sign in frame, so the script walks down the
-ranked list until one works.
+i.e. HERE and OSM agree with each other but both disagree with the inferred
+value by a lot, on a "real" road. Two more criteria are available but
+disabled by default, using `speed_limit_infer_mph_corrected` instead of the
+raw inferred value: `abs(infer_corrected - HERE) >= 5` and
+`abs(infer_corrected - OSM) >= 5`. Any combination of criteria can be
+checked/unchecked with its own threshold in the web UI; candidates are
+ranked by the first checked "≥ N mph" criterion, largest mismatch first.
+Not every road segment has Street View coverage or a legible sign in frame,
+so the pipeline walks down the ranked list until one works (or, with "walk
+through all candidates" checked, tries every one and reports every match).
 
 ## Setup
 
@@ -75,26 +84,40 @@ the sign-read speed, and a gallery of every candidate tried - including
 the images captured and the OCR text found in each, for ones that didn't
 match too. Runs on localhost only.
 
+Additional options on the form:
+
+- **Selection criteria** - each of the criteria listed under "Query" above
+  has its own checkbox and editable threshold; any combination can be on.
+- **Check one specific segment** - paste a `here_segment_id` (e.g.
+  `here:cm:segment:412644259`) to check just that segment directly,
+  bypassing the criteria entirely.
+- **Walk through all candidates** - by default the run stops at the first
+  segment with a readable sign; check this to instead try every candidate
+  up to "Candidates to try" and report every match found.
+
 ### CLI
 
 ```bash
 python find_bad_speed_limit.py --state NC --year 2026 --month 08
 ```
 
-Options (shared by both `app.py` and the CLI where applicable):
-
 | Flag | Default | Description |
 |---|---|---|
 | `--project` | `moove-platform-testing-data` | BigQuery project |
 | `--dataset` | `calc_out` | BigQuery dataset |
 | `--candidates` | `10` | How many top-mismatch rows to try before giving up |
+| `--segment-id` | none | Check one specific `here_segment_id` instead of running the mismatch query |
+| `--walk-all` | off | Don't stop at the first readable sign - try every candidate and report every match |
 | `--out-dir` | `output` | Where Street View images are saved |
 | `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 
+The CLI always uses the default selection criteria - per-criterion
+enable/threshold customization is currently web-UI only.
+
 ## Output
 
-For the first segment where a sign can be read, both the CLI and the web
-app surface:
+For every matched segment (the first one found, or every one if walking
+through all candidates), both the CLI and the web app surface:
 
 - The segment's location and full BigQuery row.
 - The speed limit read off the sign, and how it was found (OCR match).

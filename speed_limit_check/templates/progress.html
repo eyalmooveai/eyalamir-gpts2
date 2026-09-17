@@ -1,7 +1,10 @@
 {% extends "layout.html" %}
 {% block content %}
 <div class="card">
-  <p style="color:var(--muted); font-size:0.85rem; margin-top:0;">{{ state }} {{ year }}-{{ month }}</p>
+  <p style="color:var(--muted); font-size:0.85rem; margin-top:0;">
+    {{ state }} {{ year }}-{{ month }}
+    {% if segment_id %} &middot; segment <code>{{ segment_id }}</code>{% endif %}
+  </p>
   <p id="message">Starting&hellip;</p>
   <div style="background:var(--bg); border:1px solid var(--border); border-radius:999px; height:10px; overflow:hidden;">
     <div id="bar" style="background:var(--accent); height:100%; width:0%; transition:width 0.3s ease;"></div>

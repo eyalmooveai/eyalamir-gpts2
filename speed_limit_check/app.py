@@ -18,6 +18,7 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
 
 from find_bad_speed_limit import (
+    CRITERIA_DEFS,
     DEFAULT_DATASET,
     DEFAULT_KEYS_FILE,
     DEFAULT_PROJECT,
@@ -41,7 +42,20 @@ def _image_url(path: Path) -> str:
     return "/images/" + str(Path(path).relative_to(OUT_DIR)).replace(os.sep, "/")
 
 
-def _new_job(state: str, year: str, month: str) -> str:
+def _read_criteria_from_form(form) -> dict[str, tuple[bool, float]]:
+    criteria = {}
+    for c in CRITERIA_DEFS:
+        enabled = form.get(f"crit_{c['key']}_enabled") is not None
+        raw_value = form.get(f"crit_{c['key']}_value", "").strip()
+        try:
+            value = float(raw_value) if raw_value else c["default_value"]
+        except ValueError:
+            value = c["default_value"]
+        criteria[c["key"]] = (enabled, value)
+    return criteria
+
+
+def _new_job(state: str, year: str, month: str, segment_id: str | None, walk_all: bool) -> str:
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
         JOBS[job_id] = {
@@ -54,6 +68,8 @@ def _new_job(state: str, year: str, month: str) -> str:
             "state": state,
             "year": year,
             "month": month,
+            "segment_id": segment_id,
+            "walk_all": walk_all,
         }
         while len(JOBS) > MAX_JOBS:
             del JOBS[next(iter(JOBS))]
@@ -72,7 +88,18 @@ def _get_job(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
-def _run_job(job_id: str, state: str, year: str, month: str, project: str, dataset: str, max_candidates: int) -> None:
+def _run_job(
+    job_id: str,
+    state: str,
+    year: str,
+    month: str,
+    project: str,
+    dataset: str,
+    max_candidates: int,
+    criteria: dict[str, tuple[bool, float]],
+    segment_id: str | None,
+    walk_all: bool,
+) -> None:
     def log(msg: str) -> None:
         with JOBS_LOCK:
             if job_id in JOBS:
@@ -89,6 +116,9 @@ def _run_job(job_id: str, state: str, year: str, month: str, project: str, datas
             project=project,
             dataset=dataset,
             max_candidates=max_candidates,
+            criteria=criteria,
+            segment_id=segment_id,
+            walk_all=walk_all,
             out_dir=OUT_DIR,
             keys_file=DEFAULT_KEYS_FILE,
             log=log,
@@ -107,6 +137,8 @@ def _run_job(job_id: str, state: str, year: str, month: str, project: str, datas
                 "View Static API enabled and billing active on its project."
             ),
         )
+    except ValueError as e:  # bad state/year/month/project/dataset/segment_id
+        _update_job(job_id, status="error", error=str(e))
     except Exception as e:  # BigQuery/Vision auth errors etc. - surface rather than hanging the UI
         _update_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
 
@@ -117,6 +149,7 @@ def index():
         "index.html",
         default_project=DEFAULT_PROJECT,
         default_dataset=DEFAULT_DATASET,
+        criteria_defs=CRITERIA_DEFS,
     )
 
 
@@ -128,14 +161,17 @@ def run():
     project = request.form.get("project", "").strip() or DEFAULT_PROJECT
     dataset = request.form.get("dataset", "").strip() or DEFAULT_DATASET
     max_candidates = int(request.form.get("candidates") or 10)
+    segment_id = request.form.get("segment_id", "").strip() or None
+    walk_all = request.form.get("walk_all") is not None
+    criteria = _read_criteria_from_form(request.form)
 
     if not (state and year and month):
         return render_template("error.html", message="State, year, and month are all required.", log=[])
 
-    job_id = _new_job(state, year, month)
+    job_id = _new_job(state, year, month, segment_id, walk_all)
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, state, year, month, project, dataset, max_candidates),
+        args=(job_id, state, year, month, project, dataset, max_candidates, criteria, segment_id, walk_all),
         daemon=True,
     )
     thread.start()
@@ -157,6 +193,7 @@ def progress_page(job_id):
         state=job["state"],
         year=job["year"],
         month=job["month"],
+        segment_id=job["segment_id"],
     )
 
 
@@ -186,13 +223,10 @@ def result_page(job_id):
         return redirect(url_for("progress_page", job_id=job_id))
 
     result = job["result"]
-    annotated_url = None
-    if result.match_row and result.match_annotated_image:
-        annotated_url = _image_url(result.match_annotated_image)
 
     # Pair each candidate's captured images with the OCR snippet found in
     # each, so the page shows what every attempt actually saw - not just
-    # the winning one - which is what makes "no sign read" cases debuggable.
+    # the winning one(s) - which is what makes "no sign read" cases debuggable.
     attempts_view = []
     for a in result.attempts:
         image_urls = [_image_url(p) for p in a.images]
@@ -201,7 +235,7 @@ def result_page(job_id):
             {
                 "attempt": a,
                 "pairs": pairs,
-                "annotated_url": annotated_url if a.status == "match" else None,
+                "annotated_url": _image_url(a.annotated_image) if a.annotated_image else None,
             }
         )
 

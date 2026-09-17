@@ -2,31 +2,31 @@
 {% block content %}
 <p><a href="/">&larr; Run another query</a></p>
 
-{% if result.match_row %}
+{% if result.matches %}
   <div class="card">
-    <span class="badge ok">Match found</span>
-    <p class="speed">{{ result.match_reading.speed_mph }} mph</p>
-    <p>{{ result.match_reading.evidence }}</p>
-    <p style="color:var(--muted); font-size:0.85rem;">
-      Segment <code>{{ result.match_row.here_segment_id }}</code>
-      &middot; {{ result.match_row.street_name or "(unnamed street)" }}
-      &middot; {{ "%.6f"|format(result.match_row.centroid_lat) }}, {{ "%.6f"|format(result.match_row.centroid_lon) }}
-      &middot; <a href="https://www.google.com/maps?q=&layer=c&cbll={{ result.match_row.centroid_lat }},{{ result.match_row.centroid_lon }}" target="_blank" rel="noopener">open in Street View</a>
-    </p>
+    <span class="badge ok">{{ result.matches|length }} match{{ "es" if result.matches|length != 1 else "" }} found</span>
   </div>
-
-  <div class="card">
-    <h3 style="margin-top:0;">Full row</h3>
-    <table>
-      {% for key, value in result.match_row.items() %}
-        <tr><td class="key">{{ key }}</td><td>{{ value }}</td></tr>
-      {% endfor %}
-    </table>
-  </div>
+  {% for m in result.matches %}
+    <div class="card">
+      <p class="speed">{{ m.reading.speed_mph }} mph</p>
+      <p>{{ m.reading.evidence }}</p>
+      <p style="color:var(--muted); font-size:0.85rem;">
+        Segment <code>{{ m.row.here_segment_id }}</code>
+        &middot; {{ m.row.street_name or "(unnamed street)" }}
+        &middot; {{ "%.6f"|format(m.row.centroid_lat) }}, {{ "%.6f"|format(m.row.centroid_lon) }}
+        &middot; <a href="https://www.google.com/maps?q=&layer=c&cbll={{ m.row.centroid_lat }},{{ m.row.centroid_lon }}" target="_blank" rel="noopener">open in Street View</a>
+      </p>
+      <table>
+        {% for key, value in m.row.items() %}
+          <tr><td class="key">{{ key }}</td><td>{{ value }}</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% endfor %}
 {% else %}
   <div class="card">
     <span class="badge warn">No readable sign found</span>
-    <p>Tried {{ result.attempts|length }} candidate segment(s) for {{ state }} {{ year }}-{{ month }} without finding a readable speed limit sign. Try increasing "candidates to try" and re-running.</p>
+    <p>Tried {{ result.attempts|length }} candidate segment(s) for {{ state }} {{ year }}-{{ month }} without finding a readable speed limit sign. Try increasing "candidates to try", loosening the selection criteria, or checking a specific segment ID directly.</p>
   </div>
 {% endif %}
 
