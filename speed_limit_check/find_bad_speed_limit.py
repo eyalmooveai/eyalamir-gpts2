@@ -17,13 +17,16 @@ read, since not every location has Street View imagery.
 Usage:
     python find_bad_speed_limit.py --state NC --year 2026 --month 08
 
-Required environment variables:
-    GOOGLE_MAPS_API_KEY
-        Google Maps Platform API key with the Street View Static API
-        enabled.
-    GOOGLE_APPLICATION_CREDENTIALS (or `gcloud auth application-default login`)
-        Credentials with access to BigQuery (read) and the Cloud Vision API
-        in the target project.
+Keys:
+    GOOGLE_MAPS_API_KEY (a Street View Static API key) is read from the
+    environment if set, otherwise from a `KEY=VALUE` keys file - by default
+    ~/Claude/MooveAI/keys.env, overridable with --keys-file. This keeps the
+    key out of shell history/env and out of the git repo (the file lives
+    above the repo, not inside it).
+
+    BigQuery and Cloud Vision use standard Application Default Credentials
+    (`gcloud auth application-default login`, or GOOGLE_APPLICATION_CREDENTIALS)
+    - not the keys file.
 
 See README.md for full setup instructions.
 """
@@ -44,6 +47,7 @@ from PIL import Image, ImageDraw
 
 DEFAULT_PROJECT = "moove-platform-testing-data"
 DEFAULT_DATASET = "calc_out"
+DEFAULT_KEYS_FILE = Path.home() / "Claude" / "MooveAI" / "keys.env"
 STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metadata"
 STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 DEFAULT_HEADINGS = (0, 90, 180, 270)
@@ -63,12 +67,37 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dataset", default=DEFAULT_DATASET, help=f"BigQuery dataset (default: {DEFAULT_DATASET})")
     p.add_argument("--candidates", type=int, default=10, help="How many top-mismatch rows to try before giving up (default: 10)")
     p.add_argument("--out-dir", default="output", help="Directory to save Street View images into (default: ./output)")
+    p.add_argument(
+        "--keys-file",
+        default=DEFAULT_KEYS_FILE,
+        type=Path,
+        help=f"KEY=VALUE file to load API keys from if not already in the environment (default: {DEFAULT_KEYS_FILE})",
+    )
     return p.parse_args()
 
 
 def table_name(state: str, year: str, month: str) -> str:
     month_padded = f"{int(month):02d}" if month.isdigit() else month
     return f"speed_limits_{state.upper()}_{year}_{month_padded}_details"
+
+
+def load_keys_file(path: Path) -> None:
+    """Load KEY=VALUE lines from `path` into os.environ, without overriding
+    anything already set in the environment. Blank lines and lines starting
+    with '#' are ignored; surrounding quotes on the value are stripped."""
+    if not path.exists():
+        return
+    for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            print(f"  Warning: ignoring malformed line {lineno} in {path} (expected KEY=VALUE)", file=sys.stderr)
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        os.environ.setdefault(key, value)
 
 
 def fetch_candidates(project: str, dataset: str, table: str, limit: int) -> list[bigquery.table.Row]:
@@ -214,9 +243,15 @@ def print_row(row: bigquery.table.Row) -> None:
 
 def main() -> int:
     args = parse_args()
+
+    load_keys_file(args.keys_file)
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     if not api_key or api_key == "your-key-here":
-        print("ERROR: set GOOGLE_MAPS_API_KEY in the environment to a real Street View Static API key.", file=sys.stderr)
+        print(
+            f"ERROR: no usable GOOGLE_MAPS_API_KEY. Set it in the environment, or add a line "
+            f"GOOGLE_MAPS_API_KEY=... to {args.keys_file}.",
+            file=sys.stderr,
+        )
         return 1
 
     table = table_name(args.state, args.year, args.month)

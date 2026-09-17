@@ -45,11 +45,18 @@ ranked list until one works.
 3. **Street View Static API key**
 
    Create a Google Maps Platform API key with the **Street View Static API**
-   enabled, then:
+   enabled. Store it in a keys file *outside* this git repo, at
+   `~/Claude/MooveAI/keys.env` (i.e. one directory above the repo checkout):
 
    ```bash
-   export GOOGLE_MAPS_API_KEY=your-key-here
+   cp keys.env.example ~/Claude/MooveAI/keys.env
+   # then edit ~/Claude/MooveAI/keys.env and fill in:
+   #   GOOGLE_MAPS_API_KEY=AIza...your real key...
    ```
+
+   The script reads this file automatically. An environment variable of the
+   same name, if already set, takes precedence over the file. Use
+   `--keys-file` to point at a different path.
 
 ## Usage
 
@@ -65,6 +72,7 @@ Options:
 | `--dataset` | `calc_out` | BigQuery dataset |
 | `--candidates` | `10` | How many top-mismatch rows to try before giving up |
 | `--out-dir` | `output` | Where Street View images are saved |
+| `--keys-file` | `~/Claude/MooveAI/keys.env` | KEY=VALUE file to load API keys from |
 
 ## Output
 
