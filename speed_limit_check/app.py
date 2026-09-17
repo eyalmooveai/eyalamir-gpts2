@@ -22,6 +22,7 @@ from find_bad_speed_limit import (
     DEFAULT_HEADINGS,
     DEFAULT_KEYS_FILE,
     DEFAULT_PROJECT,
+    SIDE_MODES,
     NoUsableApiKey,
     StreetViewAuthError,
     load_keys_file,
@@ -114,7 +115,7 @@ def _run_job(
     walk_all: bool,
     walk_segment: bool,
     walk_segment_spacing_m: float,
-    check_both_sides: bool,
+    side_mode: str,
     side_offset_m: float,
     headings: tuple[int, ...],
     headings_relative: bool,
@@ -140,7 +141,7 @@ def _run_job(
             walk_all=walk_all,
             walk_segment=walk_segment,
             walk_segment_spacing_m=walk_segment_spacing_m,
-            check_both_sides=check_both_sides,
+            side_mode=side_mode,
             side_offset_m=side_offset_m,
             headings=headings,
             headings_relative=headings_relative,
@@ -194,7 +195,9 @@ def run():
         walk_segment_spacing_m = float(request.form.get("walk_segment_spacing_m") or 15.0)
     except ValueError:
         walk_segment_spacing_m = 15.0
-    check_both_sides = request.form.get("check_both_sides") is not None
+    side_mode = request.form.get("side_mode", "").strip()
+    if side_mode not in SIDE_MODES:
+        side_mode = "center"
     try:
         side_offset_m = float(request.form.get("side_offset_m") or 20.0)
     except ValueError:
@@ -216,7 +219,7 @@ def run():
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
             criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
-            check_both_sides, side_offset_m, headings, headings_relative,
+            side_mode, side_offset_m, headings, headings_relative,
         ),
         daemon=True,
     )

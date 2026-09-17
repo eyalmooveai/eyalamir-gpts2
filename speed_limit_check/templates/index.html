@@ -81,14 +81,19 @@
     <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">The number of positions sampled is derived from this and each segment's actual length (2-40 points), rather than a fixed count - a short segment gets fewer, a long one gets more. Smaller spacing costs more API calls and runs slower; if a sign keeps getting missed, try a smaller value here.</p>
   </div>
 
-  <div class="criterion-row" style="margin-top:14px;">
-    <input type="checkbox" id="check_both_sides" name="check_both_sides" form="run-form" onchange="onCheckBothSidesChange()">
-    <label for="check_both_sides" style="font-size:0.9rem;">Also check both sides of the road (offset perpendicular to it) - a sign may be on a divided road's other carriageway, which centerline sampling alone can't reach</label>
+  <div style="margin-top:14px;">
+    <label for="side_mode" style="display:block; margin-bottom:4px;">Which side(s) of the road to check, at every position checked</label>
+    <select id="side_mode" name="side_mode" form="run-form" onchange="onSideModeChange()">
+      <option value="center" selected>Center only (default) - just the position itself</option>
+      <option value="sides">Sides only, skip center - offset perpendicular points on each side</option>
+      <option value="both">Center + both sides - all three</option>
+    </select>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">A road can have two physically distinct, separately-surveyed-by-Google carriageways or trunks a short distance apart while sharing one here_segment_id - Street View's nearest-panorama snapping means centerline sampling alone can keep missing a sign on the other one. "Center only" checks just the position(s) themselves. "Sides only" offsets each position perpendicular to the road on both sides and skips the center entirely - useful once you know the center's own coverage isn't the carriageway/trunk you care about, since it wastes no calls on it. "Center + both sides" checks all three when you're not sure which one has the sign; roughly triples API calls per position.</p>
   </div>
   <div id="side-offset-row" style="margin-top:8px; opacity:0.45;">
     <label for="side_offset_m" style="display:inline; margin:0;">Offset distance (meters)</label>
     <input type="number" id="side_offset_m" name="side_offset_m" form="run-form" value="20" min="1" max="200" step="1" style="width:80px; display:inline-block; margin-left:8px;" disabled>
-    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Roughly triples API calls per position checked (center + left + right). If the other carriageway still isn't reached, try a larger offset.</p>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">If the other carriageway/trunk still isn't reached, try a larger offset.</p>
   </div>
 </div>
 
@@ -114,8 +119,8 @@
     document.getElementById('walk_segment_spacing_m').disabled = !on;
   }
 
-  function onCheckBothSidesChange() {
-    const on = document.getElementById('check_both_sides').checked;
+  function onSideModeChange() {
+    const on = document.getElementById('side_mode').value !== 'center';
     document.getElementById('side-offset-row').style.opacity = on ? '1' : '0.45';
     document.getElementById('side_offset_m').disabled = !on;
   }

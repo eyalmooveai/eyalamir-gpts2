@@ -151,19 +151,27 @@ Additional options on the form:
   it runs slower - keep "candidates to try" modest when it's on. Images/
   results are cached per position (under a `point<N>/` subdirectory),
   same as the default single-point mode.
-- **Also check both sides of the road** - a road can have two physically
-  distinct, separately-surveyed-by-Google carriageways (a divided road)
-  a short distance apart, close enough that they're the same "here
-  segment" in the source data but not close enough for Street View's
-  nearest-panorama snapping to ever reach the far one from centerline
-  sampling alone. Checking this offsets every position checked (whether
-  just the centroid or every walked point) by "Offset distance (meters)"
-  (default 20) perpendicular to the road on **both** sides, so the other
-  carriageway's own Street View coverage gets a chance too. Roughly
-  triples API calls per position (center + left + right); if the other
-  carriageway still isn't reached, try a larger offset. Combines with
-  "slow-walk the full length" - each walked position gets both-sides
-  checking too.
+- **Which side(s) of the road to check** - a road can have two physically
+  distinct, separately-surveyed-by-Google carriageways or trunks a short
+  distance apart, close enough that they're the same "here segment" in
+  the source data but not close enough for Street View's nearest-panorama
+  snapping to ever reach the far one from centerline sampling alone.
+  Applies to every position checked (whether just the centroid or every
+  walked point):
+  - **Center only** (default) - just the position(s) themselves, same as
+    always.
+  - **Sides only** - skips the center and instead offsets each position
+    by "Offset distance (meters)" (default 20) perpendicular to the road
+    on both sides. Useful once you already know the center point's own
+    Street View coverage isn't the carriageway/trunk you care about, so
+    it wastes no calls checking it.
+  - **Center + both sides** - checks all three, for when you're not sure
+    which one has the sign. Roughly triples API calls per position
+    (center + left + right).
+
+  If the other carriageway/trunk still isn't reached, try a larger
+  offset. Combines with "slow-walk the full length" - each walked
+  position gets the same side-mode treatment.
 
 ### CLI
 
@@ -180,8 +188,8 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--walk-all` | off | Don't stop at the first readable sign - try every candidate and report every match |
 | `--walk-segment` | off | Sample several positions along each segment's full length instead of just its centroid |
 | `--walk-segment-spacing-m` | `15` | Target distance in meters between sampled positions when `--walk-segment` is set (point count is derived from this and each segment's actual length, clamped to 2-40 points) |
-| `--check-both-sides` | off | At each checked position, also probe points offset perpendicular to the road on both sides |
-| `--side-offset-m` | `20` | Perpendicular offset in meters for `--check-both-sides` |
+| `--side-mode` | `center` | Which perpendicular-offset points to probe at each checked position: `center` (just the point itself), `sides` (only the two offset points, skipping center), or `both` (center plus both sides) |
+| `--side-offset-m` | `20` | Perpendicular offset in meters for `--side-mode sides`/`both` |
 | `--headings` | `0,90,180,270` | Comma-separated headings (0-359) to capture per position (max 24) - compass degrees, or relative angles if `--headings-relative` is set |
 | `--headings-relative` | off | Treat `--headings` as relative to each position's local road bearing (0=ahead, 90=right, 180=behind, 270=left) instead of fixed compass degrees |
 | `--out-dir` | `output` | Where Street View images are saved |

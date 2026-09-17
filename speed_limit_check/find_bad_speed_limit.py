@@ -52,6 +52,7 @@ DEFAULT_KEYS_FILE = Path.home() / "Claude" / "MooveAI" / "keys.env"
 STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metadata"
 STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 DEFAULT_HEADINGS = (0, 90, 180, 270)
+SIDE_MODES = ("center", "sides", "both")
 
 SPEED_TOKEN_RE = re.compile(r"^speed$", re.IGNORECASE)
 LIMIT_TOKEN_RE = re.compile(r"^limit$", re.IGNORECASE)
@@ -159,16 +160,19 @@ def parse_args() -> argparse.Namespace:
         "segment isn't under-sampled and a long one isn't wastefully over-sampled",
     )
     p.add_argument(
-        "--check-both-sides",
-        action="store_true",
-        help="At each checked position, also probe points offset perpendicular to the road (both sides) - "
-        "helps find a sign on a divided road / nearby parallel carriageway that centerline sampling alone misses",
+        "--side-mode",
+        choices=SIDE_MODES,
+        default="center",
+        help="Which perpendicular-offset points to probe at each checked position: 'center' (default, just the "
+        "point itself), 'sides' (only the two points offset --side-offset-m to either side, skipping the center "
+        "- e.g. for a divided road where each here_segment_id spans two separate trunks/carriageways and you "
+        "only want the side ones), or 'both' (center plus both sides)",
     )
     p.add_argument(
         "--side-offset-m",
         type=float,
         default=20.0,
-        help="Perpendicular offset in meters for --check-both-sides (default: 20)",
+        help="Perpendicular offset in meters for --side-mode sides/both (default: 20)",
     )
     p.add_argument("--out-dir", default="output", help="Directory to save Street View images into (default: ./output)")
     p.add_argument(
@@ -690,7 +694,7 @@ def run_pipeline(
     walk_all: bool = False,
     walk_segment: bool = False,
     walk_segment_spacing_m: float = 15.0,
-    check_both_sides: bool = False,
+    side_mode: str = "center",
     side_offset_m: float = 20.0,
     headings: tuple[int, ...] = DEFAULT_HEADINGS,
     headings_relative: bool = False,
@@ -718,13 +722,19 @@ def run_pipeline(
     away from its centroid. This multiplies API
     calls by roughly that many points, so it costs more and takes longer.
 
-    With `check_both_sides=True`, each checked position (whether just the
-    centroid or every walked point) is supplemented by two more points
-    offset `side_offset_m` meters perpendicular to the road on either
-    side. Street View's nearest-panorama snapping means sampling only the
-    centerline can keep returning the same one carriageway of a divided
-    road even as you walk its length - a sign on the other carriageway,
-    a short perpendicular distance away, is otherwise never reached.
+    `side_mode` controls which perpendicular-offset points are probed at
+    each checked position (whether just the centroid or every walked
+    point): `"center"` (default) checks only the position itself;
+    `"both"` additionally probes two points offset `side_offset_m` meters
+    perpendicular to the road on either side; `"sides"` probes only
+    those two offset points and skips the center. Street View's
+    nearest-panorama snapping means sampling only the centerline can keep
+    returning the same one carriageway of a divided road even as you walk
+    its length - a sign on the other carriageway, a short perpendicular
+    distance away, is otherwise never reached. Some here_segment_ids cover
+    two genuinely separate trunks/carriageways where the center point's
+    own Street View coverage is on neither one of interest, in which case
+    `"sides"` avoids wasting calls on it.
 
     `headings` (default 0/90/180/270, i.e. N/E/S/W) sets which directions
     get captured at every position checked. More headings costs more
@@ -756,6 +766,8 @@ def run_pipeline(
 
     _validate_identifier(project, PROJECT_RE, "project")
     _validate_identifier(dataset, DATASET_RE, "dataset")
+    if side_mode not in SIDE_MODES:
+        raise ValueError(f"Invalid side_mode {side_mode!r} - must be one of {SIDE_MODES}")
     table = table_name(state, year, month)
     criteria = criteria if criteria is not None else default_criteria()
     walk_segment_spacing_m = max(1.0, float(walk_segment_spacing_m))
@@ -791,7 +803,7 @@ def run_pipeline(
         tag = f"[{i + 1}/{n}]"
         seg_dir_root = out_root / safe_segment_dirname(seg_id)
 
-        coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or check_both_sides or headings_relative) else []
+        coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or side_mode != "center" or headings_relative) else []
         if walk_segment and coords:
             point_count = points_for_spacing(coords, walk_segment_spacing_m)
             base_points = sample_points_along_line(coords, point_count)  # [(lat, lon, bearing), ...]
@@ -800,20 +812,28 @@ def run_pipeline(
             base_points = [(lat, lon, overall_bearing(coords) if coords else 0.0)]
             walked = False
 
-        # Flatten each base position into center (+ left/right if
-        # check_both_sides) query points. Directory naming preserves the
-        # exact prior layout when a mode is off, so existing caches on disk
-        # are still reused: flat seg_dir_root with neither mode, point<N>
-        # with only walk_segment, so only combinations actually using a new
-        # mode get new subdirectories. Each point carries the road's local
-        # bearing there, so headings_relative can rotate the requested
-        # headings to face "forward along this point's direction of travel"
-        # rather than a fixed compass direction.
+        # Flatten each base position into its side_mode query points -
+        # "center" is just the point itself, "sides" is the two
+        # perpendicular offset points only (skipping the center - useful
+        # when a here_segment_id spans two genuinely separate trunks and
+        # only the offset ones land on the one(s) of interest), "both" is
+        # center plus both sides. Directory naming preserves the exact
+        # prior layout when a mode is off, so existing caches on disk are
+        # still reused: flat seg_dir_root with side_mode="center" and no
+        # walk_segment, point<N> with only walk_segment, so only
+        # combinations actually using a new mode get new subdirectories.
+        # Each point carries the road's local bearing there, so
+        # headings_relative can rotate the requested headings to face
+        # "forward along this point's direction of travel" rather than a
+        # fixed compass direction.
+        include_center = side_mode in ("center", "both")
+        include_sides = side_mode in ("sides", "both")
         sample_points = []  # (lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing)
         for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
             point_prefix = f"point{p_idx}" if walked else None
-            sample_points.append((p_lat, p_lon, point_prefix, "center" if check_both_sides else None, p_idx, p_bearing))
-            if check_both_sides:
+            if include_center:
+                sample_points.append((p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing))
+            if include_sides:
                 l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, side_offset_m)
                 r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, side_offset_m)
                 sample_points.append((l_lat, l_lon, point_prefix, "left", p_idx, p_bearing))
@@ -822,8 +842,10 @@ def run_pipeline(
         mode_desc = []
         if walked:
             mode_desc.append(f"walking {len(base_points)} position(s)")
-        if check_both_sides:
+        if side_mode == "both":
             mode_desc.append(f"±{side_offset_m:.0f}m both sides")
+        elif side_mode == "sides":
+            mode_desc.append(f"±{side_offset_m:.0f}m sides only (no center)")
         where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
         log(f"{tag} here_segment_id={seg_id} - {where}")
 
@@ -930,7 +952,7 @@ def main() -> int:
             walk_all=args.walk_all,
             walk_segment=args.walk_segment,
             walk_segment_spacing_m=args.walk_segment_spacing_m,
-            check_both_sides=args.check_both_sides,
+            side_mode=args.side_mode,
             side_offset_m=args.side_offset_m,
             headings=args.headings,
             headings_relative=args.headings_relative,
