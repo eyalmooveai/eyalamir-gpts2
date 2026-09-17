@@ -203,6 +203,19 @@ Additional options on the form:
   If the other carriageway/trunk still isn't reached, try a larger
   offset. Combines with "slow-walk the full length" - each walked
   position gets the same side-mode treatment.
+- **Auto-detect the offset instead, from the segment's own width** - off
+  by default, meaning "Offset distance" above is a single fixed value
+  used for every candidate regardless of the actual road. Check this to
+  instead estimate it per candidate: from the segment's own middle
+  position, probe increasing distances on each side and look for where a
+  genuinely separate Street View panorama actually exists (i.e. its
+  snapped location has moved away from the centerline with the probe,
+  rather than Street View just re-snapping back to the same nearby
+  coverage) - the smallest such distance found is used as that
+  candidate's offset, on the side(s) it was found. Adds a handful of
+  extra Street View calls per candidate for the probing itself, and falls
+  back to the manual offset distance for a candidate where nothing is
+  found within the probed range (out to 60m).
 
 ### CLI
 
@@ -220,7 +233,8 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--walk-segment` | off | Sample several positions along each segment's full length instead of just its centroid |
 | `--walk-segment-spacing-m` | `15` | Target distance in meters between sampled positions when `--walk-segment` is set (point count is derived from this and each segment's actual length, clamped to 2-40 points) |
 | `--side-mode` | `center` | Which perpendicular-offset points to probe at each checked position: `center` (just the point itself), `sides` (only the two offset points, skipping center), or `both` (center plus both sides) |
-| `--side-offset-m` | `20` | Perpendicular offset in meters for `--side-mode sides`/`both` |
+| `--side-offset-m` | `20` | Perpendicular offset in meters for `--side-mode sides`/`both` - the fallback when `--auto-side-offset` is set and finds nothing |
+| `--auto-side-offset` | off | Estimate `--side-offset-m` per candidate from the segment's own width instead of using a fixed value (see web UI description above) |
 | `--headings` | `0,90,180,270` | Comma-separated headings (0-359) to capture per position (max 24) - compass degrees, or relative angles if `--headings-relative` is set |
 | `--headings-relative` | off | Treat `--headings` as relative to each position's local road bearing (0=ahead, 90=right, 180=behind, 270=left) instead of fixed compass degrees |
 | `--fov` | `90` | Street View camera field of view in degrees (10-120) - narrower zooms in, making a distant/small sign more legible to OCR at the cost of a narrower cone per heading |
@@ -288,6 +302,12 @@ are cached to disk and reused rather than re-fetched:
   filename rather than overwriting the default-fov one, so re-running with
   a narrower zoom to chase a hard-to-read sign doesn't throw away the
   wider shots already fetched, and a plain re-run still reuses them too.
+  Side positions are saved under a `left_<N>m`/`right_<N>m` subdirectory
+  naming the actual offset used, not just `left`/`right` - so a different
+  offset (whether from changing "Offset distance" manually or from
+  auto-detection picking a different width on a re-run) always fetches
+  fresh images at the new positions instead of silently reusing images
+  from a different offset under the same directory name.
 - **Vision OCR results**: cached to a `<image>.ocr.json` sidecar file next
   to each image. If present, it's loaded instead of calling Vision again.
 

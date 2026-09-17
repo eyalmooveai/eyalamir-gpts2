@@ -70,6 +70,20 @@ MAX_FOV = 120
 # latency and Vision OCR per image already dwarf this).
 STREETVIEW_MIN_INTERVAL_S = 0.1
 
+# Auto-detecting the side offset probes increasing perpendicular distances
+# from the segment's own middle point looking for where a genuinely
+# separate panorama actually exists, rather than requiring the offset to
+# be guessed manually - see _estimate_side_offset_m. Distances grow
+# geometrically rather than linearly so a narrow street is found cheaply
+# (few probes) while a wide one is still reachable without probing every
+# meter in between.
+STREET_WIDTH_PROBE_DISTANCES_M = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0)
+# How far (as a fraction of the probed distance) the snapped panorama
+# location must have moved away from the centerline for that probe to
+# count as "found separate coverage" rather than Street View just
+# re-snapping back to the same nearby coverage on the original road.
+STREET_WIDTH_TRACK_RATIO = 0.6
+
 _streetview_throttle_lock = threading.Lock()
 _last_streetview_call_ts = 0.0
 
@@ -206,7 +220,16 @@ def parse_args() -> argparse.Namespace:
         "--side-offset-m",
         type=float,
         default=20.0,
-        help="Perpendicular offset in meters for --side-mode sides/both (default: 20)",
+        help="Perpendicular offset in meters for --side-mode sides/both (default: 20) - ignored per candidate "
+        "where --auto-side-offset finds something, used as the fallback otherwise",
+    )
+    p.add_argument(
+        "--auto-side-offset",
+        action="store_true",
+        help="Estimate --side-offset-m per candidate instead of using a fixed value, by probing outward from "
+        "the segment's own middle position for where a genuinely separate Street View panorama actually "
+        "exists - only takes effect with --side-mode sides/both, and falls back to the manual --side-offset-m "
+        "for a candidate where nothing is found",
     )
     p.add_argument("--out-dir", default="output", help="Directory to save Street View images into (default: ./output)")
     p.add_argument(
@@ -618,6 +641,46 @@ def fetch_streetview_images(
     return paths
 
 
+def _estimate_side_offset_m(
+    mid_lat: float, mid_lon: float, bearing: float, api_key: str, log=lambda msg: None
+) -> Optional[float]:
+    """Estimates how far to perpendicularly offset from (mid_lat, mid_lon)
+    - the segment's own middle position - to land on a genuinely separate
+    Street View panorama (a different carriageway/trunk), instead of
+    requiring `side_offset_m` to be set manually.
+
+    Probes STREET_WIDTH_PROBE_DISTANCES_M outward on each side (stopping
+    at the first hit), checking at each distance whether the snapped
+    panorama location has actually moved away from the centerline with
+    the query point (real, independent coverage found there) rather than
+    just re-snapping back to the same nearby coverage on the original
+    road (STREET_WIDTH_TRACK_RATIO controls how far counts as "moved
+    away"). Returns the larger of the two sides' estimates (using the
+    smaller risks undershooting the wider side's actual carriageway), or
+    None if neither side finds anything within the probed range - callers
+    should fall back to a manually configured offset in that case."""
+    found = []
+    for sign, side_label in ((-1, "left"), (1, "right")):
+        for d in STREET_WIDTH_PROBE_DISTANCES_M:
+            p_lat, p_lon = _destination_point(mid_lat, mid_lon, bearing + sign * 90, d)
+            coverage = streetview_coverage(p_lat, p_lon, api_key, log=log)
+            if not coverage:
+                continue
+            loc = coverage.get("location") or {}
+            if "lat" not in loc or "lng" not in loc:
+                continue
+            dist_from_centerline = _haversine_m((mid_lon, mid_lat), (loc["lng"], loc["lat"]))
+            if dist_from_centerline >= STREET_WIDTH_TRACK_RATIO * d:
+                log(f"    auto-offset {side_label}: separate coverage found ~{d:.0f}m out "
+                    f"(snapped panorama is {dist_from_centerline:.0f}m from the centerline).")
+                found.append(d)
+                break
+        else:
+            log(f"    auto-offset {side_label}: no separate coverage found within "
+                f"{STREET_WIDTH_PROBE_DISTANCES_M[-1]:.0f}m.")
+    return max(found) if found else None
+
+
 @dataclasses.dataclass
 class SignReading:
     speed_mph: int
@@ -817,6 +880,7 @@ def run_pipeline(
     walk_segment_spacing_m: float = 15.0,
     side_mode: str = "center",
     side_offset_m: float = 20.0,
+    auto_side_offset: bool = False,
     headings: tuple[int, ...] = DEFAULT_HEADINGS,
     headings_relative: bool = False,
     fov: int = DEFAULT_FOV,
@@ -857,6 +921,17 @@ def run_pipeline(
     two genuinely separate trunks/carriageways where the center point's
     own Street View coverage is on neither one of interest, in which case
     `"sides"` avoids wasting calls on it.
+
+    With `auto_side_offset=True`, `side_offset_m` is instead estimated per
+    candidate (once, from the segment's own middle position) by probing
+    outward until a genuinely separate panorama is actually found there -
+    see `_estimate_side_offset_m` - rather than requiring a single manual
+    distance to work for every segment regardless of its actual width.
+    Falls back to the manually configured `side_offset_m` for a candidate
+    where nothing is found within the probed range. Only takes effect
+    when `side_mode` isn't `"center"`, since the offset is otherwise
+    unused; adds a handful of extra Street View metadata calls per
+    candidate for the probing itself.
 
     With `headings_relative=True` and `walk_segment` both on, each side's
     headings are rotated by that trunk's own actual direction of travel
@@ -979,24 +1054,41 @@ def run_pipeline(
         # fixed compass direction.
         include_center = side_mode in ("center", "both")
         include_sides = side_mode in ("sides", "both")
+
+        effective_side_offset_m = side_offset_m
+        if include_sides and auto_side_offset:
+            if coords:
+                mid_lat, mid_lon, mid_bearing = sample_points_along_line(coords, 3)[1]
+            else:
+                mid_lat, mid_lon, mid_bearing = lat, lon, 0.0
+            log(f"{tag} Auto-detecting side offset from the segment's middle position...")
+            progress(base, f"{tag} Auto-detecting side offset...")
+            estimated = _estimate_side_offset_m(mid_lat, mid_lon, mid_bearing, api_key, log=log)
+            if estimated is not None:
+                effective_side_offset_m = estimated
+                log(f"{tag} Auto-detected side offset: {effective_side_offset_m:.0f}m")
+            else:
+                log(f"{tag} Auto side offset found nothing within range - using manual side offset {side_offset_m:.0f}m instead")
+
         sample_points = []  # [lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing] - bearing may be corrected below
         for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
             point_prefix = f"point{p_idx}" if walked else None
             if include_center:
                 sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
             if include_sides:
-                l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, side_offset_m)
-                r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, side_offset_m)
+                l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, effective_side_offset_m)
+                r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, effective_side_offset_m)
                 sample_points.append([l_lat, l_lon, point_prefix, "left", p_idx, p_bearing])
                 sample_points.append([r_lat, r_lon, point_prefix, "right", p_idx, p_bearing])
 
+        offset_desc = f"±{effective_side_offset_m:.0f}m" + (" auto" if include_sides and auto_side_offset and effective_side_offset_m != side_offset_m else "")
         mode_desc = []
         if walked:
             mode_desc.append(f"walking {len(base_points)} position(s)")
         if side_mode == "both":
-            mode_desc.append(f"±{side_offset_m:.0f}m both sides")
+            mode_desc.append(f"{offset_desc} both sides")
         elif side_mode == "sides":
-            mode_desc.append(f"±{side_offset_m:.0f}m sides only (no center)")
+            mode_desc.append(f"{offset_desc} sides only (no center)")
         where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
         log(f"{tag} here_segment_id={seg_id} - {where}")
         for key, value in row_dict.items():
@@ -1053,7 +1145,12 @@ def run_pipeline(
             if point_prefix:
                 point_dir = point_dir / point_prefix
             if side_label:
-                point_dir = point_dir / side_label
+                # left/right directories encode the actual offset used, not
+                # just the side, so a cached image is never silently reused
+                # under a different offset - the auto-detected offset can
+                # vary per candidate, and a manual --side-offset-m change
+                # between runs previously collided with a stale cache too.
+                point_dir = point_dir / (f"{side_label}_{effective_side_offset_m:.0f}m" if side_label in ("left", "right") else side_label)
             actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
             progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
             image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, fov=fov, log=log)
@@ -1134,6 +1231,7 @@ def main() -> int:
             walk_segment_spacing_m=args.walk_segment_spacing_m,
             side_mode=args.side_mode,
             side_offset_m=args.side_offset_m,
+            auto_side_offset=args.auto_side_offset,
             headings=args.headings,
             headings_relative=args.headings_relative,
             fov=args.fov,

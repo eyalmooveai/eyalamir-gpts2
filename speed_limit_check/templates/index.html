@@ -97,7 +97,12 @@
   <div id="side-offset-row" style="margin-top:8px; opacity:0.45;">
     <label for="side_offset_m" style="display:inline; margin:0;">Offset distance (meters)</label>
     <input type="number" id="side_offset_m" name="side_offset_m" form="run-form" value="20" min="1" max="200" step="1" style="width:80px; display:inline-block; margin-left:8px;" disabled>
-    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">If the other carriageway/trunk still isn't reached, try a larger offset.</p>
+    <p id="side-offset-help" style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">If the other carriageway/trunk still isn't reached, try a larger offset.</p>
+    <div class="criterion-row" style="margin-top:8px;">
+      <input type="checkbox" id="auto_side_offset" name="auto_side_offset" form="run-form" onchange="onAutoSideOffsetChange()" {% if default_auto_side_offset %}checked{% endif %}>
+      <label for="auto_side_offset" style="font-size:0.9rem;">Auto-detect the offset instead, from the segment's own width</label>
+    </div>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Probes outward from the segment's middle position, on each side, for where a genuinely separate Street View panorama actually exists, and uses that distance instead of the fixed value above - no need to guess a single offset that works for every segment regardless of its actual width. Adds a handful of extra Street View calls per candidate for the probing. Falls back to the offset distance above for a candidate where nothing is found.</p>
   </div>
 </div>
 
@@ -153,6 +158,7 @@
     onWalkSegmentChange();
     onSideModeChange();
     onHeadingsRelativeChange();
+    onAutoSideOffsetChange();
   }
 
   function initForm() {
@@ -188,6 +194,14 @@
     const on = document.getElementById('side_mode').value !== 'center';
     document.getElementById('side-offset-row').style.opacity = on ? '1' : '0.45';
     document.getElementById('side_offset_m').disabled = !on;
+    document.getElementById('auto_side_offset').disabled = !on;
+  }
+
+  function onAutoSideOffsetChange() {
+    const on = document.getElementById('auto_side_offset').checked;
+    document.getElementById('side-offset-help').textContent = on
+      ? 'Used only as a fallback, for a candidate where auto-detection finds nothing within range.'
+      : 'If the other carriageway/trunk still isn\'t reached, try a larger offset.';
   }
 
   function onHeadingsRelativeChange() {

@@ -47,6 +47,7 @@ MAX_JOBS = 20  # cap in-memory job history for this long-lived local process
 WEB_DEFAULT_HEADINGS = "10"
 WEB_DEFAULT_HEADINGS_RELATIVE = True
 WEB_DEFAULT_FOV = 50
+WEB_DEFAULT_AUTO_SIDE_OFFSET = False
 WEB_DEFAULT_WALK_ALL = True
 WEB_DEFAULT_WALK_SEGMENT = True
 WEB_DEFAULT_WALK_SEGMENT_SPACING_M = 2
@@ -136,6 +137,7 @@ def _run_job(
     walk_segment_spacing_m: float,
     side_mode: str,
     side_offset_m: float,
+    auto_side_offset: bool,
     headings: tuple[int, ...],
     headings_relative: bool,
     fov: int,
@@ -163,6 +165,7 @@ def _run_job(
             walk_segment_spacing_m=walk_segment_spacing_m,
             side_mode=side_mode,
             side_offset_m=side_offset_m,
+            auto_side_offset=auto_side_offset,
             headings=headings,
             headings_relative=headings_relative,
             fov=fov,
@@ -206,6 +209,7 @@ def index():
         default_walk_segment=WEB_DEFAULT_WALK_SEGMENT,
         default_walk_segment_spacing_m=WEB_DEFAULT_WALK_SEGMENT_SPACING_M,
         default_side_mode=WEB_DEFAULT_SIDE_MODE,
+        default_auto_side_offset=WEB_DEFAULT_AUTO_SIDE_OFFSET,
     )
 
 
@@ -231,6 +235,7 @@ def run():
         side_offset_m = float(request.form.get("side_offset_m") or 20.0)
     except ValueError:
         side_offset_m = 20.0
+    auto_side_offset = request.form.get("auto_side_offset") is not None
     headings_raw = request.form.get("headings", "").strip()
     try:
         headings = parse_headings(headings_raw) if headings_raw else DEFAULT_HEADINGS
@@ -254,7 +259,7 @@ def run():
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
             criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
-            side_mode, side_offset_m, headings, headings_relative, fov,
+            side_mode, side_offset_m, auto_side_offset, headings, headings_relative, fov,
         ),
         daemon=True,
     )
