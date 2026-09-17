@@ -68,12 +68,12 @@ python app.py
 
 Then open **http://127.0.0.1:5050** in a browser. Fill in state/year/month
 (project/dataset default to `moove-platform-testing-data`/`calc_out`, and
-can be overridden per run) and submit - the page shows the matched segment's
-full row, the sign-read speed, the annotated Street View image with the
-sign boxed, all captured headings, and the list of candidates tried. Runs
-on localhost only; a single request can take up to a minute since it's
-doing the BigQuery query plus several Street View + Vision calls
-synchronously.
+can be overridden per run) and submit - the run happens in a background
+thread while the page shows a live progress bar and log (polling every
+~700ms), then lands on a results page with the matched segment's full row,
+the sign-read speed, and a gallery of every candidate tried - including
+the images captured and the OCR text found in each, for ones that didn't
+match too. Runs on localhost only.
 
 ### CLI
 

@@ -295,12 +295,21 @@ def run_pipeline(
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
+    progress=lambda fraction, message: None,
 ) -> PipelineResult:
     """Core pipeline, shared by the CLI and the web app: query BigQuery for
     mismatched segments, then walk candidates trying to read a sign at each
     via Street View + Vision OCR. Raises NoUsableApiKey / StreetViewAuthError
     on setup or auth problems; returns normally (with match_row=None) if no
-    candidate yields a readable sign."""
+    candidate yields a readable sign.
+
+    `progress(fraction, message)` is called throughout with fraction in
+    [0, 1] and a human-readable status - e.g. for a web UI progress bar.
+    It's a coarse estimate (evenly dividing 1.0 across candidates, and each
+    candidate's slice across its coverage-check/download/OCR steps), not a
+    measurement of actual API latency.
+    """
+    progress(0.0, "Starting...")
     load_keys_file(keys_file)
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     if not api_key or api_key == "your-key-here":
@@ -311,33 +320,44 @@ def run_pipeline(
 
     table = table_name(state, year, month)
     log(f"Querying `{project}.{dataset}.{table}` ...")
+    progress(0.0, f"Querying `{project}.{dataset}.{table}` ...")
     candidates = fetch_candidates(project, dataset, table, max_candidates)
     result = PipelineResult(table=table, project=project, dataset=dataset, attempts=[])
     if not candidates:
         log("No road segments matched the mismatch criteria.")
+        progress(1.0, "No road segments matched the mismatch criteria.")
         return result
     log(f"Found {len(candidates)} candidate segment(s); trying them in order of largest mismatch.")
+    progress(0.02, f"Found {len(candidates)} candidate segment(s).")
 
     vision_client = vision.ImageAnnotatorClient()
     out_root = Path(out_dir) / f"{state.upper()}_{year}_{month}"
+    n = len(candidates)
+    span = 1.0 / n
 
     for i, row in enumerate(candidates):
         lat, lon = row["centroid_lat"], row["centroid_lon"]
         segment_id = row["here_segment_id"]
-        log(f"[{i + 1}/{len(candidates)}] here_segment_id={segment_id} at ({lat:.6f}, {lon:.6f})")
+        base = i * span
+        tag = f"[{i + 1}/{n}]"
+        log(f"{tag} here_segment_id={segment_id} at ({lat:.6f}, {lon:.6f})")
+        progress(base, f"{tag} Checking Street View coverage for {segment_id}...")
 
         coverage = streetview_coverage(lat, lon, api_key)  # StreetViewAuthError propagates to caller
         if not coverage:
             result.attempts.append(CandidateAttempt(i + 1, segment_id, lat, lon, "no_coverage"))
             log("  No Street View coverage here, trying next candidate.")
+            progress(base + span, f"{tag} No Street View coverage, trying next candidate...")
             continue
 
         seg_dir = out_root / safe_segment_dirname(segment_id)
+        progress(base + 0.3 * span, f"{tag} Downloading Street View imagery...")
         image_paths = fetch_streetview_images(lat, lon, api_key, seg_dir)
 
         reading = None
         ocr_snippets: list[str] = []
-        for image_path in image_paths:
+        for k, image_path in enumerate(image_paths):
+            progress(base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * span, f"{tag} Running OCR on image {k + 1}/{len(image_paths)}...")
             reading, ocr_text = find_sign_in_image(vision_client, image_path)
             snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
             ocr_snippets.append(snippet)
@@ -350,6 +370,7 @@ def run_pipeline(
                 CandidateAttempt(i + 1, segment_id, lat, lon, "no_sign_read", images=image_paths, ocr_snippets=ocr_snippets)
             )
             log("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.")
+            progress(base + span, f"{tag} No readable sign, trying next candidate...")
             continue
 
         annotated_path = seg_dir / "sign_detected.jpg"
@@ -365,9 +386,11 @@ def run_pipeline(
         result.match_annotated_image = annotated_path
         result.match_all_images = image_paths
         log(f"Match found: {reading.speed_mph} mph on segment {segment_id}.")
+        progress(1.0, f"Match found: {reading.speed_mph} mph.")
         return result
 
     log("Exhausted all candidates without finding a readable speed limit sign.")
+    progress(1.0, "Exhausted all candidates without finding a readable speed limit sign.")
     return result
 
 

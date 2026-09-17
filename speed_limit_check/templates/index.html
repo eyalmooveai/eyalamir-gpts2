@@ -30,15 +30,13 @@
     <input type="number" id="candidates" name="candidates" value="10" min="1" max="50">
 
     <button type="submit" id="submit-btn">Find a mismatched sign</button>
-    <div id="status">Querying BigQuery, fetching Street View imagery, and running OCR&hellip; this can take up to a minute.</div>
   </form>
 </div>
 
 <script>
   function onSubmit() {
     document.getElementById('submit-btn').disabled = true;
-    document.getElementById('submit-btn').textContent = 'Running…';
-    document.getElementById('status').style.display = 'block';
+    document.getElementById('submit-btn').textContent = 'Starting…';
   }
 </script>
 {% endblock %}

@@ -1,0 +1,48 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <p style="color:var(--muted); font-size:0.85rem; margin-top:0;">{{ state }} {{ year }}-{{ month }}</p>
+  <p id="message">Starting&hellip;</p>
+  <div style="background:var(--bg); border:1px solid var(--border); border-radius:999px; height:10px; overflow:hidden;">
+    <div id="bar" style="background:var(--accent); height:100%; width:0%; transition:width 0.3s ease;"></div>
+  </div>
+  <p id="pct" style="color:var(--muted); font-size:0.8rem; margin:6px 0 0;">0%</p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Log</h3>
+  <pre class="log" id="log"></pre>
+</div>
+
+<script>
+  const jobId = {{ job_id|tojson }};
+
+  async function poll() {
+    let data;
+    try {
+      const res = await fetch(`/status/${jobId}`);
+      data = await res.json();
+    } catch (e) {
+      setTimeout(poll, 1000);
+      return;
+    }
+
+    document.getElementById('bar').style.width = (data.progress * 100) + '%';
+    document.getElementById('pct').textContent = Math.round(data.progress * 100) + '%';
+    document.getElementById('message').textContent = data.message;
+    const logEl = document.getElementById('log');
+    logEl.textContent = data.log.join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+
+    if (data.status === 'done') {
+      window.location = `/result/${jobId}`;
+    } else if (data.status === 'error') {
+      window.location = `/error/${jobId}`;
+    } else {
+      setTimeout(poll, 700);
+    }
+  }
+
+  poll();
+</script>
+{% endblock %}
