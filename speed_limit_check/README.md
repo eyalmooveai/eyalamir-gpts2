@@ -246,11 +246,17 @@ through all candidates), both the CLI and the web app surface:
 A transient 5xx from the Street View Static (image) API - Google's own
 server hiccupping, not a bad key or request - is retried a few times and
 then that one heading is skipped (logged, not fatal) rather than aborting
-the whole run. This matters most on a long walk-segment/side-mode run
-with many positions: one flaky image no longer throws away everything
-already fetched for the other dozens of positions. A 4xx (bad key,
-billing, or malformed request) still fails immediately without retrying,
-since that will keep failing identically on every position.
+the whole run. Likewise, the Street View metadata (coverage-check) API's
+own `UNKNOWN_ERROR` status - Google's documented status for "a server
+error, the request may succeed if you try again" - is retried and then
+treated as no coverage at that position rather than aborting. This
+matters most on a long walk-segment/side-mode run with many positions:
+one flaky response no longer throws away everything already fetched for
+the other dozens of positions, or the progress already made across
+earlier candidates in the same run. A real key/billing/quota problem
+(REQUEST_DENIED, OVER_QUERY_LIMIT, INVALID_REQUEST, or a 4xx from the
+image API) still fails immediately without retrying, since that will
+keep failing identically on every position.
 
 ## Caching
 

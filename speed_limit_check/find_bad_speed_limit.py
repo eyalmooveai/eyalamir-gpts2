@@ -54,7 +54,7 @@ STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metad
 STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 DEFAULT_HEADINGS = (0, 90, 180, 270)
 SIDE_MODES = ("center", "sides", "both")
-STREETVIEW_IMAGE_RETRIES = 3
+STREETVIEW_API_RETRIES = 3
 DEFAULT_FOV = 90
 MIN_FOV = 10
 MAX_FOV = 120
@@ -501,17 +501,39 @@ class StreetViewAuthError(RuntimeError):
     """The API key/billing/API-enablement is broken, as opposed to 'no imagery here'."""
 
 
-def streetview_coverage(lat: float, lon: float, api_key: str) -> Optional[dict]:
-    resp = requests.get(STREETVIEW_METADATA_URL, params={"location": f"{lat},{lon}", "key": api_key}, timeout=30)
-    resp.raise_for_status()
-    meta = resp.json()
-    status = meta.get("status")
+def streetview_coverage(lat: float, lon: float, api_key: str, log=lambda msg: None) -> Optional[dict]:
+    """Checks Street View coverage at (lat, lon) via the metadata endpoint.
+
+    UNKNOWN_ERROR is Google's own documented status for a transient
+    server-side hiccup ("the request may succeed if you try again") - as
+    opposed to REQUEST_DENIED/OVER_QUERY_LIMIT/INVALID_REQUEST, which are
+    real key/billing/quota problems that will keep failing identically on
+    every subsequent position. So UNKNOWN_ERROR is retried a few times and
+    then, like ZERO_RESULTS, treated as "no coverage here" rather than
+    aborting the whole run - mirroring how a transient 5xx from the image
+    endpoint is handled in fetch_streetview_images."""
+    status = None
+    meta = {}
+    for attempt in range(STREETVIEW_API_RETRIES):
+        resp = requests.get(STREETVIEW_METADATA_URL, params={"location": f"{lat},{lon}", "key": api_key}, timeout=30)
+        resp.raise_for_status()
+        meta = resp.json()
+        status = meta.get("status")
+        if status != "UNKNOWN_ERROR":
+            break
+        if attempt < STREETVIEW_API_RETRIES - 1:
+            log(f"    Street View metadata returned UNKNOWN_ERROR, retrying...")
+            time.sleep(2**attempt)
+
     if status == "OK":
         return meta
     if status == "ZERO_RESULTS":
         return None
-    # REQUEST_DENIED, OVER_QUERY_LIMIT, INVALID_REQUEST, UNKNOWN_ERROR, etc.
-    # are all key/billing/quota problems, not "no imagery at this location" -
+    if status == "UNKNOWN_ERROR":
+        log(f"    Street View metadata still returning UNKNOWN_ERROR after {STREETVIEW_API_RETRIES} tries - treating as no coverage here.")
+        return None
+    # REQUEST_DENIED, OVER_QUERY_LIMIT, INVALID_REQUEST, etc. are real
+    # key/billing/quota problems, not "no imagery at this location" -
     # surface them instead of silently treating every candidate as uncovered.
     raise StreetViewAuthError(f"Street View metadata request failed: status={status} error_message={meta.get('error_message')!r}")
 
@@ -548,15 +570,15 @@ def fetch_streetview_images(
             continue
         params = {"size": "640x640", "location": f"{lat},{lon}", "heading": heading, "fov": fov, "pitch": 0, "key": api_key}
         resp = None
-        for attempt in range(STREETVIEW_IMAGE_RETRIES):
+        for attempt in range(STREETVIEW_API_RETRIES):
             resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
             if resp.status_code < 500:
                 break
-            if attempt < STREETVIEW_IMAGE_RETRIES - 1:
+            if attempt < STREETVIEW_API_RETRIES - 1:
                 log(f"    {path.name}: Street View image API returned {resp.status_code}, retrying...")
                 time.sleep(2**attempt)
         if resp.status_code >= 500:
-            log(f"    {path.name}: Street View image API still failing after {STREETVIEW_IMAGE_RETRIES} tries "
+            log(f"    {path.name}: Street View image API still failing after {STREETVIEW_API_RETRIES} tries "
                 f"({resp.status_code}) - skipping this heading.")
             continue
         resp.raise_for_status()
@@ -963,7 +985,7 @@ def run_pipeline(
         if headings_relative and include_sides and walked:
             progress(base, f"{tag} Resolving Street View coverage to determine each side's actual direction of travel...")
             for pt_i, sp in enumerate(sample_points):
-                coverage_by_point[pt_i] = streetview_coverage(sp[0], sp[1], api_key)
+                coverage_by_point[pt_i] = streetview_coverage(sp[0], sp[1], api_key, log=log)
             for side_label in ("left", "right"):
                 idxs = [pt_i for pt_i, sp in enumerate(sample_points) if sp[3] == side_label]
                 actual_positions = []
@@ -984,7 +1006,7 @@ def run_pipeline(
             ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
             progress(point_base, f"{ptag} Checking Street View coverage...")
 
-            coverage = coverage_by_point[pt_i] if pt_i in coverage_by_point else streetview_coverage(p_lat, p_lon, api_key)
+            coverage = coverage_by_point[pt_i] if pt_i in coverage_by_point else streetview_coverage(p_lat, p_lon, api_key, log=log)
             if not coverage:
                 log(f"  {ptag}: no Street View coverage here.")
                 progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
