@@ -124,13 +124,19 @@ Additional options on the form:
 - **Slow-walk each segment's full length** - by default only the segment's
   centroid is checked, which can miss a sign positioned elsewhere along a
   longer segment. Check this to instead sample the segment's actual line
-  geometry (fetched from BigQuery) at N evenly-spaced positions from one
-  end to the other ("Positions to sample per segment", default 5, 2-20)
-  and check each in turn, stopping at the first one with a readable sign.
-  This roughly multiplies Street View + Vision API calls per segment by
-  that many, so it costs more and runs slower - keep "candidates to try"
-  modest when it's on. Images/results are cached per position (under a
-  `point<N>/` subdirectory), same as the default single-point mode.
+  geometry (fetched from BigQuery) at positions roughly "Spacing between
+  positions (meters)" (default 15) apart, from one end to the other, and
+  check each in turn, stopping at the first one with a readable sign. The
+  number of positions is derived from that spacing and the segment's own
+  length (clamped to 2-40 points), not a fixed count, so a short segment
+  isn't over-sampled and a long one isn't under-sampled by one setting.
+  If a sign keeps getting missed, try a smaller spacing - a 15m default
+  still leaves plenty of room to walk past a sign that's only clearly
+  legible within a narrower window. This costs more API calls the smaller
+  the spacing (roughly `segment_length / spacing` calls per segment), so
+  it runs slower - keep "candidates to try" modest when it's on. Images/
+  results are cached per position (under a `point<N>/` subdirectory),
+  same as the default single-point mode.
 - **Also check both sides of the road** - a road can have two physically
   distinct, separately-surveyed-by-Google carriageways (a divided road)
   a short distance apart, close enough that they're the same "here
@@ -159,7 +165,7 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--segment-id` | none | Check one specific `here_segment_id` instead of running the mismatch query |
 | `--walk-all` | off | Don't stop at the first readable sign - try every candidate and report every match |
 | `--walk-segment` | off | Sample several positions along each segment's full length instead of just its centroid |
-| `--walk-segment-points` | `5` | How many positions to sample when `--walk-segment` is set (clamped to 2-20) |
+| `--walk-segment-spacing-m` | `15` | Target distance in meters between sampled positions when `--walk-segment` is set (point count is derived from this and each segment's actual length, clamped to 2-40 points) |
 | `--check-both-sides` | off | At each checked position, also probe points offset perpendicular to the road on both sides |
 | `--side-offset-m` | `20` | Perpendicular offset in meters for `--check-both-sides` |
 | `--out-dir` | `output` | Where Street View images are saved |

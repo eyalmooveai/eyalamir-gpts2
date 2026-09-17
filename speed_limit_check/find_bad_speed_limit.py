@@ -151,10 +151,12 @@ def parse_args() -> argparse.Namespace:
         "(a sign may be located away from the centroid)",
     )
     p.add_argument(
-        "--walk-segment-points",
-        type=int,
-        default=5,
-        help="How many positions to sample along each segment when --walk-segment is set (default: 5)",
+        "--walk-segment-spacing-m",
+        type=float,
+        default=15.0,
+        help="Target distance in meters between sampled positions when --walk-segment is set (default: 15) - "
+        "the point count is derived from this and the segment's actual length, not a fixed count, so a short "
+        "segment isn't under-sampled and a long one isn't wastefully over-sampled",
     )
     p.add_argument(
         "--check-both-sides",
@@ -280,6 +282,21 @@ def overall_bearing(coords: list[tuple[float, float]]) -> float:
     if len(coords) < 2:
         return 0.0
     return _bearing_deg(coords[0], coords[-1])
+
+
+def line_length_m(coords: list[tuple[float, float]]) -> float:
+    return sum(_haversine_m(coords[i], coords[i + 1]) for i in range(len(coords) - 1))
+
+
+def points_for_spacing(coords: list[tuple[float, float]], spacing_m: float, min_points: int = 2, max_points: int = 40) -> int:
+    """How many points `sample_points_along_line` needs to keep consecutive
+    points roughly `spacing_m` apart over this line's actual length, e.g.
+    so a short segment isn't under-sampled and a long one isn't wastefully
+    over-sampled by a single fixed count regardless of length."""
+    length = line_length_m(coords)
+    if length <= 0 or spacing_m <= 0:
+        return min_points
+    return max(min_points, min(max_points, round(length / spacing_m) + 1))
 
 
 def sample_points_along_line(coords: list[tuple[float, float]], num_points: int) -> list[tuple[float, float, float]]:
@@ -632,7 +649,7 @@ def run_pipeline(
     segment_id: Optional[str] = None,
     walk_all: bool = False,
     walk_segment: bool = False,
-    walk_segment_points: int = 5,
+    walk_segment_spacing_m: float = 15.0,
     check_both_sides: bool = False,
     side_offset_m: float = 20.0,
     out_dir: Path = Path("output"),
@@ -652,9 +669,11 @@ def run_pipeline(
 
     By default each candidate is checked only at its centroid. With
     `walk_segment=True`, its full line geometry is instead sampled at
-    `walk_segment_points` (clamped to [2, 20]) evenly-spaced positions from
-    one end to the other, and each is checked in turn - a sign relevant to
-    the segment may sit well away from its centroid. This multiplies API
+    positions spaced roughly `walk_segment_spacing_m` meters apart (the
+    count is derived from that and the segment's own length, clamped to
+    [2, 40] points, rather than a fixed count regardless of length), and
+    each is checked in turn - a sign relevant to the segment may sit well
+    away from its centroid. This multiplies API
     calls by roughly that many points, so it costs more and takes longer.
 
     With `check_both_sides=True`, each checked position (whether just the
@@ -684,7 +703,7 @@ def run_pipeline(
     _validate_identifier(dataset, DATASET_RE, "dataset")
     table = table_name(state, year, month)
     criteria = criteria if criteria is not None else default_criteria()
-    walk_segment_points = max(2, min(int(walk_segment_points), 20))
+    walk_segment_spacing_m = max(1.0, float(walk_segment_spacing_m))
 
     if segment_id:
         segment_id = segment_id.strip()
@@ -719,7 +738,8 @@ def run_pipeline(
 
         coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or check_both_sides) else []
         if walk_segment and coords:
-            base_points = sample_points_along_line(coords, walk_segment_points)  # [(lat, lon, bearing), ...]
+            point_count = points_for_spacing(coords, walk_segment_spacing_m)
+            base_points = sample_points_along_line(coords, point_count)  # [(lat, lon, bearing), ...]
             walked = True
         else:
             base_points = [(lat, lon, overall_bearing(coords) if coords else 0.0)]
@@ -850,7 +870,7 @@ def main() -> int:
             segment_id=args.segment_id,
             walk_all=args.walk_all,
             walk_segment=args.walk_segment,
-            walk_segment_points=args.walk_segment_points,
+            walk_segment_spacing_m=args.walk_segment_spacing_m,
             check_both_sides=args.check_both_sides,
             side_offset_m=args.side_offset_m,
             out_dir=Path(args.out_dir),

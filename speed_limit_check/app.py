@@ -111,7 +111,7 @@ def _run_job(
     segment_id: str | None,
     walk_all: bool,
     walk_segment: bool,
-    walk_segment_points: int,
+    walk_segment_spacing_m: float,
     check_both_sides: bool,
     side_offset_m: float,
 ) -> None:
@@ -135,7 +135,7 @@ def _run_job(
             segment_id=segment_id,
             walk_all=walk_all,
             walk_segment=walk_segment,
-            walk_segment_points=walk_segment_points,
+            walk_segment_spacing_m=walk_segment_spacing_m,
             check_both_sides=check_both_sides,
             side_offset_m=side_offset_m,
             out_dir=OUT_DIR,
@@ -184,9 +184,9 @@ def run():
     walk_all = request.form.get("walk_all") is not None
     walk_segment = request.form.get("walk_segment") is not None
     try:
-        walk_segment_points = int(request.form.get("walk_segment_points") or 5)
+        walk_segment_spacing_m = float(request.form.get("walk_segment_spacing_m") or 15.0)
     except ValueError:
-        walk_segment_points = 5
+        walk_segment_spacing_m = 15.0
     check_both_sides = request.form.get("check_both_sides") is not None
     try:
         side_offset_m = float(request.form.get("side_offset_m") or 20.0)
@@ -202,7 +202,7 @@ def run():
         target=_run_job,
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
-            criteria, segment_id, walk_all, walk_segment, walk_segment_points,
+            criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
             check_both_sides, side_offset_m,
         ),
         daemon=True,

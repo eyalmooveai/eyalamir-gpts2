@@ -63,9 +63,9 @@
     <label for="walk_segment" style="font-size:0.9rem;">Slow-walk each segment's full length (a sign may sit away from the centroid, which is all that's checked by default)</label>
   </div>
   <div id="walk-segment-points-row" style="margin-top:8px; opacity:0.45;">
-    <label for="walk_segment_points" style="display:inline; margin:0;">Positions to sample per segment</label>
-    <input type="number" id="walk_segment_points" name="walk_segment_points" form="run-form" value="5" min="2" max="20" style="width:80px; display:inline-block; margin-left:8px;" disabled>
-    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Roughly multiplies Street View + OCR API calls by this many per segment - keep "candidates to try" modest when this is on.</p>
+    <label for="walk_segment_spacing_m" style="display:inline; margin:0;">Spacing between positions (meters)</label>
+    <input type="number" id="walk_segment_spacing_m" name="walk_segment_spacing_m" form="run-form" value="15" min="2" max="200" style="width:80px; display:inline-block; margin-left:8px;" disabled>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">The number of positions sampled is derived from this and each segment's actual length (2-40 points), rather than a fixed count - a short segment gets fewer, a long one gets more. Smaller spacing costs more API calls and runs slower; if a sign keeps getting missed, try a smaller value here.</p>
   </div>
 
   <div class="criterion-row" style="margin-top:14px;">
@@ -98,7 +98,7 @@
   function onWalkSegmentChange() {
     const on = document.getElementById('walk_segment').checked;
     document.getElementById('walk-segment-points-row').style.opacity = on ? '1' : '0.45';
-    document.getElementById('walk_segment_points').disabled = !on;
+    document.getElementById('walk_segment_spacing_m').disabled = !on;
   }
 
   function onCheckBothSidesChange() {
