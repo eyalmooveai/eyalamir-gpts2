@@ -437,6 +437,15 @@ list of variables. The manual step-by-step version below is exactly what
 it runs, useful if you want to understand or customize any individual
 piece.
 
+Granting IAM policy on the project is a different permission from
+creating the bucket/secret/service account - your own account can lack
+it even when those succeed. If so, the script doesn't abort; it grants
+what it can, still deploys, and prints exactly which grants need someone
+with IAM admin rights on the relevant project/resource. If an admin
+grants those directly (to `speed-limit-check-runner@<PROJECT_ID>.iam.gserviceaccount.com`)
+instead, set `SKIP_IAM_GRANTS=1` to skip the step cleanly rather than
+re-attempt (and fail) grants that are already in place.
+
 ### 1. Build and enable APIs
 
 ```bash

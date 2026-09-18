@@ -16,6 +16,16 @@
 #                    single region - separate from REGION because Cloud
 #                    Run needs a specific region (no "US") while a GCS
 #                    bucket can use a broader multi-region (default: REGION)
+#   SKIP_IAM_GRANTS  Set to any non-empty value to skip the "Granting IAM
+#                    roles" step entirely - e.g. when an admin/devops has
+#                    already granted the runtime service account
+#                    (speed-limit-check-runner@<PROJECT_ID>.iam.gserviceaccount.com)
+#                    everything it needs directly. Granting IAM policy on
+#                    the project is a separate permission from creating
+#                    the bucket/secret/service account above, so your own
+#                    account can lack it even after those succeed - if
+#                    unset and that's the case, this step fails per grant
+#                    but doesn't abort the rest of the deploy either way.
 #
 # Usage:
 #   PROJECT_ID=my-project REGION=us-central1 BUCKET_NAME=my-bucket \
@@ -82,12 +92,39 @@ else
   gcloud iam service-accounts create "$SA_NAME" --display-name="Speed limit sign checker (Cloud Run)"
 fi
 
-echo "-- Granting IAM roles --"
-gcloud projects add-iam-policy-binding "$BQ_PROJECT_ID" --member="serviceAccount:$SA" --role="roles/bigquery.dataViewer" --condition=None
-gcloud projects add-iam-policy-binding "$BQ_PROJECT_ID" --member="serviceAccount:$SA" --role="roles/bigquery.jobUser" --condition=None
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$SA" --role="roles/cloudvision.user" --condition=None
-gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
-gcloud secrets add-iam-policy-binding "$SECRET_NAME" --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+# Each grant below is a DIFFERENT permission on a DIFFERENT resource
+# (project vs. bucket vs. secret vs., later, the Cloud Run service
+# itself) - having rights to create the bucket/secret/service account
+# above doesn't imply rights to set IAM policy on the project, and vice
+# versa. A missing grant is tracked and reported at the end rather than
+# aborting the whole deploy - what CAN be granted still gets granted, and
+# the service still gets deployed (it just won't work correctly until
+# whatever gap is reported gets closed by someone who can).
+IAM_GRANT_FAILURES=()
+grant_iam() {
+  local description="$1"
+  shift
+  if ! "$@"; then
+    IAM_GRANT_FAILURES+=("$description")
+    echo "   (continuing - this one needs an admin, see the summary at the end)"
+  fi
+}
+
+if [ -n "${SKIP_IAM_GRANTS:-}" ]; then
+  echo "-- Granting IAM roles -- skipped (SKIP_IAM_GRANTS set - assuming $SA already has what it needs)"
+else
+  echo "-- Granting IAM roles --"
+  grant_iam "roles/bigquery.dataViewer on project $BQ_PROJECT_ID for $SA" \
+    gcloud projects add-iam-policy-binding "$BQ_PROJECT_ID" --member="serviceAccount:$SA" --role="roles/bigquery.dataViewer" --condition=None
+  grant_iam "roles/bigquery.jobUser on project $BQ_PROJECT_ID for $SA" \
+    gcloud projects add-iam-policy-binding "$BQ_PROJECT_ID" --member="serviceAccount:$SA" --role="roles/bigquery.jobUser" --condition=None
+  grant_iam "roles/cloudvision.user on project $PROJECT_ID for $SA" \
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$SA" --role="roles/cloudvision.user" --condition=None
+  grant_iam "roles/storage.objectAdmin on gs://$BUCKET_NAME for $SA" \
+    gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
+  grant_iam "roles/secretmanager.secretAccessor on secret $SECRET_NAME for $SA" \
+    gcloud secrets add-iam-policy-binding "$SECRET_NAME" --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+fi
 
 echo "-- Deploying to Cloud Run --"
 gcloud run deploy "$SERVICE_NAME" \
@@ -102,10 +139,11 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-secrets="GOOGLE_MAPS_API_KEY=$SECRET_NAME:latest"
 
 echo "-- Granting invoker access to $INVOKER_EMAIL --"
-gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
-  --region "$REGION" \
-  --member="user:$INVOKER_EMAIL" \
-  --role="roles/run.invoker"
+grant_iam "roles/run.invoker on service $SERVICE_NAME for user:$INVOKER_EMAIL" \
+  gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
+    --region "$REGION" \
+    --member="user:$INVOKER_EMAIL" \
+    --role="roles/run.invoker"
 
 cat <<EOF
 
@@ -122,3 +160,14 @@ Logs:
 
   gcloud run services logs read $SERVICE_NAME --region $REGION
 EOF
+
+if [ "${#IAM_GRANT_FAILURES[@]}" -gt 0 ]; then
+  echo ""
+  echo "NOTE: the account running this script couldn't grant everything below -"
+  echo "someone with IAM admin rights on the relevant project/resource needs to:"
+  for f in "${IAM_GRANT_FAILURES[@]}"; do
+    echo "  - $f"
+  done
+  echo "Until then, the deployed app may fail on whichever of BigQuery/Vision/the"
+  echo "cache bucket/the Maps key secret/invoking the service that grant covers."
+fi
