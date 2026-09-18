@@ -93,20 +93,33 @@ def default_table_name(year: str, month: str) -> str:
     return table_name("US", year, month)
 
 
-def list_speed_limits_us_tables(project: str, dataset: str) -> list[str]:
-    """Live list of calc_out tables matching speed_limits_US* - so the
-    Quality page's table selector always reflects what's actually there,
-    rather than assuming a naming pattern exists."""
+# Where evaluable tables live and what to look for in each: calc_out's
+# speed_limits_US* family (what the sign checker itself is built on), plus
+# archimedes_api's speed_limits_infer* views over it - the ones the user
+# originally expected this page to show, and still worth offering even
+# though they're missing columns some metrics need (picking one just
+# surfaces that as a normal BigQuery error in the page's error card).
+TABLE_SOURCES = (("calc_out", "speed_limits_US"), ("archimedes_api", "speed_limits_infer"))
+
+
+def list_evaluable_tables(project: str) -> list[dict]:
+    """Live list of {dataset, table} across every source in TABLE_SOURCES -
+    so the Quality page's table selector always reflects what's actually
+    there (including views), rather than assuming a naming pattern or a
+    single dataset."""
     _validate_identifier(project, PROJECT_RE, "project")
-    _validate_identifier(dataset, DATASET_RE, "dataset")
     client = bigquery.Client(project=project)
-    query = f"""
-        SELECT table_name
-        FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
-        WHERE table_name LIKE 'speed_limits_US%'
-        ORDER BY table_name
-    """
-    return [row["table_name"] for row in client.query(query).result()]
+    results: list[dict] = []
+    for dataset, prefix in TABLE_SOURCES:
+        _validate_identifier(dataset, DATASET_RE, "dataset")
+        query = f"""
+            SELECT table_name
+            FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_name LIKE '{prefix}%'
+            ORDER BY table_name
+        """
+        results.extend({"dataset": dataset, "table": row["table_name"]} for row in client.query(query).result())
+    return results
 
 
 def full_table_name(f: QualityFilters) -> str:

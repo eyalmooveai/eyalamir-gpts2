@@ -41,7 +41,7 @@
 <div class="card">
   <h3 style="margin-top:0;">Filters</h3>
   <form method="get" action="/speed-limits">
-    <label for="table">Table (calc_out.speed_limits_US*)</label>
+    <label for="table">Table (calc_out.speed_limits_US* or archimedes_api.speed_limits_infer*)</label>
     <select id="table" name="table">
       {% for t in table_options %}<option value="{{ t }}" {% if t == filters.table %}selected{% endif %}>{{ t }}</option>{% endfor %}
       {% if filters.table not in table_options %}<option value="{{ filters.table }}" selected>{{ filters.table }}</option>{% endif %}

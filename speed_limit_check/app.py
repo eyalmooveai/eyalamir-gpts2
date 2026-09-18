@@ -47,7 +47,7 @@ from quality_metrics import (
     default_table_name,
     fetch_quality_metrics,
     full_table_name,
-    list_speed_limits_us_tables,
+    list_evaluable_tables,
 )
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
@@ -242,21 +242,24 @@ def speed_limits_quality():
     table_name_display = None
     error = None
 
-    # Live, not hardcoded - so the selector always matches whatever
-    # calc_out tables actually exist, without this app needing to know
-    # about a new month's table in advance.
+    # Live, not hardcoded - so the selector always matches whatever tables
+    # (calc_out's speed_limits_US* family, and archimedes_api's
+    # speed_limits_infer* views) actually exist, without this app needing
+    # to know about a new one in advance. Each option's dropdown value is
+    # "dataset.table" since the two sources live in different datasets.
     try:
-        table_options = list_speed_limits_us_tables(DEFAULT_PROJECT, DEFAULT_DATASET)
+        table_options = [f"{t['dataset']}.{t['table']}" for t in list_evaluable_tables(DEFAULT_PROJECT)]
     except Exception as e:
         table_options = []
-        error = f"Could not list calc_out tables: {type(e).__name__}: {e}"
+        error = f"Could not list evaluable tables: {type(e).__name__}: {e}"
 
-    default_table = default_table_name(DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
+    default_table = f"{DEFAULT_DATASET}.{default_table_name(DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)}"
     requested_table = request.args.get("table", "").strip()
-    selected_table = requested_table or (default_table if default_table in table_options else (table_options[0] if table_options else default_table))
+    selected_option = requested_table or (default_table if default_table in table_options else (table_options[0] if table_options else default_table))
+    selected_dataset, _, selected_table = selected_option.partition(".")
 
     filters_echo = {
-        "table": selected_table,
+        "table": selected_option,
         "param1": request.args.get("param1", "10").strip() or "10",
         "param2": request.args.get("param2", "80").strip() or "80",
         "states": request.args.get("states", "").strip(),
@@ -278,7 +281,7 @@ def speed_limits_quality():
             filters_echo["group_by"] = group_by
 
             base = QualityFilters(
-                project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=selected_table,
+                project=DEFAULT_PROJECT, dataset=selected_dataset, table=selected_table,
                 param1=param1, param2=param2, states=states, functional_classes=fcs,
             )
             table_name_display = full_table_name(base)
@@ -287,7 +290,7 @@ def speed_limits_quality():
 
             if group_by != "none":
                 grouped = QualityFilters(
-                    project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=selected_table,
+                    project=DEFAULT_PROJECT, dataset=selected_dataset, table=selected_table,
                     param1=param1, param2=param2, states=states, functional_classes=fcs, group_by=group_by,
                 )
                 breakdown_view = fetch_quality_metrics(grouped)

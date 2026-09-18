@@ -274,18 +274,20 @@ exact fully-qualified table it evaluated - deliberately not
 
 ### Choosing a table
 
-The "Table" dropdown lists every table in `calc_out` currently matching
-`speed_limits_US*`, fetched fresh on every page load (a cheap
-`INFORMATION_SCHEMA.TABLES` query, not billed against the table data
-itself) rather than assumed from a naming pattern - so it always reflects
-what's actually published, including a new month's table as soon as it
-exists, with no code change needed here. Not every matching table has all
-the columns these six metrics need, though: only the `_<YEAR>_<MONTH>_details`
-tables carry `speed_limit_here_mph` and `freeflow_mph`. Picking a
-narrower table (e.g. `speed_limits_US_latest`, or a bare
-`speed_limits_US_<YEAR>_<MONTH>` without `_details`) surfaces BigQuery's
+The "Table" dropdown lists every table/view currently matching
+`calc_out.speed_limits_US*` or `archimedes_api.speed_limits_infer*`,
+fetched fresh on every page load (a cheap `INFORMATION_SCHEMA.TABLES`
+query per dataset, not billed against the table data itself) rather than
+assumed from a naming pattern - so it always reflects what's actually
+published, including a new month's table as soon as it exists, with no
+code change needed here. Not every matching table/view has all the
+columns these six metrics need, though: only the `calc_out`
+`_<YEAR>_<MONTH>_details` tables carry `speed_limit_here_mph` and
+`freeflow_mph`. Picking a narrower one (e.g. `calc_out.speed_limits_US_latest`,
+a bare `calc_out.speed_limits_US_<YEAR>_<MONTH>` without `_details`, or
+either `archimedes_api.speed_limits_infer` view) surfaces BigQuery's
 "Unrecognized name" error in the page's error card rather than crashing -
-harmless to try, just not a table these metrics can be computed from.
+harmless to try, just not something these metrics can be computed from.
 
 Six metrics, each the percent of segments meeting a condition:
 
@@ -310,7 +312,7 @@ or Street View/Vision calls, so it's fast and comparatively cheap even
 though it scans the full nationwide table (tens of millions of rows;
 under 1.5GB processed per query in practice).
 
-Filters are plain GET query parameters (`/speed-limits?table=speed_limits_US_2026_08_details&param1=15&states=NC,SC&group_by=state`),
+Filters are plain GET query parameters (`/speed-limits?table=calc_out.speed_limits_US_2026_08_details&param1=15&states=NC,SC&group_by=state`),
 so a particular view is directly linkable/bookmarkable.
 
 ## Output

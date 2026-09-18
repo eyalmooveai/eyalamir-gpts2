@@ -23,20 +23,29 @@
   views over `calc_out.speed_limits_US_latest` - those don't select
   `speed_limit_here_mph`/`freeflow_mph`, which the Quality page needs, so
   it queries the dated `_details` table directly instead.
-- The Quality page's "Table" dropdown (`quality_metrics.list_speed_limits_us_tables`)
-  lists live `calc_out` tables matching `speed_limits_US*` via
-  `INFORMATION_SCHEMA.TABLES` - don't hardcode the table list or assume a
-  fixed set of year/months exist. Confirmed live as of 2026-09-18:
-  `speed_limits_US_2026_02`, `speed_limits_US_2026_08`,
-  `speed_limits_US_2026_08_details`, `speed_limits_US_latest`. Only the
-  `_details` variant has all six metrics' columns
+- The Quality page's "Table" dropdown (`quality_metrics.list_evaluable_tables`,
+  driven by `TABLE_SOURCES`) lists live tables/views across BOTH
+  `calc_out` (matching `speed_limits_US*`) and `archimedes_api` (matching
+  `speed_limits_infer*`) via `INFORMATION_SCHEMA.TABLES` per dataset -
+  don't hardcode the table list, don't drop either dataset, and don't
+  assume a fixed set of year/months exist. Confirmed live as of
+  2026-09-18: `calc_out.speed_limits_US_2026_02`,
+  `calc_out.speed_limits_US_2026_08`,
+  `calc_out.speed_limits_US_2026_08_details`,
+  `calc_out.speed_limits_US_latest`, `archimedes_api.speed_limits_infer`,
+  `archimedes_api.speed_limits_infer_details` (the latter two are VIEWs
+  over `calc_out.speed_limits_US_latest`, not base tables). Only
+  `calc_out`'s `_details` variant has all six metrics' columns
   (`speed_limit_infer_mph_corrected`, `speed_limit_osm_mph`,
-  `speed_limit_here_mph`, `speed_AVG_mph`, `freeflow_mph`) - the bare
-  `_<YEAR>_<MONTH>` and `_latest` tables are each missing at least
+  `speed_limit_here_mph`, `speed_AVG_mph`, `freeflow_mph`) - every other
+  option, `archimedes_api`'s two views included, is missing at least
   `speed_limit_here_mph`/`freeflow_mph` (and `_2026_02` is also missing
   `speed_limit_infer_mph_corrected`). Selecting one of those in the
   dropdown is expected to surface a BigQuery "Unrecognized name" error in
-  the page's error card - this is normal, not a bug to fix.
+  the page's error card - this is normal, not a bug to fix. The dropdown's
+  option value is `"<dataset>.<table>"` since the two sources span
+  different datasets - `QualityFilters.dataset` is no longer hardcoded to
+  `DEFAULT_DATASET` for this page, it comes from the selected option.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo
