@@ -39,7 +39,16 @@ from find_bad_speed_limit import (
     parse_headings,
     run_pipeline,
 )
-from quality_metrics import GROUP_BY_CHOICES, QUALITY_METRICS, US_STATE_CODES, QualityFilters, fetch_quality_metrics, full_table_name
+from quality_metrics import (
+    GROUP_BY_CHOICES,
+    QUALITY_METRICS,
+    US_STATE_CODES,
+    QualityFilters,
+    default_table_name,
+    fetch_quality_metrics,
+    full_table_name,
+    list_speed_limits_us_tables,
+)
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -53,12 +62,11 @@ HUB_MODELS = [
     {"name": "Accident Detection", "description": "Not yet available in Archimedes.", "href": None},
 ]
 
-# speed_limits_<STATE>_<YEAR>_<MONTH>_details isn't published as a
-# "latest" table with all the columns the Quality metrics need (see
-# quality_metrics.py's module docstring) - nothing elsewhere in this app
-# auto-detects the newest available month either, so this is just the
-# current one, same as speed_limits_quality()'s own default below. Update
-# both together when a newer month's nationwide _details table exists.
+# Preselected table on the Speed-Limits Quality page, if it's still in
+# the live calc_out.speed_limits_US* list (falls back to the first table
+# in that list otherwise - see speed_limits_quality()). Bump this when a
+# newer month's nationwide _details table becomes the one worth defaulting
+# to; the table selector itself always reflects what's actually there.
 DEFAULT_QUALITY_YEAR = "2026"
 DEFAULT_QUALITY_MONTH = "08"
 
@@ -229,16 +237,26 @@ def hub():
 
 @app.route("/speed-limits", methods=["GET"])
 def speed_limits_quality():
-    year = request.args.get("year", "").strip()
-    month = request.args.get("month", "").strip()
-
     metrics_view = None
     breakdown_view = None
     table_name_display = None
     error = None
+
+    # Live, not hardcoded - so the selector always matches whatever
+    # calc_out tables actually exist, without this app needing to know
+    # about a new month's table in advance.
+    try:
+        table_options = list_speed_limits_us_tables(DEFAULT_PROJECT, DEFAULT_DATASET)
+    except Exception as e:
+        table_options = []
+        error = f"Could not list calc_out tables: {type(e).__name__}: {e}"
+
+    default_table = default_table_name(DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
+    requested_table = request.args.get("table", "").strip()
+    selected_table = requested_table or (default_table if default_table in table_options else (table_options[0] if table_options else default_table))
+
     filters_echo = {
-        "year": year or DEFAULT_QUALITY_YEAR,
-        "month": month or DEFAULT_QUALITY_MONTH,
+        "table": selected_table,
         "param1": request.args.get("param1", "10").strip() or "10",
         "param2": request.args.get("param2", "80").strip() or "80",
         "states": request.args.get("states", "").strip(),
@@ -250,32 +268,33 @@ def speed_limits_quality():
     # and shown, even on a fresh page load with no query params at all -
     # it's the headline number the page exists to answer at a glance.
     # Only the breakdown table is opt-in (group_by).
-    try:
-        param1 = float(filters_echo["param1"])
-        param2 = float(filters_echo["param2"])
-        states = tuple(s.strip().upper() for s in filters_echo["states"].split(",") if s.strip())
-        fcs = tuple(int(v.strip()) for v in filters_echo["functional_classes"].split(",") if v.strip())
-        group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
-        filters_echo["group_by"] = group_by
+    if not error:
+        try:
+            param1 = float(filters_echo["param1"])
+            param2 = float(filters_echo["param2"])
+            states = tuple(s.strip().upper() for s in filters_echo["states"].split(",") if s.strip())
+            fcs = tuple(int(v.strip()) for v in filters_echo["functional_classes"].split(",") if v.strip())
+            group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
+            filters_echo["group_by"] = group_by
 
-        base = QualityFilters(
-            project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=filters_echo["year"], month=filters_echo["month"],
-            param1=param1, param2=param2, states=states, functional_classes=fcs,
-        )
-        table_name_display = full_table_name(base)
-        metrics_rows = fetch_quality_metrics(base)
-        metrics_view = metrics_rows[0] if metrics_rows else None
-
-        if group_by != "none":
-            grouped = QualityFilters(
-                project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=filters_echo["year"], month=filters_echo["month"],
-                param1=param1, param2=param2, states=states, functional_classes=fcs, group_by=group_by,
+            base = QualityFilters(
+                project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=selected_table,
+                param1=param1, param2=param2, states=states, functional_classes=fcs,
             )
-            breakdown_view = fetch_quality_metrics(grouped)
-    except ValueError as e:
-        error = str(e)
-    except Exception as e:
-        error = f"{type(e).__name__}: {e}"
+            table_name_display = full_table_name(base)
+            metrics_rows = fetch_quality_metrics(base)
+            metrics_view = metrics_rows[0] if metrics_rows else None
+
+            if group_by != "none":
+                grouped = QualityFilters(
+                    project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=selected_table,
+                    param1=param1, param2=param2, states=states, functional_classes=fcs, group_by=group_by,
+                )
+                breakdown_view = fetch_quality_metrics(grouped)
+        except ValueError as e:
+            error = str(e)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
 
     return render_template(
         "quality.html",
@@ -283,6 +302,7 @@ def speed_limits_quality():
         metrics=metrics_view,
         breakdown=breakdown_view,
         table_name_display=table_name_display,
+        table_options=table_options,
         quality_metric_defs=QUALITY_METRICS,
         group_by_choices=GROUP_BY_CHOICES,
         us_state_codes=US_STATE_CODES,

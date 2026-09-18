@@ -17,6 +17,13 @@ from google.cloud import bigquery
 
 from find_bad_speed_limit import DATASET_RE, PROJECT_RE, STATE_RE, _validate_identifier, table_name
 
+# calc_out table names are plain identifiers (letters/digits/underscore) -
+# same shape find_bad_speed_limit.py validates dataset/project names with,
+# just without the project/dataset-specific character restrictions.
+import re
+
+TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # The 50 states + DC, for the filter UI - independent of which states
 # actually have data in a given month's table (the query's own results
 # simply come back empty for any that don't).
@@ -71,8 +78,7 @@ QUALITY_METRICS = [
 class QualityFilters:
     project: str
     dataset: str
-    year: str
-    month: str
+    table: str  # a calc_out table, e.g. speed_limits_US_2026_08_details
     param1: float = 10.0
     param2: float = 80.0
     states: tuple[str, ...] = ()  # empty = all states
@@ -80,22 +86,46 @@ class QualityFilters:
     group_by: str = "none"  # one of GROUP_BY_CHOICES
 
 
+def default_table_name(year: str, month: str) -> str:
+    """The nationwide _details table for a given year/month - used as the
+    page's default selection before the user picks another one from the
+    live table list."""
+    return table_name("US", year, month)
+
+
+def list_speed_limits_us_tables(project: str, dataset: str) -> list[str]:
+    """Live list of calc_out tables matching speed_limits_US* - so the
+    Quality page's table selector always reflects what's actually there,
+    rather than assuming a naming pattern exists."""
+    _validate_identifier(project, PROJECT_RE, "project")
+    _validate_identifier(dataset, DATASET_RE, "dataset")
+    client = bigquery.Client(project=project)
+    query = f"""
+        SELECT table_name
+        FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
+        WHERE table_name LIKE 'speed_limits_US%'
+        ORDER BY table_name
+    """
+    return [row["table_name"] for row in client.query(query).result()]
+
+
 def full_table_name(f: QualityFilters) -> str:
     """The fully-qualified table these metrics are actually computed from -
     for display, so the page is explicit about its real data source. Not
     archimedes_api.speed_limits_infer_details: that view is missing
     speed_limit_here_mph and freeflow_mph, two of the six metrics here
-    depend on them, so this queries the dated nationwide _details table
+    depend on them, so this queries a dated nationwide _details table
     directly instead."""
-    return f"{f.project}.{f.dataset}.{table_name('US', f.year, f.month)}"
+    return f"{f.project}.{f.dataset}.{f.table}"
 
 
 def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
     _validate_identifier(f.project, PROJECT_RE, "project")
     _validate_identifier(f.dataset, DATASET_RE, "dataset")
+    _validate_identifier(f.table, TABLE_RE, "table")
     if f.group_by not in GROUP_BY_CHOICES:
         raise ValueError(f"Invalid group_by {f.group_by!r} - must be one of {GROUP_BY_CHOICES}")
-    table = table_name("US", f.year, f.month)
+    table = f.table
 
     where_parts = ["speed_limit_infer_mph_corrected IS NOT NULL"]
     params: list[bigquery.ScalarQueryParameter] = [

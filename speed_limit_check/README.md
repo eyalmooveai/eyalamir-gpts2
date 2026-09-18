@@ -263,13 +263,29 @@ enable/threshold customization is currently web-UI only.
 `/speed-limits` is a nationwide, no-imagery, table-only counterpart to the
 sign checker - instead of verifying one segment's actual sign, it reports
 what fraction of *all* road segments show a large enough mismatch to be
-worth caring about, computed directly by BigQuery aggregate queries
-against `calc_out.speed_limits_US_<YEAR>_<MONTH>_details` (the nationwide
-version of the same table family the sign checker queries per-state).
-The page shows the exact fully-qualified table it evaluated (it varies
-with the year/month filter) - deliberately not
+worth caring about, computed directly by a BigQuery aggregate query
+against a `calc_out` table you pick from a live-populated dropdown (see
+"Choosing a table" below) - by default
+`speed_limits_US_<YEAR>_<MONTH>_details`, the nationwide version of the
+same table family the sign checker queries per-state. The page shows the
+exact fully-qualified table it evaluated - deliberately not
 `archimedes_api.speed_limits_infer_details`, which is missing
 `speed_limit_here_mph`/`freeflow_mph` that two of these six metrics need.
+
+### Choosing a table
+
+The "Table" dropdown lists every table in `calc_out` currently matching
+`speed_limits_US*`, fetched fresh on every page load (a cheap
+`INFORMATION_SCHEMA.TABLES` query, not billed against the table data
+itself) rather than assumed from a naming pattern - so it always reflects
+what's actually published, including a new month's table as soon as it
+exists, with no code change needed here. Not every matching table has all
+the columns these six metrics need, though: only the `_<YEAR>_<MONTH>_details`
+tables carry `speed_limit_here_mph` and `freeflow_mph`. Picking a
+narrower table (e.g. `speed_limits_US_latest`, or a bare
+`speed_limits_US_<YEAR>_<MONTH>` without `_details`) surfaces BigQuery's
+"Unrecognized name" error in the page's error card rather than crashing -
+harmless to try, just not a table these metrics can be computed from.
 
 Six metrics, each the percent of segments meeting a condition:
 
@@ -294,7 +310,7 @@ or Street View/Vision calls, so it's fast and comparatively cheap even
 though it scans the full nationwide table (tens of millions of rows;
 under 1.5GB processed per query in practice).
 
-Filters are plain GET query parameters (`/speed-limits?year=2026&month=08&param1=15&states=NC,SC&group_by=state`),
+Filters are plain GET query parameters (`/speed-limits?table=speed_limits_US_2026_08_details&param1=15&states=NC,SC&group_by=state`),
 so a particular view is directly linkable/bookmarkable.
 
 ## Output

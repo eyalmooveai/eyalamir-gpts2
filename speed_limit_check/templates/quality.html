@@ -15,7 +15,7 @@
   <div class="card">
     <h3 style="margin-top:0;">
       {% if filters.states or filters.functional_classes %}Filtered{% else %}Nationwide{% endif %}
-      summary - {{ "{:,}".format(metrics.total_segments) }} segments ({{ filters.year }}-{{ filters.month }})
+      summary - {{ "{:,}".format(metrics.total_segments) }} segments ({{ filters.table }})
     </h3>
     <div class="stat-grid">
       {% for m in quality_metric_defs %}
@@ -29,7 +29,7 @@
 {% else %}
   <div class="card">
     <span class="badge warn">No data</span>
-    <p>No segments matched these filters for {{ filters.year }}-{{ filters.month }}.</p>
+    <p>No segments matched these filters in {{ filters.table }}.</p>
   </div>
 {% endif %}
 
@@ -41,16 +41,11 @@
 <div class="card">
   <h3 style="margin-top:0;">Filters</h3>
   <form method="get" action="/speed-limits">
-    <div class="row-2">
-      <div>
-        <label for="year">Year</label>
-        <input type="text" id="year" name="year" value="{{ filters.year }}" placeholder="2026" required>
-      </div>
-      <div>
-        <label for="month">Month</label>
-        <input type="text" id="month" name="month" value="{{ filters.month }}" placeholder="08" required>
-      </div>
-    </div>
+    <label for="table">Table (calc_out.speed_limits_US*)</label>
+    <select id="table" name="table">
+      {% for t in table_options %}<option value="{{ t }}" {% if t == filters.table %}selected{% endif %}>{{ t }}</option>{% endfor %}
+      {% if filters.table not in table_options %}<option value="{{ filters.table }}" selected>{{ filters.table }}</option>{% endif %}
+    </select>
     <div class="row-2">
       <div>
         <label for="param1">param1 - mph gap counted as a mismatch</label>
