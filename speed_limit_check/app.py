@@ -53,6 +53,15 @@ HUB_MODELS = [
     {"name": "Accident Detection", "description": "Not yet available in Archimedes.", "href": None},
 ]
 
+# speed_limits_<STATE>_<YEAR>_<MONTH>_details isn't published as a
+# "latest" table with all the columns the Quality metrics need (see
+# quality_metrics.py's module docstring) - nothing elsewhere in this app
+# auto-detects the newest available month either, so this is just the
+# current one, same as speed_limits_quality()'s own default below. Update
+# both together when a newer month's nationwide _details table exists.
+DEFAULT_QUALITY_YEAR = "2026"
+DEFAULT_QUALITY_MONTH = "08"
+
 OUT_DIR = Path("output")
 MAX_JOBS = 20  # cap in-memory job history for this long-lived local process
 
@@ -222,14 +231,13 @@ def hub():
 def speed_limits_quality():
     year = request.args.get("year", "").strip()
     month = request.args.get("month", "").strip()
-    has_query = bool(year and month)
 
     metrics_view = None
     breakdown_view = None
     error = None
     filters_echo = {
-        "year": year or "2026",
-        "month": month or "08",
+        "year": year or DEFAULT_QUALITY_YEAR,
+        "month": month or DEFAULT_QUALITY_MONTH,
         "param1": request.args.get("param1", "10").strip() or "10",
         "param2": request.args.get("param2", "80").strip() or "80",
         "states": request.args.get("states", "").strip(),
@@ -237,37 +245,39 @@ def speed_limits_quality():
         "group_by": request.args.get("group_by", "none").strip() or "none",
     }
 
-    if has_query:
-        try:
-            param1 = float(filters_echo["param1"])
-            param2 = float(filters_echo["param2"])
-            states = tuple(s.strip().upper() for s in filters_echo["states"].split(",") if s.strip())
-            fcs = tuple(int(v.strip()) for v in filters_echo["functional_classes"].split(",") if v.strip())
-            group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
-            filters_echo["group_by"] = group_by
+    # The nationwide (or filtered-nationwide) summary is always computed
+    # and shown, even on a fresh page load with no query params at all -
+    # it's the headline number the page exists to answer at a glance.
+    # Only the breakdown table is opt-in (group_by).
+    try:
+        param1 = float(filters_echo["param1"])
+        param2 = float(filters_echo["param2"])
+        states = tuple(s.strip().upper() for s in filters_echo["states"].split(",") if s.strip())
+        fcs = tuple(int(v.strip()) for v in filters_echo["functional_classes"].split(",") if v.strip())
+        group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
+        filters_echo["group_by"] = group_by
 
-            base = QualityFilters(
-                project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=year, month=month,
-                param1=param1, param2=param2, states=states, functional_classes=fcs,
+        base = QualityFilters(
+            project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=filters_echo["year"], month=filters_echo["month"],
+            param1=param1, param2=param2, states=states, functional_classes=fcs,
+        )
+        metrics_rows = fetch_quality_metrics(base)
+        metrics_view = metrics_rows[0] if metrics_rows else None
+
+        if group_by != "none":
+            grouped = QualityFilters(
+                project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=filters_echo["year"], month=filters_echo["month"],
+                param1=param1, param2=param2, states=states, functional_classes=fcs, group_by=group_by,
             )
-            metrics_rows = fetch_quality_metrics(base)
-            metrics_view = metrics_rows[0] if metrics_rows else None
-
-            if group_by != "none":
-                grouped = QualityFilters(
-                    project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=year, month=month,
-                    param1=param1, param2=param2, states=states, functional_classes=fcs, group_by=group_by,
-                )
-                breakdown_view = fetch_quality_metrics(grouped)
-        except ValueError as e:
-            error = str(e)
-        except Exception as e:
-            error = f"{type(e).__name__}: {e}"
+            breakdown_view = fetch_quality_metrics(grouped)
+    except ValueError as e:
+        error = str(e)
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
 
     return render_template(
         "quality.html",
         filters=filters_echo,
-        has_query=has_query,
         metrics=metrics_view,
         breakdown=breakdown_view,
         quality_metric_defs=QUALITY_METRICS,

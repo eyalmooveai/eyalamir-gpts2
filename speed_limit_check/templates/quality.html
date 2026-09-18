@@ -3,9 +3,36 @@
 {% block heading %}Speed-Limits Quality{% endblock %}
 {% block subtitle %}Nationwide inferred speed-limit quality vs. OSM/HERE/observed speeds{% endblock %}
 {% block content %}
+{% if error %}
+  <div class="card">
+    <span class="badge err">Error</span>
+    <pre class="log">{{ error }}</pre>
+  </div>
+{% elif metrics %}
+  <div class="card">
+    <h3 style="margin-top:0;">
+      {% if filters.states or filters.functional_classes %}Filtered{% else %}Nationwide{% endif %}
+      summary - {{ "{:,}".format(metrics.total_segments) }} segments ({{ filters.year }}-{{ filters.month }})
+    </h3>
+    <div class="stat-grid">
+      {% for m in quality_metric_defs %}
+        <div class="stat-tile">
+          <div class="stat-value">{{ "%.1f"|format(metrics["pct_" + m.key]) }}%</div>
+          <div class="stat-label">{{ m.label }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% else %}
+  <div class="card">
+    <span class="badge warn">No data</span>
+    <p>No segments matched these filters for {{ filters.year }}-{{ filters.month }}.</p>
+  </div>
+{% endif %}
+
 <div class="card">
   <a href="/sign-checker" class="btn-secondary" style="text-decoration:none; display:inline-block;">Open the Street View Sign Checker &rarr;</a>
-  <p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Checks one segment's real-world sign by reading it in Street View imagery. The metrics below are a nationwide, table-only view - no imagery involved.</p>
+  <p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Checks one segment's real-world sign by reading it in Street View imagery. The metrics above are a nationwide, table-only view - no imagery involved.</p>
 </div>
 
 <div class="card">
@@ -48,35 +75,6 @@
     <button type="submit">Run metrics</button>
   </form>
 </div>
-
-{% if error %}
-  <div class="card">
-    <span class="badge err">Error</span>
-    <pre class="log">{{ error }}</pre>
-  </div>
-{% endif %}
-
-{% if metrics %}
-  <div class="card">
-    <h3 style="margin-top:0;">
-      {% if filters.states or filters.functional_classes %}Filtered{% else %}Nationwide{% endif %}
-      summary - {{ "{:,}".format(metrics.total_segments) }} segments
-    </h3>
-    <div class="stat-grid">
-      {% for m in quality_metric_defs %}
-        <div class="stat-tile">
-          <div class="stat-value">{{ "%.1f"|format(metrics["pct_" + m.key]) }}%</div>
-          <div class="stat-label">{{ m.label }}</div>
-        </div>
-      {% endfor %}
-    </div>
-  </div>
-{% elif has_query and not error %}
-  <div class="card">
-    <span class="badge warn">No data</span>
-    <p>No segments matched these filters for {{ filters.year }}-{{ filters.month }}.</p>
-  </div>
-{% endif %}
 
 {% if breakdown %}
   <div class="card">
