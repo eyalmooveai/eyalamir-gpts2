@@ -205,6 +205,17 @@ Additional options on the form:
   Applies to every position checked (whether just the centroid or every
   walked point):
   - **Center only** - just the position(s) themselves, same as always.
+  - **Left only / Right only** - skips the center and instead offsets
+    each position by "Offset distance (meters)" perpendicular to the
+    road on just that one side. Useful once you already know which
+    carriageway/trunk has the sign, so it wastes no calls on the center
+    or the other side. "Left"/"right" are relative to this
+    here_segment_id's own digitized line direction (the same bearing
+    "headings are relative to direction of travel" uses below), not
+    necessarily the real-world right-hand side for a driver - HERE's
+    line direction isn't guaranteed to match legal direction of travel,
+    so it's worth checking a segment's actual result before assuming
+    "right" always means the same physical side across every segment.
   - **Sides only** - skips the center and instead offsets each position
     by "Offset distance (meters)" perpendicular to the road on both
     sides. Useful once you already know the center point's own
@@ -246,7 +257,7 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 | `--walk-all` | off | Don't stop at the first readable sign - try every candidate and report every match |
 | `--walk-segment` | off | Sample several positions along each segment's full length instead of just its centroid |
 | `--walk-segment-spacing-m` | `15` | Target distance in meters between sampled positions when `--walk-segment` is set (point count is derived from this and each segment's actual length, clamped to 2-40 points) |
-| `--side-mode` | `center` | Which perpendicular-offset points to probe at each checked position: `center` (just the point itself), `sides` (only the two offset points, skipping center), or `both` (center plus both sides) |
+| `--side-mode` | `center` | Which perpendicular-offset points to probe at each checked position: `center` (just the point itself), `left`/`right` (only that one offset point, skipping center), `sides` (both offset points, skipping center), or `both` (center plus both sides) |
 | `--side-offset-m` | `20` | Perpendicular offset in meters for `--side-mode sides`/`both` - the fallback when `--auto-side-offset` is set and finds nothing |
 | `--auto-side-offset` | off | Estimate `--side-offset-m` per candidate from the segment's own width instead of using a fixed value (see web UI description above) |
 | `--headings` | `0,90,180,270` | Comma-separated headings (0-359) to capture per position (max 24) - compass degrees, or relative angles if `--headings-relative` is set |

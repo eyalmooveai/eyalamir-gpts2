@@ -55,7 +55,7 @@ DEFAULT_KEYS_FILE = Path.home() / "Claude" / "MooveAI" / "keys.env"
 STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metadata"
 STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 DEFAULT_HEADINGS = (0, 90, 180, 270)
-SIDE_MODES = ("center", "sides", "both")
+SIDE_MODES = ("center", "left", "right", "sides", "both")
 STREETVIEW_API_RETRIES = 3
 DEFAULT_FOV = 90
 MIN_FOV = 10
@@ -279,14 +279,15 @@ def parse_args() -> argparse.Namespace:
         help="Which perpendicular-offset points to probe at each checked position: 'center' (default, just the "
         "point itself), 'sides' (only the two points offset --side-offset-m to either side, skipping the center "
         "- e.g. for a divided road where each here_segment_id spans two separate trunks/carriageways and you "
-        "only want the side ones), or 'both' (center plus both sides)",
+        "only want the side ones), 'left'/'right' (only that one offset point, skipping the center - e.g. once "
+        "you already know which carriageway has the sign), or 'both' (center plus both sides)",
     )
     p.add_argument(
         "--side-offset-m",
         type=float,
         default=20.0,
-        help="Perpendicular offset in meters for --side-mode sides/both (default: 20) - ignored per candidate "
-        "where --auto-side-offset finds something, used as the fallback otherwise",
+        help="Perpendicular offset in meters for --side-mode left/right/sides/both (default: 20) - ignored per "
+        "candidate where --auto-side-offset finds something, used as the fallback otherwise",
     )
     p.add_argument(
         "--auto-side-offset",
@@ -1014,14 +1015,22 @@ def run_pipeline(
     point): `"center"` (default) checks only the position itself;
     `"both"` additionally probes two points offset `side_offset_m` meters
     perpendicular to the road on either side; `"sides"` probes only
-    those two offset points and skips the center. Street View's
-    nearest-panorama snapping means sampling only the centerline can keep
-    returning the same one carriageway of a divided road even as you walk
-    its length - a sign on the other carriageway, a short perpendicular
-    distance away, is otherwise never reached. Some here_segment_ids cover
-    two genuinely separate trunks/carriageways where the center point's
-    own Street View coverage is on neither one of interest, in which case
-    `"sides"` avoids wasting calls on it.
+    those two offset points and skips the center; `"left"`/`"right"`
+    probe only the one offset point on that side, also skipping the
+    center. Street View's nearest-panorama snapping means sampling only
+    the centerline can keep returning the same one carriageway of a
+    divided road even as you walk its length - a sign on the other
+    carriageway, a short perpendicular distance away, is otherwise never
+    reached. Some here_segment_ids cover two genuinely separate
+    trunks/carriageways where the center point's own Street View coverage
+    is on neither one of interest, in which case `"sides"` (or, if you
+    already know which one matters, `"left"`/`"right"`) avoids wasting
+    calls on it. "Left"/"right" are relative to the segment's own digitized
+    line direction (the bearing `walk_segment`/`headings_relative` also
+    use), not a real-world compass side - HERE's line direction for a
+    given here_segment_id isn't guaranteed to match legal direction of
+    travel, so which one is the "right-hand side of the street" for an
+    actual driver can still take a look to confirm on a given segment.
 
     With `auto_side_offset=True`, `side_offset_m` is instead estimated per
     candidate (once, from the segment's own middle position) by probing
@@ -1179,7 +1188,9 @@ def run_pipeline(
         # "forward along this point's direction of travel" rather than a
         # fixed compass direction.
         include_center = side_mode in ("center", "both")
-        include_sides = side_mode in ("sides", "both")
+        include_left = side_mode in ("left", "sides", "both")
+        include_right = side_mode in ("right", "sides", "both")
+        include_sides = include_left or include_right
 
         effective_side_offset_m = side_offset_m
         if include_sides and auto_side_offset:
@@ -1201,10 +1212,11 @@ def run_pipeline(
             point_prefix = f"point{p_idx}" if walked else None
             if include_center:
                 sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
-            if include_sides:
+            if include_left:
                 l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, effective_side_offset_m)
-                r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, effective_side_offset_m)
                 sample_points.append([l_lat, l_lon, point_prefix, "left", p_idx, p_bearing])
+            if include_right:
+                r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, effective_side_offset_m)
                 sample_points.append([r_lat, r_lon, point_prefix, "right", p_idx, p_bearing])
 
         offset_desc = f"±{effective_side_offset_m:.0f}m" + (" auto" if include_sides and auto_side_offset and effective_side_offset_m != side_offset_m else "")
@@ -1215,6 +1227,8 @@ def run_pipeline(
             mode_desc.append(f"{offset_desc} both sides")
         elif side_mode == "sides":
             mode_desc.append(f"{offset_desc} sides only (no center)")
+        elif side_mode in ("left", "right"):
+            mode_desc.append(f"{offset_desc} {side_mode} side only (no center)")
         where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
         log(f"{tag} here_segment_id={seg_id} - {where}")
         for key, value in row_dict.items():
