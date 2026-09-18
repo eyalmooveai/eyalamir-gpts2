@@ -36,4 +36,18 @@
   README.md's "Deploying to Cloud Run" section). Known values already used
   for this project's deployment: `PROJECT_ID=moove-platform-testing-data`,
   `REGION=us-central1`, `BUCKET_NAME=archimedes-control`,
-  `BUCKET_LOCATION=US`, `INVOKER_EMAIL=eyal@moove.ai`.
+  `BUCKET_LOCATION=US`, `INVOKER_EMAIL=eyal@moove.ai`. Deployed service
+  URL: `https://speed-limit-check-233134271134.us-central1.run.app`.
+- Access model: Cloud Run's own IAM auth (`--no-allow-unauthenticated`),
+  used via `gcloud run services proxy speed-limit-check --region
+  us-central1` (needs `roles/run.invoker` granted per user on the
+  service, a separate grant from the runtime service account's own
+  roles - same "different resource, different setIamPolicy permission"
+  gap `deploy.sh` already handles for the service account). A real
+  browser-clickable URL with Google sign-in would need Identity-Aware
+  Proxy behind a full HTTPS Load Balancer (reserved static IP, managed
+  SSL cert needing a real domain, Serverless NEG, backend service,
+  forwarding rule) - explicitly deferred as not worth the added
+  infrastructure/cost for now, even though a domain is available for it
+  ("open-web") if this gets revisited later. Don't build the load
+  balancer/IAP setup unless asked again.
