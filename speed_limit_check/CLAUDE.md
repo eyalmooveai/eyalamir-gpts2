@@ -66,11 +66,25 @@
   us-central1` (needs `roles/run.invoker` granted per user on the
   service, a separate grant from the runtime service account's own
   roles - same "different resource, different setIamPolicy permission"
-  gap `deploy.sh` already handles for the service account). A real
-  browser-clickable URL with Google sign-in would need Identity-Aware
-  Proxy behind a full HTTPS Load Balancer (reserved static IP, managed
-  SSL cert needing a real domain, Serverless NEG, backend service,
-  forwarding rule) - explicitly deferred as not worth the added
-  infrastructure/cost for now, even though a domain is available for it
-  ("open-web") if this gets revisited later. Don't build the load
-  balancer/IAP setup unless asked again.
+  gap `deploy.sh` already handles for the service account). This is the
+  access model until the IAP setup below goes live.
+- **IAP (real "click the link, sign in with Google" access) - now being
+  set up**, not deferred anymore: `archimedes.moove.ai`, open to
+  `domain:moove.ai` (everyone at the company). Handed devops the full
+  runbook (static IP, DNS A record, managed SSL cert, Serverless NEG on
+  `speed-limit-check`/us-central1, backend service, URL map/HTTPS
+  proxy/forwarding rule, IAP enablement + `domain:moove.ai` grant) - not
+  yet confirmed live as of this writing, check with devops/visit the
+  domain before assuming it's done. Two things change once it is:
+  - Cloud Run's own IAM gate (`--no-allow-unauthenticated` + per-user
+    `run.invoker`) gets replaced, not stacked - IAP and Cloud Run IAM
+    can't both gate the same request, so the service ends up with
+    `allUsers` as invoker and `--ingress=internal-and-cloud-load-balancing`
+    instead, so the LB (and therefore IAP) is the only way in.
+  - The direct `https://speed-limit-check-....run.app` URL and
+    `gcloud run services proxy` both stop working once ingress is
+    locked down - that's intentional, not a regression to "fix".
+  If asked to help with IAP/load-balancer work now, this is in progress,
+  not something to push back on as unnecessary complexity - that
+  objection applied to the earlier ask, before a domain/access decision
+  existed to build it on.
