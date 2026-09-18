@@ -39,7 +39,7 @@ from find_bad_speed_limit import (
     parse_headings,
     run_pipeline,
 )
-from quality_metrics import GROUP_BY_CHOICES, QUALITY_METRICS, US_STATE_CODES, QualityFilters, fetch_quality_metrics
+from quality_metrics import GROUP_BY_CHOICES, QUALITY_METRICS, US_STATE_CODES, QualityFilters, fetch_quality_metrics, full_table_name
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -234,6 +234,7 @@ def speed_limits_quality():
 
     metrics_view = None
     breakdown_view = None
+    table_name_display = None
     error = None
     filters_echo = {
         "year": year or DEFAULT_QUALITY_YEAR,
@@ -261,6 +262,7 @@ def speed_limits_quality():
             project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, year=filters_echo["year"], month=filters_echo["month"],
             param1=param1, param2=param2, states=states, functional_classes=fcs,
         )
+        table_name_display = full_table_name(base)
         metrics_rows = fetch_quality_metrics(base)
         metrics_view = metrics_rows[0] if metrics_rows else None
 
@@ -280,6 +282,7 @@ def speed_limits_quality():
         filters=filters_echo,
         metrics=metrics_view,
         breakdown=breakdown_view,
+        table_name_display=table_name_display,
         quality_metric_defs=QUALITY_METRICS,
         group_by_choices=GROUP_BY_CHOICES,
         us_state_codes=US_STATE_CODES,

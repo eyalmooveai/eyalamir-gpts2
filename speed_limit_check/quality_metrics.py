@@ -80,6 +80,16 @@ class QualityFilters:
     group_by: str = "none"  # one of GROUP_BY_CHOICES
 
 
+def full_table_name(f: QualityFilters) -> str:
+    """The fully-qualified table these metrics are actually computed from -
+    for display, so the page is explicit about its real data source. Not
+    archimedes_api.speed_limits_infer_details: that view is missing
+    speed_limit_here_mph and freeflow_mph, two of the six metrics here
+    depend on them, so this queries the dated nationwide _details table
+    directly instead."""
+    return f"{f.project}.{f.dataset}.{table_name('US', f.year, f.month)}"
+
+
 def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
     _validate_identifier(f.project, PROJECT_RE, "project")
     _validate_identifier(f.dataset, DATASET_RE, "dataset")

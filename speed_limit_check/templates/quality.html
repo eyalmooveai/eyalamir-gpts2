@@ -3,6 +3,9 @@
 {% block heading %}Speed-Limits Quality{% endblock %}
 {% block subtitle %}Nationwide inferred speed-limit quality vs. OSM/HERE/observed speeds{% endblock %}
 {% block content %}
+{% if table_name_display %}
+  <p style="color:var(--muted); font-size:0.78rem; margin:-14px 0 14px;">Table evaluated: <code>{{ table_name_display }}</code></p>
+{% endif %}
 {% if error %}
   <div class="card">
     <span class="badge err">Error</span>

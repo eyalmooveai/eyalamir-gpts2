@@ -266,6 +266,10 @@ what fraction of *all* road segments show a large enough mismatch to be
 worth caring about, computed directly by BigQuery aggregate queries
 against `calc_out.speed_limits_US_<YEAR>_<MONTH>_details` (the nationwide
 version of the same table family the sign checker queries per-state).
+The page shows the exact fully-qualified table it evaluated (it varies
+with the year/month filter) - deliberately not
+`archimedes_api.speed_limits_infer_details`, which is missing
+`speed_limit_here_mph`/`freeflow_mph` that two of these six metrics need.
 
 Six metrics, each the percent of segments meeting a condition:
 
