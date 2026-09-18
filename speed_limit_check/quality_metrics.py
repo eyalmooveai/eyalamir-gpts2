@@ -40,38 +40,56 @@ GROUP_BY_CHOICES = ("none", "state", "functional_class", "state,functional_class
 # for the four "disagrees with X" comparisons) or @param2 (mph threshold
 # for the two "implausibly fast" checks). Shared between the query builder
 # and the results table so there's one definition of what each column means.
+# label_template's {param1}/{param2} placeholders get filled in with the
+# actual submitted threshold (see metric_label below) - so the stat tile
+# itself says e.g. "10 mph", not the literal word "param1".
 QUALITY_METRICS = [
     {
         "key": "diff_osm",
-        "label": "|infer_corrected − OSM| ≥ param1 mph",
+        "label_template": "Disagrees with OSM by {param1}+ mph",
         "sql": "ABS(speed_limit_infer_mph_corrected - speed_limit_osm_mph) >= @param1",
     },
     {
         "key": "diff_here",
-        "label": "|infer_corrected − HERE| ≥ param1 mph",
+        "label_template": "Disagrees with HERE by {param1}+ mph",
         "sql": "ABS(speed_limit_infer_mph_corrected - speed_limit_here_mph) >= @param1",
     },
     {
         "key": "diff_speed_avg",
-        "label": "|infer_corrected − observed avg speed| ≥ param1 mph",
+        "label_template": "Disagrees with observed avg speed by {param1}+ mph",
         "sql": "ABS(speed_limit_infer_mph_corrected - speed_AVG_mph) >= @param1",
     },
     {
         "key": "diff_freeflow",
-        "label": "|infer_corrected − freeflow speed| ≥ param1 mph",
+        "label_template": "Disagrees with freeflow speed by {param1}+ mph",
         "sql": "ABS(speed_limit_infer_mph_corrected - freeflow_mph) >= @param1",
     },
     {
         "key": "speed_avg_high",
-        "label": "observed avg speed > param2 mph",
+        "label_template": "Observed avg speed over {param2} mph (implausible)",
         "sql": "speed_AVG_mph > @param2",
     },
     {
         "key": "freeflow_high",
-        "label": "freeflow speed > param2 mph",
+        "label_template": "Freeflow speed over {param2} mph (implausible)",
         "sql": "freeflow_mph > @param2",
     },
 ]
+
+
+def _fmt_mph(value: float) -> str:
+    """10.0 -> '10', 12.5 -> '12.5' - a param value as someone would
+    actually type it, for splicing into a metric's label_template."""
+    return f"{value:g}"
+
+
+def metric_labels(param1: float, param2: float) -> dict[str, str]:
+    """QUALITY_METRICS's label_template for each metric, with {param1}/
+    {param2} filled in from the thresholds actually in effect - so the
+    Quality page's stat tiles and breakdown table read e.g. "Disagrees
+    with OSM by 10+ mph" instead of the literal word "param1"."""
+    p1, p2 = _fmt_mph(param1), _fmt_mph(param2)
+    return {m["key"]: m["label_template"].format(param1=p1, param2=p2) for m in QUALITY_METRICS}
 
 
 @dataclasses.dataclass

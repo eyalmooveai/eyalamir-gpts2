@@ -132,12 +132,13 @@ account or file needed. This only affects that one browser; a different
 browser or a cleared site data starts back at the built-in defaults below.
 The first time you ever open the page (nothing saved yet), the form starts
 with the settings this tool has actually converged on for reliably catching
-a sign: headings `10` (relative to direction of travel), camera zoom `50`,
-walk through all candidates, slow-walk each segment at `2`m spacing, and
-sides-only. This is a lot more API calls per candidate than a conservative
-starting point would be (roughly `segment_length / 2 × 2 sides` Street View
-+ Vision calls each) - lower "Candidates to try" if a run is taking too
-long or costing more than expected.
+a sign: `3` candidates to try, headings `10` (relative to direction of
+travel), camera zoom `50`, walk through all candidates, slow-walk each
+segment at `2`m spacing, and sides-only. This is a lot more API calls per
+candidate than a conservative starting point would be (roughly
+`segment_length / 2 × 2 sides` Street View + Vision calls each) - lower
+"Candidates to try" further if a run is taking too long or costing more
+than expected.
 
 Additional options on the form:
 
@@ -311,9 +312,13 @@ Six metrics, each the percent of segments meeting a condition:
 | Observed avg speed implausible | `speed_AVG_mph > param2` |
 | Freeflow speed implausible | `freeflow_mph > param2` |
 
-`param1` (default 10 mph) and `param2` (default 80 mph) are both
-adjustable on the page. Optional filters narrow the same query to
-specific states and/or `functional_class` values (comma-separated;
+`param1` ("Mismatch threshold", default 10 mph) and `param2`
+("Implausible-speed threshold", default 80 mph) are both adjustable on
+the page - the stat tiles and breakdown table headers splice in whatever
+value is actually in effect (e.g. "Disagrees with OSM by 15+ mph"), not
+the literal placeholder word "param1"/"param2" shown in the table above.
+Optional filters narrow the same query to specific states and/or
+`functional_class` values (comma-separated;
 blank = everything); "Break down by" additionally groups the results by
 state, functional_class, or both, showing a breakdown table under the
 always-shown nationwide (or filtered-nationwide) summary tiles. Every

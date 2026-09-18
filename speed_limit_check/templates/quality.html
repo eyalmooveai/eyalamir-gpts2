@@ -48,12 +48,14 @@
     </select>
     <div class="row-2">
       <div>
-        <label for="param1">param1 - mph gap counted as a mismatch</label>
+        <label for="param1">Mismatch threshold (mph)</label>
         <input type="number" id="param1" name="param1" value="{{ filters.param1 }}" step="1" min="0">
+        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">How many mph off from OSM/HERE/observed/freeflow counts as a disagreement.</p>
       </div>
       <div>
-        <label for="param2">param2 - mph counted as implausibly fast</label>
+        <label for="param2">Implausible-speed threshold (mph)</label>
         <input type="number" id="param2" name="param2" value="{{ filters.param2 }}" step="1" min="0">
+        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">How fast an observed/freeflow speed has to be to count as implausible.</p>
       </div>
     </div>
     <label for="states">States (comma-separated, blank = all 50)</label>

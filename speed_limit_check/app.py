@@ -48,6 +48,7 @@ from quality_metrics import (
     fetch_quality_metrics,
     full_table_name,
     list_evaluable_tables,
+    metric_labels,
 )
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
@@ -89,6 +90,7 @@ WEB_DEFAULT_WALK_ALL = True
 WEB_DEFAULT_WALK_SEGMENT = True
 WEB_DEFAULT_WALK_SEGMENT_SPACING_M = 2
 WEB_DEFAULT_SIDE_MODE = "sides"
+WEB_DEFAULT_CANDIDATES = 3
 
 # Load once at startup (not just inside run_pipeline's background thread) so
 # GOOGLE_MAPS_API_KEY is available for embedding in a page - e.g. the
@@ -267,6 +269,11 @@ def speed_limits_quality():
         "group_by": request.args.get("group_by", "none").strip() or "none",
     }
 
+    # Fallback for the error-card-only render path below, where the try
+    # block never runs - not actually shown, since that path never
+    # reaches the stat tiles/breakdown table these labels are for.
+    metric_defs_view = QUALITY_METRICS
+
     # The nationwide (or filtered-nationwide) summary is always computed
     # and shown, even on a fresh page load with no query params at all -
     # it's the headline number the page exists to answer at a glance.
@@ -279,6 +286,12 @@ def speed_limits_quality():
             fcs = tuple(int(v.strip()) for v in filters_echo["functional_classes"].split(",") if v.strip())
             group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
             filters_echo["group_by"] = group_by
+
+            # Human-readable, with the actual thresholds spliced in - e.g.
+            # "Disagrees with OSM by 10+ mph" rather than the literal
+            # placeholder word "param1".
+            labels = metric_labels(param1, param2)
+            metric_defs_view = [{"key": m["key"], "label": labels[m["key"]]} for m in QUALITY_METRICS]
 
             base = QualityFilters(
                 project=DEFAULT_PROJECT, dataset=selected_dataset, table=selected_table,
@@ -306,7 +319,7 @@ def speed_limits_quality():
         breakdown=breakdown_view,
         table_name_display=table_name_display,
         table_options=table_options,
-        quality_metric_defs=QUALITY_METRICS,
+        quality_metric_defs=metric_defs_view,
         group_by_choices=GROUP_BY_CHOICES,
         us_state_codes=US_STATE_CODES,
         error=error,
@@ -330,6 +343,7 @@ def sign_checker():
         default_walk_segment_spacing_m=WEB_DEFAULT_WALK_SEGMENT_SPACING_M,
         default_side_mode=WEB_DEFAULT_SIDE_MODE,
         default_auto_side_offset=WEB_DEFAULT_AUTO_SIDE_OFFSET,
+        default_candidates=WEB_DEFAULT_CANDIDATES,
     )
 
 
@@ -340,7 +354,7 @@ def run():
     month = request.form.get("month", "").strip()
     project = request.form.get("project", "").strip() or DEFAULT_PROJECT
     dataset = request.form.get("dataset", "").strip() or DEFAULT_DATASET
-    max_candidates = int(request.form.get("candidates") or 10)
+    max_candidates = int(request.form.get("candidates") or WEB_DEFAULT_CANDIDATES)
     segment_id = request.form.get("segment_id", "").strip() or None
     walk_all = request.form.get("walk_all") is not None
     walk_segment = request.form.get("walk_segment") is not None
