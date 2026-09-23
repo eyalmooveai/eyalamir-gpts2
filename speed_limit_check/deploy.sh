@@ -6,7 +6,11 @@
 #   REGION         e.g. us-central1
 #   BUCKET_NAME    GCS bucket name for the persistent Street View/OCR cache
 #   MAPS_API_KEY   Google Maps Platform API key (Street View Static API enabled)
-#   INVOKER_EMAIL  Google account allowed to use the deployed app (roles/run.invoker)
+#   INVOKER_EMAIL  Google account granted roles/run.invoker directly (only
+#                  takes effect when SKIP_IAM_GRANTS is unset - see below;
+#                  with IAP fronting the service, who can actually reach it
+#                  is governed by roles/iap.httpsResourceAccessor instead,
+#                  granted outside this script)
 #
 # Optional:
 #   BQ_PROJECT_ID    GCP project that owns the speed_limits_..._details
@@ -16,16 +20,16 @@
 #                    single region - separate from REGION because Cloud
 #                    Run needs a specific region (no "US") while a GCS
 #                    bucket can use a broader multi-region (default: REGION)
-#   SKIP_IAM_GRANTS  Set to any non-empty value to skip the "Granting IAM
-#                    roles" step entirely - e.g. when an admin/devops has
-#                    already granted the runtime service account
-#                    (speed-limit-check-runner@<PROJECT_ID>.iam.gserviceaccount.com)
-#                    everything it needs directly. Granting IAM policy on
-#                    the project is a separate permission from creating
-#                    the bucket/secret/service account above, so your own
-#                    account can lack it even after those succeed - if
-#                    unset and that's the case, this step fails per grant
-#                    but doesn't abort the rest of the deploy either way.
+#   SKIP_IAM_GRANTS  Set to any non-empty value to skip every IAM grant
+#                    this script would otherwise make - both the runtime
+#                    service account's roles and the INVOKER_EMAIL grant -
+#                    e.g. when an admin/devops (or Terraform) already
+#                    grants all of it directly. Granting IAM policy is a
+#                    separate permission from creating the underlying
+#                    resources above, so your own account can lack it even
+#                    after those succeed - if unset and that's the case,
+#                    each grant fails individually but doesn't abort the
+#                    rest of the deploy either way.
 #
 # Usage:
 #   PROJECT_ID=my-project REGION=us-central1 BUCKET_NAME=my-bucket \
@@ -111,15 +115,18 @@ grant_iam() {
 }
 
 if [ -n "${SKIP_IAM_GRANTS:-}" ]; then
-  echo "-- Granting IAM roles -- skipped (SKIP_IAM_GRANTS set - assuming $SA already has what it needs)"
+  echo "-- Granting IAM roles -- skipped (SKIP_IAM_GRANTS set - assuming $SA and $INVOKER_EMAIL already have what they need)"
 else
   echo "-- Granting IAM roles --"
   grant_iam "roles/bigquery.dataViewer on project $BQ_PROJECT_ID for $SA" \
     gcloud projects add-iam-policy-binding "$BQ_PROJECT_ID" --member="serviceAccount:$SA" --role="roles/bigquery.dataViewer" --condition=None
   grant_iam "roles/bigquery.jobUser on project $BQ_PROJECT_ID for $SA" \
     gcloud projects add-iam-policy-binding "$BQ_PROJECT_ID" --member="serviceAccount:$SA" --role="roles/bigquery.jobUser" --condition=None
-  grant_iam "roles/cloudvision.user on project $PROJECT_ID for $SA" \
-    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$SA" --role="roles/cloudvision.user" --condition=None
+  # Vision ships no roles/cloudvision.* predefined role at all - what it
+  # actually gates calls on is serviceusage.services.use against the
+  # quota project, i.e. this role.
+  grant_iam "roles/serviceusage.serviceUsageConsumer on project $PROJECT_ID for $SA" \
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$SA" --role="roles/serviceusage.serviceUsageConsumer" --condition=None
   grant_iam "roles/storage.objectAdmin on gs://$BUCKET_NAME for $SA" \
     gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
   grant_iam "roles/secretmanager.secretAccessor on secret $SECRET_NAME for $SA" \
@@ -131,30 +138,30 @@ gcloud run deploy "$SERVICE_NAME" \
   --source "$SCRIPT_DIR" \
   --region "$REGION" \
   --service-account "$SA" \
-  --no-allow-unauthenticated \
+  --iap \
   --no-cpu-throttling \
   --max-instances=1 \
   --memory=1Gi \
   --set-env-vars="GCS_CACHE_BUCKET=$BUCKET_NAME" \
   --set-secrets="GOOGLE_MAPS_API_KEY=$SECRET_NAME:latest"
 
-echo "-- Granting invoker access to $INVOKER_EMAIL --"
-grant_iam "roles/run.invoker on service $SERVICE_NAME for user:$INVOKER_EMAIL" \
-  gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
-    --region "$REGION" \
-    --member="user:$INVOKER_EMAIL" \
-    --role="roles/run.invoker"
+if [ -n "${SKIP_IAM_GRANTS:-}" ]; then
+  echo "-- Granting invoker access to $INVOKER_EMAIL -- skipped (SKIP_IAM_GRANTS set)"
+else
+  echo "-- Granting invoker access to $INVOKER_EMAIL --"
+  grant_iam "roles/run.invoker on service $SERVICE_NAME for user:$INVOKER_EMAIL" \
+    gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
+      --region "$REGION" \
+      --member="user:$INVOKER_EMAIL" \
+      --role="roles/run.invoker"
+fi
 
 cat <<EOF
 
-Deployed.
-
-A plain browser visit to the service URL will 403 even for a granted
-user - there's no token attached to a normal page load. To open it:
-
-  gcloud run services proxy $SERVICE_NAME --region $REGION
-
-then visit http://127.0.0.1:8080
+Deployed. This service is fronted by Identity-Aware Proxy - reach it
+through the domain IAP is configured for (e.g. https://archimedes.moove.ai)
+and sign in with an authorized Google account, not by visiting the
+service's own Cloud Run URL directly.
 
 Logs:
 

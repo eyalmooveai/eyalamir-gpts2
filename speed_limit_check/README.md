@@ -60,7 +60,7 @@ through all candidates" checked, tries every one and reports every match).
 
    or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key with:
    - `roles/bigquery.dataViewer` (or read access to the `calc_out` dataset) and `roles/bigquery.jobUser`
-   - `roles/cloudvision.user` (Vision API)
+   - `roles/serviceusage.serviceUsageConsumer` (Vision API calls are gated on `serviceusage.services.use` against the quota project - Vision ships no `roles/cloudvision.*` predefined role at all)
 
    Make sure the **Cloud Vision API** is enabled on the project you run jobs
    against (`gcloud services enable vision.googleapis.com`).
@@ -523,8 +523,9 @@ SA=speed-limit-check-runner@YOUR_PROJECT_ID.iam.gserviceaccount.com
 # BigQuery - read the table and run queries (same roles as local ADC setup, step 2 above)
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/bigquery.dataViewer"
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
-# Vision API
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/cloudvision.user"
+# Vision API - gated on serviceusage.services.use against the quota project;
+# there's no roles/cloudvision.* predefined role to grant instead
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/serviceusage.serviceUsageConsumer"
 # The cache bucket only, not project-wide storage access
 gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET_NAME --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
 # Read the Maps API key secret
@@ -541,7 +542,7 @@ gcloud run deploy speed-limit-check \
   --source . \
   --region YOUR_REGION \
   --service-account "$SA" \
-  --no-allow-unauthenticated \
+  --iap \
   --no-cpu-throttling \
   --max-instances=1 \
   --memory=1Gi \
@@ -551,43 +552,30 @@ gcloud run deploy speed-limit-check \
 
 ### 6. Grant access
 
-`--no-allow-unauthenticated` means every request needs a valid Google
-identity token in its `Authorization` header - there's no app-level
-login, this is Cloud Run's own IAM check in front of it. Grant the
-people who should be able to use it:
-
-```bash
-gcloud run services add-iam-policy-binding speed-limit-check \
-  --region YOUR_REGION \
-  --member="user:someone@example.com" \
-  --role="roles/run.invoker"
-```
-
-**This is important and easy to get wrong**: plain browser navigation to
-the service URL will 403 even for a granted user, since a normal page
-load doesn't attach an identity token the way an authenticated `curl` or
-`gcloud` call does. To actually open it in a browser as yourself:
-
-```bash
-gcloud run services proxy speed-limit-check --region YOUR_REGION
-```
-
-which opens an authenticated tunnel at `http://127.0.0.1:8080` using
-your own `gcloud` login - open that URL in your browser. This is the
-simplest way to use it as a single person. If you want a real "click the
-link, sign in with Google, land on the page" experience for a team
-instead of a CLI tunnel per person, that's what [Identity-Aware
-Proxy](https://cloud.google.com/iap) is for, which Cloud Run supports
-enabling directly - the exact command/toggle has changed as the feature
-has matured, so check `gcloud run services update --help` or the Cloud
+`--iap` fronts the service with [Identity-Aware
+Proxy](https://cloud.google.com/iap) directly - no separate load
+balancer/domain/managed cert needed, unlike IAP in front of a plain
+Cloud Run service. Anyone who reaches the service URL is redirected
+through a normal Google sign-in first; who's actually let in past that
+is controlled by `roles/iap.httpsResourceAccessor` on the service, not
+`roles/run.invoker` (`gcloud run services proxy` and manually granting
+`run.invoker` are the *pre-IAP* access story - `deploy.sh` still offers
+an optional `INVOKER_EMAIL` grant for that fallback path, but it's not
+what actually gates access once IAP is on). Grant the people (or a whole
+Workspace domain, via `--member="domain:yourcompany.com"`) who should be
+able to use it with `gcloud iap web add-iam-policy-binding` - the exact
+invocation for a `--iap`-fronted Cloud Run service (as opposed to IAP in
+front of a load balancer) is new enough that it's worth confirming
+against `gcloud iap web add-iam-policy-binding --help` or the Cloud
 Console's "Security" tab for the service rather than trusting a specific
-flag here going stale.
+flag written down here going stale.
 
 ### After deploying
 
 Every run since has assumed `python app.py` locally; on Cloud Run, use
-the service URL (through the proxy above, or with a bearer token) instead
-of `http://127.0.0.1:5050`, and check logs with:
+the service URL instead of `http://127.0.0.1:5050` - visiting it in a
+browser now prompts a normal Google sign-in (IAP), no proxy/tunnel
+needed. Check logs with:
 
 ```bash
 gcloud run services logs read speed-limit-check --region YOUR_REGION

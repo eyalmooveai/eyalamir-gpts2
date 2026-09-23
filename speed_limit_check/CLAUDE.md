@@ -61,30 +61,33 @@
   `REGION=us-central1`, `BUCKET_NAME=archimedes-control`,
   `BUCKET_LOCATION=US`, `INVOKER_EMAIL=eyal@moove.ai`. Deployed service
   URL: `https://speed-limit-check-233134271134.us-central1.run.app`.
-- Access model: Cloud Run's own IAM auth (`--no-allow-unauthenticated`),
-  used via `gcloud run services proxy speed-limit-check --region
-  us-central1` (needs `roles/run.invoker` granted per user on the
-  service, a separate grant from the runtime service account's own
-  roles - same "different resource, different setIamPolicy permission"
-  gap `deploy.sh` already handles for the service account). This is the
-  access model until the IAP setup below goes live.
-- **IAP (real "click the link, sign in with Google" access) - now being
-  set up**, not deferred anymore: `archimedes.moove.ai`, open to
-  `domain:moove.ai` (everyone at the company). Handed devops the full
-  runbook (static IP, DNS A record, managed SSL cert, Serverless NEG on
-  `speed-limit-check`/us-central1, backend service, URL map/HTTPS
-  proxy/forwarding rule, IAP enablement + `domain:moove.ai` grant) - not
-  yet confirmed live as of this writing, check with devops/visit the
-  domain before assuming it's done. Two things change once it is:
-  - Cloud Run's own IAM gate (`--no-allow-unauthenticated` + per-user
-    `run.invoker`) gets replaced, not stacked - IAP and Cloud Run IAM
-    can't both gate the same request, so the service ends up with
-    `allUsers` as invoker and `--ingress=internal-and-cloud-load-balancing`
-    instead, so the LB (and therefore IAP) is the only way in.
-  - The direct `https://speed-limit-check-....run.app` URL and
-    `gcloud run services proxy` both stop working once ingress is
-    locked down - that's intentional, not a regression to "fix".
-  If asked to help with IAP/load-balancer work now, this is in progress,
-  not something to push back on as unnecessary complexity - that
-  objection applied to the earlier ask, before a domain/access decision
-  existed to build it on.
+- **Access model: IAP, live and confirmed working** at
+  `https://archimedes.moove.ai`, open to `domain:moove.ai` (everyone at
+  the company) - confirmed 2026-09: instant access from an already-signed-in
+  Chrome session, a Google sign-in prompt in incognito, and a correct
+  "you don't have access" for a personal (non-moove.ai) Google account.
+  Devops set this up **simpler than the manual load-balancer/Serverless-NEG
+  runbook this file used to describe**: just `--iap` on `gcloud run
+  deploy` itself, no separate static IP/DNS/managed-cert/NEG/backend-service
+  chain needed for a single Cloud Run service. `deploy.sh` was updated to
+  match (`--no-allow-unauthenticated` -> `--iap`) - don't revert this or
+  reintroduce `--no-allow-unauthenticated`, it would 403 the setIamPolicy
+  call IAP itself now owns and abort the script under `set -euo pipefail`.
+  Who's actually let in is controlled by `roles/iap.httpsResourceAccessor`
+  on the service, not `roles/run.invoker` - `gcloud run services proxy`
+  and the direct `.run.app` URL are the *pre-IAP* story, not how this is
+  used day to day anymore (`deploy.sh` still offers an optional
+  `INVOKER_EMAIL`/`run.invoker` grant as a fallback path, but it isn't
+  what gates access once `--iap` is on).
+- **Terraform now owns this project's IAM grants** - bigquery.dataViewer,
+  bigquery.jobUser, storage.objectAdmin on the cache bucket,
+  secretmanager.secretAccessor, and run.invoker for INVOKER_EMAIL. Run
+  `deploy.sh` for this project with `SKIP_IAM_GRANTS=1` going forward -
+  without it, the script re-attempts grants Terraform already owns
+  (harmless/additive, but noisy: it'll report them as failures needing an
+  admin when they're actually already in place via Terraform).
+  `deploy.sh` also had a bad role name fixed: `roles/cloudvision.user`
+  doesn't exist (Vision ships no `roles/cloudvision.*` predefined role at
+  all) - it's `roles/serviceusage.serviceUsageConsumer` now (Vision API
+  calls are gated on `serviceusage.services.use` against the quota
+  project).
