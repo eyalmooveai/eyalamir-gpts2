@@ -14,6 +14,7 @@ and the API keys/credentials this needs either way.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import threading
 import uuid
@@ -40,6 +41,7 @@ from find_bad_speed_limit import (
     run_pipeline,
 )
 from quality_metrics import (
+    DEFAULT_INFER_FIELD,
     GROUP_BY_CHOICES,
     QUALITY_METRICS,
     US_STATE_CODES,
@@ -48,6 +50,7 @@ from quality_metrics import (
     fetch_quality_metrics,
     full_table_name,
     list_evaluable_tables,
+    list_infer_fields,
     metric_labels,
 )
 
@@ -103,6 +106,18 @@ app = Flask(__name__)
 # so a plain dict + lock is enough - no need for a task queue/DB here.
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
+
+# Separate in-memory job store for the Speed-Limits Quality page's own
+# BigQuery queries - same pattern as JOBS/JOBS_LOCK above, but kept apart
+# since the job shape is completely different (query filters/results, not
+# a segment-checking pipeline) and the two are otherwise unrelated. Runs
+# every quality query - a full-table aggregate scanning tens of millions
+# of rows - in a background thread instead of blocking the page load, so
+# the shell (filters form, table dropdown) renders immediately and the
+# stats fill in once the query (or its cache hit) actually completes.
+QUALITY_JOBS: dict[str, dict] = {}
+QUALITY_JOBS_LOCK = threading.Lock()
+MAX_QUALITY_JOBS = 20
 
 
 def _image_url(path: Path) -> str:
@@ -232,6 +247,68 @@ def _run_job(
         _update_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
 
 
+def _new_quality_job() -> str:
+    job_id = uuid.uuid4().hex
+    with QUALITY_JOBS_LOCK:
+        QUALITY_JOBS[job_id] = {
+            "status": "running",  # "running" | "done" | "error"
+            "message": "Running BigQuery query...",
+            "error": None,
+            "table_name_display": None,
+            "filtered": False,
+            "metrics": None,
+            "breakdown": None,
+            "metric_defs": [],
+            "group_by": "none",
+        }
+        while len(QUALITY_JOBS) > MAX_QUALITY_JOBS:
+            del QUALITY_JOBS[next(iter(QUALITY_JOBS))]
+    return job_id
+
+
+def _update_quality_job(job_id: str, **kwargs) -> None:
+    with QUALITY_JOBS_LOCK:
+        if job_id in QUALITY_JOBS:
+            QUALITY_JOBS[job_id].update(kwargs)
+
+
+def _get_quality_job(job_id: str) -> dict | None:
+    with QUALITY_JOBS_LOCK:
+        job = QUALITY_JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _run_quality_job(job_id: str, base: QualityFilters, group_by: str, param1: float, param2: float) -> None:
+    try:
+        labels = metric_labels(param1, param2)
+        metric_defs_view = [{"key": m["key"], "label": labels[m["key"]]} for m in QUALITY_METRICS]
+        table_name_display = full_table_name(base)
+        filtered = bool(base.states or base.functional_classes)
+        _update_quality_job(
+            job_id,
+            table_name_display=table_name_display,
+            filtered=filtered,
+            metric_defs=metric_defs_view,
+            group_by=group_by,
+            message=f"Querying {table_name_display}...",
+        )
+
+        metrics_rows = fetch_quality_metrics(base)
+        metrics_view = metrics_rows[0] if metrics_rows else None
+
+        breakdown_view = None
+        if group_by != "none":
+            _update_quality_job(job_id, message="Querying the breakdown...")
+            grouped = dataclasses.replace(base, group_by=group_by)
+            breakdown_view = fetch_quality_metrics(grouped)
+
+        _update_quality_job(job_id, status="done", metrics=metrics_view, breakdown=breakdown_view)
+    except ValueError as e:
+        _update_quality_job(job_id, status="error", error=str(e))
+    except Exception as e:
+        _update_quality_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
+
+
 @app.route("/", methods=["GET"])
 def hub():
     return render_template("hub.html", models=HUB_MODELS)
@@ -239,9 +316,6 @@ def hub():
 
 @app.route("/speed-limits", methods=["GET"])
 def speed_limits_quality():
-    metrics_view = None
-    breakdown_view = None
-    table_name_display = None
     error = None
 
     # Live, not hardcoded - so the selector always matches whatever tables
@@ -249,6 +323,9 @@ def speed_limits_quality():
     # speed_limits_infer* views) actually exist, without this app needing
     # to know about a new one in advance. Each option's dropdown value is
     # "dataset.table" since the two sources live in different datasets.
+    # Both this and the infer-field lookup below are fast, cached
+    # metadata-only queries (see quality_metrics.py) - only the actual
+    # aggregate metrics query is slow enough to need the async job below.
     try:
         table_options = [f"{t['dataset']}.{t['table']}" for t in list_evaluable_tables(DEFAULT_PROJECT)]
     except Exception as e:
@@ -260,8 +337,28 @@ def speed_limits_quality():
     selected_option = requested_table or (default_table if default_table in table_options else (table_options[0] if table_options else default_table))
     selected_dataset, _, selected_table = selected_option.partition(".")
 
+    # Which inferred-speed-limit column to evaluate - discovered live per
+    # table (see list_infer_fields's docstring for why: it varies table to
+    # table, e.g. speed_limit_infer_mph_corrected isn't on every one).
+    # Prefers DEFAULT_INFER_FIELD when the selected table actually has it,
+    # same "keep the familiar default when it's valid, else fall back to
+    # whatever's actually there" pattern as the table selector above.
+    infer_field_options: list[str] = []
+    if not error:
+        try:
+            infer_field_options = list_infer_fields(DEFAULT_PROJECT, selected_dataset, selected_table)
+        except Exception as e:
+            error = f"Could not list inferred-speed-limit fields for {selected_option}: {type(e).__name__}: {e}"
+
+    requested_infer_field = request.args.get("infer_field", "").strip()
+    selected_infer_field = requested_infer_field or (
+        DEFAULT_INFER_FIELD if DEFAULT_INFER_FIELD in infer_field_options
+        else (infer_field_options[0] if infer_field_options else DEFAULT_INFER_FIELD)
+    )
+
     filters_echo = {
         "table": selected_option,
+        "infer_field": selected_infer_field,
         "param1": request.args.get("param1", "10").strip() or "10",
         "param2": request.args.get("param2", "80").strip() or "80",
         "states": request.args.get("states", "").strip(),
@@ -269,15 +366,16 @@ def speed_limits_quality():
         "group_by": request.args.get("group_by", "none").strip() or "none",
     }
 
-    # Fallback for the error-card-only render path below, where the try
-    # block never runs - not actually shown, since that path never
-    # reaches the stat tiles/breakdown table these labels are for.
-    metric_defs_view = QUALITY_METRICS
-
-    # The nationwide (or filtered-nationwide) summary is always computed
+    # The nationwide (or filtered-nationwide) summary is always kicked off
     # and shown, even on a fresh page load with no query params at all -
-    # it's the headline number the page exists to answer at a glance.
-    # Only the breakdown table is opt-in (group_by).
+    # it's the headline number the page exists to answer at a glance. It
+    # runs in a background job (see _run_quality_job) rather than blocking
+    # this response, since it's a full-table aggregate scanning tens of
+    # millions of rows - the page renders immediately with a spinner in
+    # its place, and JS (in quality.html) polls/fetches the result once
+    # the job (or its cache hit) completes. Only the breakdown table is
+    # opt-in (group_by), computed by that same job.
+    job_id = None
     if not error:
         try:
             param1 = float(filters_echo["param1"])
@@ -287,42 +385,54 @@ def speed_limits_quality():
             group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
             filters_echo["group_by"] = group_by
 
-            # Human-readable, with the actual thresholds spliced in - e.g.
-            # "Disagrees with OSM by 10+ mph" rather than the literal
-            # placeholder word "param1".
-            labels = metric_labels(param1, param2)
-            metric_defs_view = [{"key": m["key"], "label": labels[m["key"]]} for m in QUALITY_METRICS]
-
             base = QualityFilters(
                 project=DEFAULT_PROJECT, dataset=selected_dataset, table=selected_table,
-                param1=param1, param2=param2, states=states, functional_classes=fcs,
+                infer_field=selected_infer_field, param1=param1, param2=param2,
+                states=states, functional_classes=fcs,
             )
-            table_name_display = full_table_name(base)
-            metrics_rows = fetch_quality_metrics(base)
-            metrics_view = metrics_rows[0] if metrics_rows else None
-
-            if group_by != "none":
-                grouped = QualityFilters(
-                    project=DEFAULT_PROJECT, dataset=selected_dataset, table=selected_table,
-                    param1=param1, param2=param2, states=states, functional_classes=fcs, group_by=group_by,
-                )
-                breakdown_view = fetch_quality_metrics(grouped)
+            job_id = _new_quality_job()
+            thread = threading.Thread(target=_run_quality_job, args=(job_id, base, group_by, param1, param2), daemon=True)
+            thread.start()
         except ValueError as e:
             error = str(e)
-        except Exception as e:
-            error = f"{type(e).__name__}: {e}"
 
     return render_template(
         "quality.html",
         filters=filters_echo,
-        metrics=metrics_view,
-        breakdown=breakdown_view,
-        table_name_display=table_name_display,
+        job_id=job_id,
         table_options=table_options,
-        quality_metric_defs=metric_defs_view,
+        infer_field_options=infer_field_options,
         group_by_choices=GROUP_BY_CHOICES,
         us_state_codes=US_STATE_CODES,
         error=error,
+    )
+
+
+@app.route("/speed-limits/status/<job_id>")
+def quality_status(job_id):
+    job = _get_quality_job(job_id)
+    if not job:
+        return jsonify({"status": "error", "message": "Unknown or expired job."})
+    return jsonify({"status": job["status"], "message": job["message"]})
+
+
+@app.route("/speed-limits/fragment/<job_id>")
+def quality_fragment(job_id):
+    job = _get_quality_job(job_id)
+    if not job or job["status"] == "running":
+        # Shouldn't normally be fetched before /status says done/error -
+        # JS only calls this once polling sees a terminal state. Empty
+        # body + 202 rather than an error page for the rare race.
+        return "", 202
+    return render_template(
+        "quality_result_fragment.html",
+        error=job["error"],
+        table_name_display=job["table_name_display"],
+        filtered=job["filtered"],
+        metrics=job["metrics"],
+        breakdown=job["breakdown"],
+        quality_metric_defs=job["metric_defs"],
+        group_by=job["group_by"],
     )
 
 

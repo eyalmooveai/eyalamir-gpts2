@@ -11,18 +11,28 @@ broken down by state and/or functional_class.
 from __future__ import annotations
 
 import dataclasses
+import re
 from typing import Optional
 
 from google.cloud import bigquery
 
+from bq_cache import cache_key, cached_query
 from find_bad_speed_limit import DATASET_RE, PROJECT_RE, STATE_RE, _validate_identifier, table_name
 
-# calc_out table names are plain identifiers (letters/digits/underscore) -
-# same shape find_bad_speed_limit.py validates dataset/project names with,
-# just without the project/dataset-specific character restrictions.
-import re
-
+# calc_out table/column names are plain identifiers (letters/digits/
+# underscore) - same shape find_bad_speed_limit.py validates dataset/
+# project names with, just without the project/dataset-specific character
+# restrictions. Used for both table names and the infer-field column name
+# below, since both get interpolated directly into SQL (not passable as
+# a query parameter, unlike a value).
 TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# How long a schema-shaped listing (which tables exist, which columns a
+# table has) is trusted before re-querying - these change far less often
+# than the data itself, so a short TTL is enough to avoid a live
+# INFORMATION_SCHEMA round-trip on every single page load without risking
+# a long-stale view of what's actually there.
+SCHEMA_CACHE_TTL_SECONDS = 300
 
 # The 50 states + DC, for the filter UI - independent of which states
 # actually have data in a given month's table (the query's own results
@@ -38,31 +48,37 @@ GROUP_BY_CHOICES = ("none", "state", "functional_class", "state,functional_class
 
 # Each metric's SQL condition, parameterized on @param1 (mph gap threshold
 # for the four "disagrees with X" comparisons) or @param2 (mph threshold
-# for the two "implausibly fast" checks). Shared between the query builder
-# and the results table so there's one definition of what each column means.
-# label_template's {param1}/{param2} placeholders get filled in with the
-# actual submitted threshold (see metric_label below) - so the stat tile
-# itself says e.g. "10 mph", not the literal word "param1".
+# for the two "implausibly fast" checks), and - for the four diff_*
+# metrics - {infer_field}, the specific inferred-speed-limit column being
+# evaluated (see QualityFilters.infer_field / list_infer_fields below;
+# this varies by table - e.g. speed_limit_infer_mph_corrected doesn't
+# exist on every table, but speed_limit_infer_mph or
+# speed_limit_infer_mph_new2/new3 might). Shared between the query
+# builder and the results table so there's one definition of what each
+# column means. label_template's {param1}/{param2} placeholders get
+# filled in with the actual submitted threshold (see metric_labels below)
+# - so the stat tile itself says e.g. "10 mph", not the literal word
+# "param1".
 QUALITY_METRICS = [
     {
         "key": "diff_osm",
         "label_template": "Disagrees with OSM by {param1}+ mph",
-        "sql": "ABS(speed_limit_infer_mph_corrected - speed_limit_osm_mph) >= @param1",
+        "sql": "ABS({infer_field} - speed_limit_osm_mph) >= @param1",
     },
     {
         "key": "diff_here",
         "label_template": "Disagrees with HERE by {param1}+ mph",
-        "sql": "ABS(speed_limit_infer_mph_corrected - speed_limit_here_mph) >= @param1",
+        "sql": "ABS({infer_field} - speed_limit_here_mph) >= @param1",
     },
     {
         "key": "diff_speed_avg",
         "label_template": "Disagrees with observed avg speed by {param1}+ mph",
-        "sql": "ABS(speed_limit_infer_mph_corrected - speed_AVG_mph) >= @param1",
+        "sql": "ABS({infer_field} - speed_AVG_mph) >= @param1",
     },
     {
         "key": "diff_freeflow",
         "label_template": "Disagrees with freeflow speed by {param1}+ mph",
-        "sql": "ABS(speed_limit_infer_mph_corrected - freeflow_mph) >= @param1",
+        "sql": "ABS({infer_field} - freeflow_mph) >= @param1",
     },
     {
         "key": "speed_avg_high",
@@ -75,6 +91,8 @@ QUALITY_METRICS = [
         "sql": "freeflow_mph > @param2",
     },
 ]
+
+DEFAULT_INFER_FIELD = "speed_limit_infer_mph_corrected"
 
 
 def _fmt_mph(value: float) -> str:
@@ -97,6 +115,7 @@ class QualityFilters:
     project: str
     dataset: str
     table: str  # a calc_out table, e.g. speed_limits_US_2026_08_details
+    infer_field: str = DEFAULT_INFER_FIELD  # the inferred-speed-limit column being evaluated - see list_infer_fields
     param1: float = 10.0
     param2: float = 80.0
     states: tuple[str, ...] = ()  # empty = all states
@@ -120,24 +139,55 @@ def default_table_name(year: str, month: str) -> str:
 TABLE_SOURCES = (("calc_out", "speed_limits_US"), ("archimedes_api", "speed_limits_infer"))
 
 
-def list_evaluable_tables(project: str) -> list[dict]:
+def list_evaluable_tables(project: str, log=lambda msg: None) -> list[dict]:
     """Live list of {dataset, table} across every source in TABLE_SOURCES -
     so the Quality page's table selector always reflects what's actually
     there (including views), rather than assuming a naming pattern or a
-    single dataset."""
+    single dataset. Cached for SCHEMA_CACHE_TTL_SECONDS - see bq_cache."""
     _validate_identifier(project, PROJECT_RE, "project")
-    client = bigquery.Client(project=project)
-    results: list[dict] = []
-    for dataset, prefix in TABLE_SOURCES:
-        _validate_identifier(dataset, DATASET_RE, "dataset")
+
+    def run() -> list[dict]:
+        client = bigquery.Client(project=project)
+        results: list[dict] = []
+        for dataset, prefix in TABLE_SOURCES:
+            _validate_identifier(dataset, DATASET_RE, "dataset")
+            query = f"""
+                SELECT table_name
+                FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
+                WHERE table_name LIKE '{prefix}%'
+                ORDER BY table_name
+            """
+            results.extend({"dataset": dataset, "table": row["table_name"]} for row in client.query(query).result())
+        return results
+
+    key = cache_key("evaluable_tables", project)
+    return cached_query(key, run, ttl_seconds=SCHEMA_CACHE_TTL_SECONDS, log=log)
+
+
+def list_infer_fields(project: str, dataset: str, table: str, log=lambda msg: None) -> list[str]:
+    """Live list of this specific table's columns matching
+    speed_limit_infer* - which inferred-speed-limit column(s) it actually
+    has varies by table (e.g. speed_limit_infer_mph_corrected doesn't
+    exist on every one, some instead have speed_limit_infer_mph_new2/
+    new3), so this is discovered per table rather than assumed. Cached
+    for SCHEMA_CACHE_TTL_SECONDS - see bq_cache."""
+    _validate_identifier(project, PROJECT_RE, "project")
+    _validate_identifier(dataset, DATASET_RE, "dataset")
+    _validate_identifier(table, TABLE_RE, "table")
+
+    def run() -> list[str]:
+        client = bigquery.Client(project=project)
         query = f"""
-            SELECT table_name
-            FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
-            WHERE table_name LIKE '{prefix}%'
-            ORDER BY table_name
+            SELECT column_name
+            FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+            WHERE table_name = @table AND column_name LIKE 'speed_limit_infer%'
+            ORDER BY column_name
         """
-        results.extend({"dataset": dataset, "table": row["table_name"]} for row in client.query(query).result())
-    return results
+        job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("table", "STRING", table)])
+        return [row["column_name"] for row in client.query(query, job_config=job_config).result()]
+
+    key = cache_key("infer_fields", project, dataset, table)
+    return cached_query(key, run, ttl_seconds=SCHEMA_CACHE_TTL_SECONDS, log=log)
 
 
 def full_table_name(f: QualityFilters) -> str:
@@ -154,11 +204,12 @@ def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQue
     _validate_identifier(f.project, PROJECT_RE, "project")
     _validate_identifier(f.dataset, DATASET_RE, "dataset")
     _validate_identifier(f.table, TABLE_RE, "table")
+    _validate_identifier(f.infer_field, TABLE_RE, "infer_field")
     if f.group_by not in GROUP_BY_CHOICES:
         raise ValueError(f"Invalid group_by {f.group_by!r} - must be one of {GROUP_BY_CHOICES}")
     table = f.table
 
-    where_parts = ["speed_limit_infer_mph_corrected IS NOT NULL"]
+    where_parts = [f"{f.infer_field} IS NOT NULL"]
     params: list[bigquery.ScalarQueryParameter] = [
         bigquery.ScalarQueryParameter("param1", "FLOAT64", float(f.param1)),
         bigquery.ScalarQueryParameter("param2", "FLOAT64", float(f.param2)),
@@ -174,7 +225,10 @@ def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQue
 
     group_cols = f.group_by.split(",") if f.group_by != "none" else []
     select_cols = [f"{c}," for c in group_cols]
-    metric_cols = [f"100.0 * SUM(CASE WHEN {m['sql']} THEN 1 ELSE 0 END) / COUNT(*) AS pct_{m['key']}" for m in QUALITY_METRICS]
+    metric_cols = [
+        f"100.0 * SUM(CASE WHEN {m['sql'].format(infer_field=f.infer_field)} THEN 1 ELSE 0 END) / COUNT(*) AS pct_{m['key']}"
+        for m in QUALITY_METRICS
+    ]
 
     query = f"""
         SELECT
@@ -189,8 +243,26 @@ def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQue
     return query, params
 
 
-def fetch_quality_metrics(f: QualityFilters) -> list[dict]:
+def fetch_quality_metrics(f: QualityFilters, log=lambda msg: None) -> list[dict]:
+    """Runs (or serves from cache) the aggregate query build_quality_query
+    builds for `f`. Cached on the selected table's own last-modified time
+    (a metadata GET, not a query job - effectively free) alongside every
+    other input, so an identical request only re-queries BigQuery once
+    the table it's actually reading has changed - not on every request,
+    and not stale forever either. If that metadata lookup itself fails
+    (bad table name, a transient error, ...), skips caching and just
+    queries directly - the query itself will surface the real error."""
     client = bigquery.Client(project=f.project)
     query, params = build_quality_query(f)
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
-    return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
+
+    def run() -> list[dict]:
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
+
+    try:
+        modified = client.get_table(f"{f.project}.{f.dataset}.{f.table}").modified.isoformat()
+    except Exception:
+        return run()
+
+    key = cache_key("quality_metrics", dataclasses.asdict(f), modified)
+    return cached_query(key, run, log=log)

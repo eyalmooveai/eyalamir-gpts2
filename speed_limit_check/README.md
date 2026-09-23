@@ -289,26 +289,40 @@ exact fully-qualified table it evaluated - deliberately not
 The "Table" dropdown lists every table/view currently matching
 `calc_out.speed_limits_US*` or `archimedes_api.speed_limits_infer*`,
 fetched fresh on every page load (a cheap `INFORMATION_SCHEMA.TABLES`
-query per dataset, not billed against the table data itself) rather than
-assumed from a naming pattern - so it always reflects what's actually
-published, including a new month's table as soon as it exists, with no
-code change needed here. Not every matching table/view has all the
-columns these six metrics need, though: only the `calc_out`
-`_<YEAR>_<MONTH>_details` tables carry `speed_limit_here_mph` and
-`freeflow_mph`. Picking a narrower one (e.g. `calc_out.speed_limits_US_latest`,
-a bare `calc_out.speed_limits_US_<YEAR>_<MONTH>` without `_details`, or
-either `archimedes_api.speed_limits_infer` view) surfaces BigQuery's
+query per dataset, not billed against the table data itself, and cached -
+see "Async loading and caching" below) rather than assumed from a naming
+pattern - so it always reflects what's actually published, including a
+new month's table as soon as it exists, with no code change needed here.
+Not every matching table/view has all the columns these six metrics
+need, though: only the `calc_out` `_<YEAR>_<MONTH>_details` tables carry
+`speed_limit_here_mph` and `freeflow_mph`. Picking a narrower one (e.g.
+`calc_out.speed_limits_US_latest`, a bare
+`calc_out.speed_limits_US_<YEAR>_<MONTH>` without `_details`, or either
+`archimedes_api.speed_limits_infer` view) surfaces BigQuery's
 "Unrecognized name" error in the page's error card rather than crashing -
 harmless to try, just not something these metrics can be computed from.
+
+### Choosing the inferred field
+
+Which column actually holds "the inferred speed limit" varies by table -
+some have `speed_limit_infer_mph_corrected`, others only
+`speed_limit_infer_mph` or `speed_limit_infer_mph_new2`/`_new3`. The
+"Inferred field being evaluated" dropdown lists whatever columns matching
+`speed_limit_infer*` the *currently selected table* actually has
+(`quality_metrics.list_infer_fields`, live per table, also cached),
+defaulting to `speed_limit_infer_mph_corrected` when that table has it.
+Every metric that compares against "the inferred value" uses whichever
+field is selected here - the page always shows which one that is, both
+in this dropdown and (implicitly) in every stat tile's meaning.
 
 Six metrics, each the percent of segments meeting a condition:
 
 | Metric | Condition |
 |---|---|
-| vs. OSM | `abs(speed_limit_infer_mph_corrected - speed_limit_osm_mph) >= param1` |
-| vs. HERE | `abs(speed_limit_infer_mph_corrected - speed_limit_here_mph) >= param1` |
-| vs. observed avg speed | `abs(speed_limit_infer_mph_corrected - speed_AVG_mph) >= param1` |
-| vs. freeflow speed | `abs(speed_limit_infer_mph_corrected - freeflow_mph) >= param1` |
+| vs. OSM | `abs(<inferred field> - speed_limit_osm_mph) >= param1` |
+| vs. HERE | `abs(<inferred field> - speed_limit_here_mph) >= param1` |
+| vs. observed avg speed | `abs(<inferred field> - speed_AVG_mph) >= param1` |
+| vs. freeflow speed | `abs(<inferred field> - freeflow_mph) >= param1` |
 | Observed avg speed implausible | `speed_AVG_mph > param2` |
 | Freeflow speed implausible | `freeflow_mph > param2` |
 
@@ -324,12 +338,42 @@ state, functional_class, or both, showing a breakdown table under the
 always-shown nationwide (or filtered-nationwide) summary tiles. Every
 run is exactly one or two BigQuery queries (the top-line summary, plus
 one more only when a breakdown is requested) - no per-segment iteration
-or Street View/Vision calls, so it's fast and comparatively cheap even
-though it scans the full nationwide table (tens of millions of rows;
-under 1.5GB processed per query in practice).
+or Street View/Vision calls, so it's comparatively cheap even though it
+scans the full nationwide table (tens of millions of rows; under 1.5GB
+processed per query in practice) - see "Async loading and caching" for
+how that query itself is run.
 
-Filters are plain GET query parameters (`/speed-limits?table=calc_out.speed_limits_US_2026_08_details&param1=15&states=NC,SC&group_by=state`),
+Filters are plain GET query parameters (`/speed-limits?table=calc_out.speed_limits_US_2026_08_details&infer_field=speed_limit_infer_mph_corrected&param1=15&states=NC,SC&group_by=state`),
 so a particular view is directly linkable/bookmarkable.
+
+### Async loading and caching
+
+The page itself (filters form, table/field dropdowns) renders
+immediately on every load - it never blocks on the aggregate query. That
+query (and the breakdown query, when requested) runs in a background
+thread instead (`app.py`'s `QUALITY_JOBS`, the same pattern the sign
+checker's own `/run` background jobs use), with a small progress
+indicator shown in its place; the browser polls `/speed-limits/status/<job_id>`
+and, once done, fetches the rendered result from
+`/speed-limits/fragment/<job_id>` and swaps it in - no full page reload.
+
+Every BigQuery call this page makes is also cached, so an identical
+request doesn't re-run it:
+
+- **The aggregate metrics/breakdown query** (`quality_metrics.fetch_quality_metrics`) -
+  cached on the selected table's own last-modified time (`bigquery.Client.get_table(...).modified`,
+  a metadata GET, not a billed query) alongside every filter - so the
+  same request only re-queries BigQuery once the table it's reading has
+  actually changed (e.g. `speed_limits_US_latest` gets refreshed), not on
+  every page load and not stale forever either.
+- **The table list and the inferred-field list** (both
+  `INFORMATION_SCHEMA` lookups) - cached for 5 minutes each, since
+  there's no single "last modified" signal for a listing across a whole
+  dataset/table's schema the way there is for one table's data.
+
+All three share the same disk (and GCS, when `GCS_CACHE_BUCKET` is set -
+see "Deploying to Cloud Run") cache mechanism as the rest of this app -
+see `bq_cache.py` and "Caching" below.
 
 ## Output
 
@@ -382,6 +426,13 @@ Every billed API this tool calls - BigQuery, Street View, and Vision -
 is cached to disk (and, if `GCS_CACHE_BUCKET` is set, to GCS too - see
 "Deploying to Cloud Run") and reused rather than re-fetched:
 
+- **Speed-Limits Quality's BigQuery queries** (`bq_cache.py`, used by
+  `quality_metrics.py`) - see "Async loading and caching" above for
+  specifics; the general mechanism is the same disk+GCS JSON cache as
+  everywhere else, just keyed generically (a table's own last-modified
+  time for the aggregate query, a short TTL for schema-shaped listings)
+  rather than the sign checker's own year/month-snapshot assumption
+  below.
 - **The candidates query itself**: a `speed_limits_<STATE>_<YEAR>_<MONTH>_details`
   table is a dated, published monthly snapshot, so the same query against
   it (same state/year/month, same selection criteria, same "candidates to

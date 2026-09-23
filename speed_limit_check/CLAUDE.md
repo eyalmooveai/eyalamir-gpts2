@@ -46,6 +46,40 @@
   option value is `"<dataset>.<table>"` since the two sources span
   different datasets - `QualityFilters.dataset` is no longer hardcoded to
   `DEFAULT_DATASET` for this page, it comes from the selected option.
+- The "inferred speed limit" column (`QualityFilters.infer_field`, what
+  all four diff_* metrics compare against) also varies by table, same as
+  the table list itself - don't hardcode
+  `speed_limit_infer_mph_corrected`. Confirmed live as of 2026-09-23:
+  `speed_limits_US_2026_02` has `speed_limit_infer_mph`/`_new2`/`_new3`
+  but NOT `_corrected`; `speed_limits_US_2026_08`(`_details`) has
+  `speed_limit_infer_mph`/`_corrected` but not `_new2`/`_new3`;
+  `speed_limits_US_latest` has `_corrected`/`_new2`/`_new3` but not the
+  bare `speed_limit_infer_mph`. `quality_metrics.list_infer_fields`
+  discovers this live per selected table
+  (`INFORMATION_SCHEMA.COLUMNS`, `column_name LIKE 'speed_limit_infer%'`)
+  - the Quality page's "Inferred field being evaluated" dropdown reflects
+  whatever the current table actually has, defaulting to
+  `DEFAULT_INFER_FIELD` ("...mph_corrected") only when present.
+- **Speed-Limits Quality is fully async now, not synchronous-at-page-load**:
+  the page shell (filters, table/field dropdowns) renders immediately;
+  the aggregate query (and breakdown query) run in a background thread
+  (`app.py`'s `QUALITY_JOBS`, mirroring the sign checker's own `JOBS`
+  pattern) with the browser polling `/speed-limits/status/<job_id>` then
+  fetching `/speed-limits/fragment/<job_id>` once done - no full page
+  reload. This was a direct fix for the page taking several seconds to
+  load: don't revert to computing `fetch_quality_metrics`/breakdown
+  synchronously inside the `speed_limits_quality()` route itself.
+- **Every BigQuery call this page makes is cached** via `bq_cache.py`
+  (`cache_key`/`cached_query`, disk + GCS, same mechanism
+  `find_bad_speed_limit.py`'s `gcs_cache_pull`/`gcs_cache_push` already
+  provide) - `fetch_quality_metrics` keys on the selected table's own
+  `bigquery.Client.get_table(...).modified` timestamp (so a request only
+  re-queries BigQuery once the table it reads has actually changed, not
+  on every page load), while `list_evaluable_tables`/`list_infer_fields`
+  use a flat 5-minute TTL (`SCHEMA_CACHE_TTL_SECONDS`) since there's no
+  single "modified" signal for a schema-shaped listing. `bq_cache.py` is
+  a new module `Dockerfile`'s `COPY` line must include - don't forget it
+  the way `quality_metrics.py` itself was once nearly forgotten there.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo

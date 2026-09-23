@@ -1,0 +1,51 @@
+{% if table_name_display %}
+  <p style="color:var(--muted); font-size:0.78rem; margin:-14px 0 14px;">Table evaluated: <code>{{ table_name_display }}</code></p>
+{% endif %}
+{% if error %}
+  <div class="card">
+    <span class="badge err">Error</span>
+    <pre class="log">{{ error }}</pre>
+  </div>
+{% elif metrics %}
+  <div class="card">
+    <h3 style="margin-top:0;">
+      {% if filtered %}Filtered{% else %}Nationwide{% endif %}
+      summary - {{ "{:,}".format(metrics.total_segments) }} segments ({{ table_name_display }})
+    </h3>
+    <div class="stat-grid">
+      {% for m in quality_metric_defs %}
+        <div class="stat-tile">
+          <div class="stat-value">{{ "%.1f"|format(metrics["pct_" + m.key]) }}%</div>
+          <div class="stat-label">{{ m.label }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% else %}
+  <div class="card">
+    <span class="badge warn">No data</span>
+    <p>No segments matched these filters in {{ table_name_display }}.</p>
+  </div>
+{% endif %}
+
+{% if breakdown %}
+  <div class="card">
+    <h3 style="margin-top:0;">Breakdown</h3>
+    <table>
+      <tr>
+        {% if group_by in ('state', 'state,functional_class') %}<th>State</th>{% endif %}
+        {% if group_by in ('functional_class', 'state,functional_class') %}<th>Functional class</th>{% endif %}
+        <th>Segments</th>
+        {% for m in quality_metric_defs %}<th>{{ m.label }}</th>{% endfor %}
+      </tr>
+      {% for row in breakdown %}
+        <tr>
+          {% if group_by in ('state', 'state,functional_class') %}<td>{{ row.state }}</td>{% endif %}
+          {% if group_by in ('functional_class', 'state,functional_class') %}<td>{{ row.functional_class }}</td>{% endif %}
+          <td>{{ "{:,}".format(row.total_segments) }}</td>
+          {% for m in quality_metric_defs %}<td>{{ "%.1f"|format(row["pct_" + m.key]) }}%</td>{% endfor %}
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+{% endif %}

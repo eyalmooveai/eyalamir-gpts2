@@ -3,35 +3,19 @@
 {% block heading %}Speed-Limits Quality{% endblock %}
 {% block subtitle %}Nationwide inferred speed-limit quality vs. OSM/HERE/observed speeds{% endblock %}
 {% block content %}
-{% if table_name_display %}
-  <p style="color:var(--muted); font-size:0.78rem; margin:-14px 0 14px;">Table evaluated: <code>{{ table_name_display }}</code></p>
-{% endif %}
-{% if error %}
-  <div class="card">
-    <span class="badge err">Error</span>
-    <pre class="log">{{ error }}</pre>
-  </div>
-{% elif metrics %}
-  <div class="card">
-    <h3 style="margin-top:0;">
-      {% if filters.states or filters.functional_classes %}Filtered{% else %}Nationwide{% endif %}
-      summary - {{ "{:,}".format(metrics.total_segments) }} segments ({{ filters.table }})
-    </h3>
-    <div class="stat-grid">
-      {% for m in quality_metric_defs %}
-        <div class="stat-tile">
-          <div class="stat-value">{{ "%.1f"|format(metrics["pct_" + m.key]) }}%</div>
-          <div class="stat-label">{{ m.label }}</div>
-        </div>
-      {% endfor %}
+<div id="quality-results">
+  {% if error %}
+    <div class="card">
+      <span class="badge err">Error</span>
+      <pre class="log">{{ error }}</pre>
     </div>
-  </div>
-{% else %}
-  <div class="card">
-    <span class="badge warn">No data</span>
-    <p>No segments matched these filters in {{ filters.table }}.</p>
-  </div>
-{% endif %}
+  {% elif job_id %}
+    <div class="card">
+      <p id="quality-loading-message" style="margin-top:0;">Running BigQuery query&hellip;</p>
+      <div class="progress-indeterminate"></div>
+    </div>
+  {% endif %}
+</div>
 
 <div class="card">
   <a href="/sign-checker" class="btn-secondary" style="text-decoration:none; display:inline-block;">Open the Street View Sign Checker &rarr;</a>
@@ -46,6 +30,12 @@
       {% for t in table_options %}<option value="{{ t }}" {% if t == filters.table %}selected{% endif %}>{{ t }}</option>{% endfor %}
       {% if filters.table not in table_options %}<option value="{{ filters.table }}" selected>{{ filters.table }}</option>{% endif %}
     </select>
+    <label for="infer_field">Inferred field being evaluated</label>
+    <select id="infer_field" name="infer_field">
+      {% for f in infer_field_options %}<option value="{{ f }}" {% if f == filters.infer_field %}selected{% endif %}>{{ f }}</option>{% endfor %}
+      {% if filters.infer_field not in infer_field_options %}<option value="{{ filters.infer_field }}" selected>{{ filters.infer_field }}</option>{% endif %}
+    </select>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Which inferred-speed-limit column every metric below compares against OSM/HERE/observed/freeflow speeds - the options above are whatever columns the selected table actually has (varies by table).</p>
     <div class="row-2">
       <div>
         <label for="param1">Mismatch threshold (mph)</label>
@@ -76,25 +66,35 @@
   </form>
 </div>
 
-{% if breakdown %}
-  <div class="card">
-    <h3 style="margin-top:0;">Breakdown</h3>
-    <table>
-      <tr>
-        {% if filters.group_by in ('state', 'state,functional_class') %}<th>State</th>{% endif %}
-        {% if filters.group_by in ('functional_class', 'state,functional_class') %}<th>Functional class</th>{% endif %}
-        <th>Segments</th>
-        {% for m in quality_metric_defs %}<th>{{ m.label }}</th>{% endfor %}
-      </tr>
-      {% for row in breakdown %}
-        <tr>
-          {% if filters.group_by in ('state', 'state,functional_class') %}<td>{{ row.state }}</td>{% endif %}
-          {% if filters.group_by in ('functional_class', 'state,functional_class') %}<td>{{ row.functional_class }}</td>{% endif %}
-          <td>{{ "{:,}".format(row.total_segments) }}</td>
-          {% for m in quality_metric_defs %}<td>{{ "%.1f"|format(row["pct_" + m.key]) }}%</td>{% endfor %}
-        </tr>
-      {% endfor %}
-    </table>
-  </div>
+{% if job_id %}
+<script>
+(function () {
+  const jobId = {{ job_id|tojson }};
+  const resultsEl = document.getElementById('quality-results');
+  const msgEl = document.getElementById('quality-loading-message');
+
+  function showFragment() {
+    fetch('/speed-limits/fragment/' + jobId)
+      .then(r => r.text())
+      .then(html => { resultsEl.innerHTML = html; });
+  }
+
+  function poll() {
+    fetch('/speed-limits/status/' + jobId)
+      .then(r => r.json())
+      .then(data => {
+        if (msgEl && data.message) msgEl.textContent = data.message;
+        if (data.status === 'done' || data.status === 'error') {
+          showFragment();
+        } else {
+          setTimeout(poll, 600);
+        }
+      })
+      .catch(() => setTimeout(poll, 1500));
+  }
+
+  poll();
+})();
+</script>
 {% endif %}
 {% endblock %}
