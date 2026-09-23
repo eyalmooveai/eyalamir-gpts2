@@ -134,7 +134,12 @@ else
 fi
 
 echo "-- Deploying to Cloud Run --"
-gcloud run deploy "$SERVICE_NAME" \
+# --iap is only recognized on the alpha track as of this writing
+# (`gcloud run deploy --iap` errors with "unrecognized arguments" on
+# stable and suggests `gcloud alpha run deploy --iap`) - install alpha
+# if it isn't already, then use it for this one command.
+gcloud components install alpha --quiet
+gcloud alpha run deploy "$SERVICE_NAME" \
   --source "$SCRIPT_DIR" \
   --region "$REGION" \
   --service-account "$SA" \

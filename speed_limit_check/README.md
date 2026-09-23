@@ -535,10 +535,14 @@ gcloud secrets add-iam-policy-binding speed-limit-check-maps-key --member="servi
 ### 5. Deploy
 
 Run this from the `speed_limit_check/` directory (it builds the
-`Dockerfile` there via Cloud Build, no local Docker needed):
+`Dockerfile` there via Cloud Build, no local Docker needed). `--iap` is
+alpha-track only as of this writing (`gcloud run deploy --iap` errors
+with "unrecognized arguments" on stable) - install the component first
+if you don't have it:
 
 ```bash
-gcloud run deploy speed-limit-check \
+gcloud components install alpha
+gcloud alpha run deploy speed-limit-check \
   --source . \
   --region YOUR_REGION \
   --service-account "$SA" \
