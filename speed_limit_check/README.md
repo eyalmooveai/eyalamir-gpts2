@@ -586,18 +586,13 @@ gcloud secrets add-iam-policy-binding speed-limit-check-maps-key --member="servi
 ### 5. Deploy
 
 Run this from the `speed_limit_check/` directory (it builds the
-`Dockerfile` there via Cloud Build, no local Docker needed). `--iap` is
-alpha-track only as of this writing (`gcloud run deploy --iap` errors
-with "unrecognized arguments" on stable) - install the component first
-if you don't have it:
+`Dockerfile` there via Cloud Build, no local Docker needed):
 
 ```bash
-gcloud components install alpha
-gcloud alpha run deploy speed-limit-check \
+gcloud run deploy speed-limit-check \
   --source . \
   --region YOUR_REGION \
   --service-account "$SA" \
-  --iap \
   --no-cpu-throttling \
   --max-instances=1 \
   --memory=1Gi \
@@ -605,25 +600,46 @@ gcloud alpha run deploy speed-limit-check \
   --set-secrets="GOOGLE_MAPS_API_KEY=speed-limit-check-maps-key:latest"
 ```
 
+Deliberately no `--iap` here: Cloud Run's native IAP integration is
+alpha-track only as of this writing (`gcloud run deploy --iap` errors
+with "unrecognized arguments" on stable, and beta doesn't have it
+either), and alpha/beta commands are a deliberate choice to avoid for
+this deploy - not vetted the way stable is. Setting up IAP itself (a
+one-time thing, not part of every deploy) is covered in "Grant access"
+below.
+
 ### 6. Grant access
 
-`--iap` fronts the service with [Identity-Aware
-Proxy](https://cloud.google.com/iap) directly - no separate load
-balancer/domain/managed cert needed, unlike IAP in front of a plain
-Cloud Run service. Anyone who reaches the service URL is redirected
-through a normal Google sign-in first; who's actually let in past that
-is controlled by `roles/iap.httpsResourceAccessor` on the service, not
-`roles/run.invoker` (`gcloud run services proxy` and manually granting
-`run.invoker` are the *pre-IAP* access story - `deploy.sh` still offers
-an optional `INVOKER_EMAIL` grant for that fallback path, but it's not
-what actually gates access once IAP is on). Grant the people (or a whole
-Workspace domain, via `--member="domain:yourcompany.com"`) who should be
-able to use it with `gcloud iap web add-iam-policy-binding` - the exact
-invocation for a `--iap`-fronted Cloud Run service (as opposed to IAP in
-front of a load balancer) is new enough that it's worth confirming
-against `gcloud iap web add-iam-policy-binding --help` or the Cloud
-Console's "Security" tab for the service rather than trusting a specific
-flag written down here going stale.
+IAP fronts the service directly (however it gets enabled - see below) -
+no separate load balancer/domain/managed cert needed, unlike IAP in
+front of a plain Cloud Run service. Anyone who reaches the service URL
+is redirected through a normal Google sign-in first; who's actually let
+in past that is controlled by `roles/iap.httpsResourceAccessor` on the
+service, not `roles/run.invoker` (`gcloud run services proxy` and
+manually granting `run.invoker` are the *pre-IAP* access story -
+`deploy.sh` still offers an optional `INVOKER_EMAIL` grant for that
+fallback path, but it's not what actually gates access once IAP is on).
+
+**Enabling IAP itself** needs either the alpha-track `--iap` flag on
+`gcloud run deploy`/`gcloud run services update`, or the Cloud Console's
+"Security" tab for the service - check there rather than reaching for
+alpha if you want to avoid it. This deploy has stayed off alpha/beta
+deliberately, so if that matters to you too, use the Console. Once
+enabled, it appears to be a **persistent, service-level setting** - a
+plain stable-track `gcloud run deploy` (the command above) does not
+re-specify or reset it, the same way it doesn't reset `--ingress` or
+other settings it isn't explicitly passed. Verify this after any deploy
+rather than assuming it, though - visit the service's domain and confirm
+it still prompts a Google sign-in.
+
+Grant the people (or a whole Workspace domain, via
+`--member="domain:yourcompany.com"`) who should be able to use it with
+`gcloud iap web add-iam-policy-binding` - the exact invocation for a
+Cloud-Run-native IAP-fronted service (as opposed to IAP in front of a
+load balancer) is new enough that it's worth confirming against `gcloud
+iap web add-iam-policy-binding --help` or the Cloud Console's "Security"
+tab for the service rather than trusting a specific flag written down
+here going stale.
 
 ### After deploying
 

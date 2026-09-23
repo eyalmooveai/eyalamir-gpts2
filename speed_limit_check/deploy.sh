@@ -134,16 +134,22 @@ else
 fi
 
 echo "-- Deploying to Cloud Run --"
-# --iap is only recognized on the alpha track as of this writing
-# (`gcloud run deploy --iap` errors with "unrecognized arguments" on
-# stable and suggests `gcloud alpha run deploy --iap`) - install alpha
-# if it isn't already, then use it for this one command.
-gcloud components install alpha --quiet
-gcloud alpha run deploy "$SERVICE_NAME" \
+# --iap (Cloud Run's native IAP integration) is only recognized on the
+# alpha track as of this writing (`gcloud run deploy --iap` errors with
+# "unrecognized arguments" on stable, and beta doesn't have it either) -
+# deliberately not using alpha/beta here, so this doesn't pass --iap or
+# try to set it at all. IAP is service-level config, not a per-deploy
+# flag this script actively reasserts each run (unlike the old
+# --no-allow-unauthenticated, which did get reapplied every deploy and
+# had to be removed for that reason) - a plain stable-track deploy is
+# expected to leave whatever IAP setup already exists on the service
+# alone. Verify this after a deploy rather than assuming it, though:
+# visit the service's IAP-gated domain and confirm it still prompts a
+# Google sign-in.
+gcloud run deploy "$SERVICE_NAME" \
   --source "$SCRIPT_DIR" \
   --region "$REGION" \
   --service-account "$SA" \
-  --iap \
   --no-cpu-throttling \
   --max-instances=1 \
   --memory=1Gi \

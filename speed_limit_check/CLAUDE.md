@@ -101,18 +101,29 @@
   Chrome session, a Google sign-in prompt in incognito, and a correct
   "you don't have access" for a personal (non-moove.ai) Google account.
   Devops set this up **simpler than the manual load-balancer/Serverless-NEG
-  runbook this file used to describe**: just `--iap` on `gcloud run
-  deploy` itself, no separate static IP/DNS/managed-cert/NEG/backend-service
-  chain needed for a single Cloud Run service. `deploy.sh` was updated to
-  match (`--no-allow-unauthenticated` -> `--iap`) - don't revert this or
-  reintroduce `--no-allow-unauthenticated`, it would 403 the setIamPolicy
-  call IAP itself now owns and abort the script under `set -euo pipefail`.
-  Who's actually let in is controlled by `roles/iap.httpsResourceAccessor`
-  on the service, not `roles/run.invoker` - `gcloud run services proxy`
-  and the direct `.run.app` URL are the *pre-IAP* story, not how this is
-  used day to day anymore (`deploy.sh` still offers an optional
-  `INVOKER_EMAIL`/`run.invoker` grant as a fallback path, but it isn't
-  what gates access once `--iap` is on).
+  runbook this file used to describe**: Cloud Run's native `--iap`
+  integration, no separate static IP/DNS/managed-cert/NEG/backend-service
+  chain needed for a single Cloud Run service. Don't reintroduce
+  `--no-allow-unauthenticated` in `deploy.sh` - it would 403 the
+  setIamPolicy call IAP itself now owns and abort the script under
+  `set -euo pipefail`. Who's actually let in is controlled by
+  `roles/iap.httpsResourceAccessor` on the service, not `roles/run.invoker` -
+  `gcloud run services proxy` and the direct `.run.app` URL are the
+  *pre-IAP* story, not how this is used day to day anymore (`deploy.sh`
+  still offers an optional `INVOKER_EMAIL`/`run.invoker` grant as a
+  fallback path, but it isn't what gates access once IAP is on).
+  **`--iap` itself is alpha-track only as of this writing** (stable and
+  beta both reject it) - explicitly decided NOT to use alpha/beta for
+  this deploy (not vetted enough), so `deploy.sh`'s `gcloud run deploy`
+  is plain stable-track with no `--iap` flag at all, on the theory that
+  IAP is a persistent service-level setting a plain deploy doesn't reset
+  (same as `--ingress` or other settings it isn't explicitly passed) -
+  this is a reasonable but *unverified* assumption, not confirmed via
+  gcloud docs or testing, so double-check `archimedes.moove.ai` still
+  prompts sign-in after every deploy rather than trusting this blindly.
+  If IAP ever needs to be (re-)enabled and the Console's "Security" tab
+  isn't used instead, that still requires alpha - there's currently no
+  stable-track way to do it from this script.
 - **Terraform now owns this project's IAM grants** - bigquery.dataViewer,
   bigquery.jobUser, storage.objectAdmin on the cache bucket,
   secretmanager.secretAccessor, and run.invoker for INVOKER_EMAIL. Run
