@@ -461,7 +461,10 @@ estimates get** - there's nothing to configure, it just learns.
 Every run gets a stable URL (`/speed-limits-evaluator/<batch_id>`)
 showing live progress (segments checked, signs found, errors, and - live
 - the real elapsed time and real Street View+Vision call count so far,
-the same numbers that feed the estimator above), a breakdown table
+the same numbers that feed the estimator above), a **map** with every
+checked segment plotted at the position actually checked and colored by
+result (sign read / no sign read / no coverage / error - click a marker
+for details), updating live as the run progresses, a breakdown table
 grouped by `functional_class` (segments checked/matched/no-sign/
 no-coverage/errors/match rate per class), a per-segment results table
 (functional_class plus the segment's OSM/HERE/inferred/observed-average/

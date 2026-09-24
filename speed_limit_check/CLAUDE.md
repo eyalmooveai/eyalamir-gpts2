@@ -122,6 +122,26 @@
     pair to keep in sync - see above). `result.html` shows it both for
     the winning match and per-image in the lightbox. Can be blank/"unknown"
     - Google doesn't always return a capture date.
+  - **The status page's Map card** (`evaluator_status.html`, right after
+    the main summary card) plots every checked segment at the position
+    actually checked (`seg_summary["lat"/"lon"]`, added in `run_batch`'s
+    main loop - `attempt.lat/lon` for match/no_sign_read/no_coverage, the
+    candidate row's `centroid_lat/lon` for an `error` result since there's
+    no `attempt` in that case), colored by status
+    (match=`--ok`/no_sign_read=`--warn`/no_coverage=`--muted`/error=`--err`,
+    read from the CSS vars at runtime rather than a third hardcoded copy).
+    Uses Leaflet + OpenStreetMap tiles (same free, no-API-key pattern
+    already used in `result.html`'s lightbox map), not Google Maps JS -
+    deliberate, since this can plot up to 1000 markers and doesn't need
+    Street View. Markers are cleared and fully redrawn on every poll (same
+    2s cadence as the rest of the page); map bounds are auto-fit only
+    once, the first time there's at least one point, so a later poll
+    doesn't yank a user's manual pan/zoom back out. `renderMap()` is
+    called both from the initial page load (server-rendered
+    `status.results`, embedded as `initialResults`) and from `render()`'s
+    poll path - a third Jinja/JS pair alongside the FC breakdown and
+    results table that needs updating together if `seg_summary`'s shape
+    changes.
   - **Two hard caps, both enforced server-side (never trust the HTML
     form's `min`/`max` alone - those are just UX hints)**:
     `batch_evaluator.MAX_SEGMENT_COUNT` (1000) clamps `segment_count` in

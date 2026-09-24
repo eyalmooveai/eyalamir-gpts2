@@ -558,13 +558,17 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                     status["done_count"] += 1
                     if error:
                         status["error_count"] += 1
-                        seg_summary = {"segment_id": candidates[i].get("here_segment_id"), "status": "error", "error": error}
+                        seg_summary = {
+                            "segment_id": candidates[i].get("here_segment_id"), "status": "error", "error": error,
+                            "lat": candidates[i].get("centroid_lat"), "lon": candidates[i].get("centroid_lon"),
+                        }
                         seg_summary.update(_row_context(dict(candidates[i].items())))
                     elif attempt.status == "match":
                         status["matched_count"] += 1
                         seg_summary = {
                             "segment_id": attempt.segment_id, "status": "match", "matched_speed_mph": match.reading.speed_mph,
                             "streetview_capture_date": _image_capture_date(attempt, match),
+                            "lat": attempt.lat, "lon": attempt.lon,
                         }
                         seg_summary.update(_row_context(attempt.row))
                     elif attempt.status == "no_sign_read":
@@ -572,11 +576,12 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                         seg_summary = {
                             "segment_id": attempt.segment_id, "status": "no_sign_read",
                             "streetview_capture_date": _image_capture_date(attempt, match),
+                            "lat": attempt.lat, "lon": attempt.lon,
                         }
                         seg_summary.update(_row_context(attempt.row))
                     else:
                         status["no_coverage_count"] += 1
-                        seg_summary = {"segment_id": attempt.segment_id, "status": "no_coverage"}
+                        seg_summary = {"segment_id": attempt.segment_id, "status": "no_coverage", "lat": attempt.lat, "lon": attempt.lon}
                         seg_summary.update(_row_context(attempt.row))
                     status["results"].append(seg_summary)
                     status["message"] = f"{status['done_count']}/{n} segments checked ({status['matched_count']} sign(s) found so far)..."

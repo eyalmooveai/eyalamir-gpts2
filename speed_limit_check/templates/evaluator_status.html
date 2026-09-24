@@ -1,4 +1,8 @@
 {% extends "layout.html" %}
+{% block extra_head %}
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+{% endblock %}
 {% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / <a href="/speed-limits">Speed-Limits Quality</a> / <a href="/speed-limits-evaluator">Speed-Limits Evaluator</a> / {{ status.label }}</p>{% endblock %}
 {% block heading %}{{ status.label }}{% endblock %}
 {% block subtitle %}{{ status.state }} &middot; {{ status.year }}-{{ status.month }} &middot; started by {{ status.started_by }}{% endblock %}
@@ -29,6 +33,18 @@
     <a id="ev-csv-link" class="btn-secondary" style="text-decoration:none; display:inline-block; {% if status.run_status == 'running' %}opacity:0.45; pointer-events:none;{% endif %}" href="/speed-limits-evaluator/{{ batch_id }}/csv">Download CSV</a>
     <button id="ev-cancel-btn" type="button" onclick="evCancel()" style="{% if status.run_status != 'running' %}display:none;{% endif %} margin-left:8px;">Cancel run</button>
   </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Map</h3>
+  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Every segment checked so far, at the position actually checked (not necessarily the segment's centroid, if walked) - colored by result. Click a marker for details.</p>
+  <div id="ev-map" style="height:440px; border-radius:8px; border:1px solid var(--border);"></div>
+  <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:10px; font-size:0.78rem; color:var(--muted);">
+    <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--ok); margin-right:4px;"></span>Sign read</span>
+    <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--warn); margin-right:4px;"></span>No sign read</span>
+    <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--muted); margin-right:4px;"></span>No Street View coverage</span>
+    <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--err); margin-right:4px;"></span>Error</span>
+  </div>
 </div>
 
 <div class="card">
@@ -102,9 +118,54 @@
 (function () {
   const batchId = {{ batch_id|tojson }};
   let running = {{ (status.run_status == 'running') | tojson }};
+  const initialResults = {{ status.results | tojson }};
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // --- Map: every segment checked so far, colored by result ---
+  const rootStyle = getComputedStyle(document.documentElement);
+  const STATUS_COLOR = {
+    match: rootStyle.getPropertyValue('--ok').trim() || '#1d8a4a',
+    no_sign_read: rootStyle.getPropertyValue('--warn').trim() || '#b25a00',
+    no_coverage: rootStyle.getPropertyValue('--muted').trim() || '#6b6b74',
+    error: rootStyle.getPropertyValue('--err').trim() || '#c62828',
+  };
+  let evMap = null;
+  let evMarkersLayer = null;
+  let evMapBoundsFit = false;
+
+  function renderMap(results) {
+    if (typeof L === 'undefined') return; // Leaflet failed to load (blocked/offline) - the rest of the page still works
+    if (!evMap) {
+      evMap = L.map('ev-map', { scrollWheelZoom: false });
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(evMap);
+      evMarkersLayer = L.layerGroup().addTo(evMap);
+      evMap.setView([37.8, -96], 4); // continental-US fallback view until there's at least one real point
+    }
+    evMarkersLayer.clearLayers();
+    const points = [];
+    (results || []).forEach(r => {
+      const lat = parseFloat(r.lat), lon = parseFloat(r.lon);
+      if (Number.isNaN(lat) || Number.isNaN(lon)) return; // no_coverage before any position resolved, etc.
+      points.push([lat, lon]);
+      const color = STATUS_COLOR[r.status] || STATUS_COLOR.error;
+      const marker = L.circleMarker([lat, lon], { radius: 6, color: '#fff', weight: 1, fillColor: color, fillOpacity: 0.9 });
+      const bits = [`<strong>${escapeHtml(r.segment_id)}</strong>`, escapeHtml(r.status)];
+      if (typeof r.matched_speed_mph !== 'undefined' && r.matched_speed_mph !== null) bits.push(`${r.matched_speed_mph} mph`);
+      if (typeof r.functional_class !== 'undefined' && r.functional_class !== null) bits.push(`functional class ${r.functional_class}`);
+      if (r.streetview_capture_date) bits.push(`captured ${escapeHtml(r.streetview_capture_date)}`);
+      if (r.error) bits.push(escapeHtml(r.error));
+      marker.bindPopup(bits.join('<br>'));
+      marker.addTo(evMarkersLayer);
+    });
+    // Only auto-fit once - a later poll shouldn't yank a user-panned/zoomed
+    // view back out every 2s while a run keeps adding new segments.
+    if (points.length && !evMapBoundsFit) {
+      evMap.fitBounds(points, { padding: [24, 24], maxZoom: 15 });
+      evMapBoundsFit = true;
+    }
   }
 
   function render(data) {
@@ -162,6 +223,8 @@
         `<td>${b.no_coverage_count}</td><td>${b.error_count}</td><td>${rate}%</td></tr>`;
     }).join('');
 
+    renderMap(data.results);
+
     if (data.run_status !== 'running') {
       running = false;
       document.getElementById('ev-progress-bar').style.display = 'none';
@@ -187,6 +250,7 @@
     fetch('/speed-limits-evaluator/' + batchId + '/cancel', {method: 'POST'});
   };
 
+  renderMap(initialResults);
   if (running) poll();
 })();
 </script>
