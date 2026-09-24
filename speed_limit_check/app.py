@@ -61,11 +61,13 @@ from find_bad_speed_limit import (
 from quality_metrics import (
     DEFAULT_INFER_FIELD,
     GROUP_BY_CHOICES,
+    QUALITY_METRIC_KEYS,
     QUALITY_METRICS,
     US_STATE_CODES,
     QualityFilters,
     default_table_name,
     fetch_quality_metrics,
+    fetch_sample_mismatches,
     full_table_name,
     list_evaluable_tables,
     list_infer_fields,
@@ -540,6 +542,8 @@ def speed_limits_quality():
         us_state_codes=US_STATE_CODES,
         error=error,
         warning=warning,
+        quality_metric_choices=[{"key": m["key"], "name": m["name"]} for m in QUALITY_METRICS],
+        preview_max_segments=PREVIEW_MAX_SEGMENTS,
     )
 
 
@@ -569,6 +573,67 @@ def quality_fragment(job_id):
         quality_metric_defs=job["metric_defs"],
         group_by=job["group_by"],
     )
+
+
+@app.route("/speed-limits/sample-mismatches")
+def quality_sample_mismatches():
+    """JSON for the Quality page's issue map: up to PREVIEW_MAX_SEGMENTS
+    real segments failing the requested metric's own condition, worst
+    offenders first (see quality_metrics.build_sample_mismatches_query).
+    On-demand (a button click, not loaded with the rest of the page) -
+    same filters as the main aggregate query, read straight from the
+    query string rather than re-deriving them through the async-job
+    machinery the main metrics use, since this is a single cheap LIMIT'd
+    query, not a nationwide aggregate that needs a background job."""
+    metric_key = request.args.get("metric", "").strip()
+    if metric_key not in QUALITY_METRIC_KEYS:
+        return jsonify({"error": f"Invalid metric {metric_key!r} - must be one of {QUALITY_METRIC_KEYS}"}), 400
+
+    table_option = request.args.get("table", "").strip()
+    dataset, _, table = table_option.partition(".")
+    infer_field = request.args.get("infer_field", "").strip()
+    if not (dataset and table and infer_field):
+        return jsonify({"error": "Table and inferred field are required."}), 400
+
+    try:
+        param1 = float(request.args.get("param1", "10") or 10)
+        param2 = float(request.args.get("param2", "80") or 80)
+    except ValueError:
+        return jsonify({"error": "Invalid mismatch/implausible-speed threshold."}), 400
+    states = _parse_csv_field(request.args.get("states", ""), upper=True)
+    fcs_raw = _parse_csv_field(request.args.get("fc", ""))
+    try:
+        fcs = tuple(int(v) for v in fcs_raw)
+    except ValueError:
+        return jsonify({"error": "Functional class(es) must be whole numbers."}), 400
+    zip_codes = _parse_csv_field(request.args.get("zip_codes", ""))
+    counties = _parse_csv_field(request.args.get("counties", ""))
+
+    base = QualityFilters(
+        project=DEFAULT_PROJECT, dataset=dataset, table=table, infer_field=infer_field,
+        param1=param1, param2=param2, states=states, functional_classes=fcs,
+        zip_codes=zip_codes, counties=counties,
+    )
+    try:
+        rows = fetch_sample_mismatches(base, metric_key, PREVIEW_MAX_SEGMENTS)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({
+        "points": [
+            {
+                "segment_id": r.get("here_segment_id"), "lat": r.get("lat"), "lon": r.get("lon"),
+                "street_name": r.get("street_name"), "functional_class": r.get("functional_class"),
+                "state": r.get("state"), "infer_value": r.get("infer_value"), "magnitude": r.get("magnitude"),
+            }
+            for r in rows
+        ],
+        "shown": len(rows),
+        "cap": PREVIEW_MAX_SEGMENTS,
+        "metric_name": next(m["name"] for m in QUALITY_METRICS if m["key"] == metric_key),
+    })
 
 
 @app.route("/sign-checker", methods=["GET"])

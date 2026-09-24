@@ -1,4 +1,8 @@
 {% extends "layout.html" %}
+{% block extra_head %}
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+{% endblock %}
 {% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / Speed-Limits Quality</p>{% endblock %}
 {% block heading %}Speed-Limits Quality{% endblock %}
 {% block subtitle %}Nationwide inferred speed-limit quality vs. OSM/HERE/observed speeds{% endblock %}
@@ -34,7 +38,7 @@
 
 <div class="card">
   <h3 style="margin-top:0;">Filters</h3>
-  <form method="get" action="/speed-limits">
+  <form id="quality-filters-form" method="get" action="/speed-limits">
     <label for="table">Table (calc_out.speed_limits_US* or archimedes_api.speed_limits_infer*)</label>
     <select id="table" name="table">
       {% for t in table_options %}<option value="{{ t }}" {% if t == filters.table %}selected{% endif %}>{{ t }}</option>{% endfor %}
@@ -87,6 +91,24 @@
   </form>
 </div>
 
+<div class="card">
+  <h3 style="margin-top:0;">Map: where the worst mismatches are</h3>
+  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Pick a metric and see the real segments failing it worst, plotted on a map - not just how many, but where. Uses the filters above (as currently filled in, whether or not you've clicked "Run metrics" yet). Capped at {{ preview_max_segments }} segments, worst offenders first.</p>
+  <div class="row-2">
+    <div>
+      <label for="map-metric">Metric</label>
+      <select id="map-metric">
+        {% for m in quality_metric_choices %}<option value="{{ m.key }}">{{ m.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div style="display:flex; align-items:flex-end;">
+      <button type="button" class="btn-secondary" id="issue-map-btn" onclick="showIssueMap()" style="margin-bottom:12px;">Show worst offenders on map</button>
+    </div>
+  </div>
+  <p id="issue-map-message" style="color:var(--muted); font-size:0.82rem; margin:6px 0 0; display:none;"></p>
+  <div id="issue-map" style="height:440px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
+</div>
+
 {% if job_id %}
 <script>
 (function () {
@@ -118,4 +140,85 @@
 })();
 </script>
 {% endif %}
+
+<script>
+(function () {
+  let issueMap = null;
+  let issueLayer = null;
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  window.showIssueMap = function () {
+    const btn = document.getElementById('issue-map-btn');
+    const msgEl = document.getElementById('issue-map-message');
+    const mapEl = document.getElementById('issue-map');
+    btn.disabled = true;
+    msgEl.style.display = 'block';
+    msgEl.textContent = 'Loading...';
+    mapEl.style.display = 'none';
+
+    const form = document.getElementById('quality-filters-form');
+    const params = new URLSearchParams(new FormData(form));
+    params.set('metric', document.getElementById('map-metric').value);
+
+    fetch('/speed-limits/sample-mismatches?' + params.toString())
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        btn.disabled = false;
+        if (!ok || data.error) {
+          msgEl.textContent = 'Could not load map: ' + (data.error || 'unknown error');
+          return;
+        }
+        const points = data.points || [];
+        msgEl.textContent = points.length
+          ? `Showing ${data.shown} of the worst "${data.metric_name}" offender(s)${data.shown >= data.cap ? ` (capped at ${data.cap})` : ''}, largest mismatch first.`
+          : `No segments currently fail the "${data.metric_name}" condition under these filters.`;
+        if (!points.length) return;
+
+        mapEl.style.display = 'block';
+        if (typeof L === 'undefined') {
+          msgEl.textContent += ' (Map library failed to load - list only.)';
+          return;
+        }
+        if (!issueMap) {
+          issueMap = L.map('issue-map', { scrollWheelZoom: false });
+          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(issueMap);
+          issueLayer = L.layerGroup().addTo(issueMap);
+        }
+        issueLayer.clearLayers();
+        const errColor = getComputedStyle(document.documentElement).getPropertyValue('--err').trim() || '#c62828';
+        // Bigger marker = worse mismatch - a quick visual read of severity,
+        // not just location. Scaled between the sample's own min/max
+        // magnitude rather than a fixed range, since "how bad" varies a
+        // lot by metric (a 15mph freeflow overshoot vs. a 60mph one).
+        const magnitudes = points.map(p => p.magnitude).filter(m => typeof m === 'number');
+        const minMag = magnitudes.length ? Math.min(...magnitudes) : 0;
+        const maxMag = magnitudes.length ? Math.max(...magnitudes) : 1;
+        const coords = [];
+        points.forEach(p => {
+          const lat = parseFloat(p.lat), lon = parseFloat(p.lon);
+          if (Number.isNaN(lat) || Number.isNaN(lon)) return;
+          coords.push([lat, lon]);
+          const frac = maxMag > minMag ? (p.magnitude - minMag) / (maxMag - minMag) : 0.5;
+          const radius = 5 + frac * 10;
+          const marker = L.circleMarker([lat, lon], { radius, color: '#fff', weight: 1, fillColor: errColor, fillOpacity: 0.7 });
+          const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`];
+          if (p.street_name) bits.push(escapeHtml(p.street_name));
+          bits.push(`${escapeHtml(data.metric_name)}: off by ${Number(p.magnitude).toFixed(1)} mph`);
+          if (typeof p.functional_class !== 'undefined' && p.functional_class !== null) bits.push(`functional class ${p.functional_class}`);
+          marker.bindPopup(bits.join('<br>'));
+          marker.addTo(issueLayer);
+        });
+        setTimeout(() => issueMap.invalidateSize(), 0);
+        if (coords.length) issueMap.fitBounds(coords, { padding: [24, 24], maxZoom: 15 });
+      })
+      .catch(err => {
+        btn.disabled = false;
+        msgEl.textContent = 'Could not load map: ' + err.message;
+      });
+  };
+})();
+</script>
 {% endblock %}

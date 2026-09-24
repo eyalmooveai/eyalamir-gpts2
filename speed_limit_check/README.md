@@ -415,6 +415,17 @@ All three share the same disk (and GCS, when `GCS_CACHE_BUCKET` is set -
 see "Deploying to Cloud Run") cache mechanism as the rest of this app -
 see `bq_cache.py` and "Caching" below.
 
+### Map: where the worst mismatches are
+
+The main metrics above answer "how much" - this answers "where." Pick a
+metric and click "Show worst offenders on map" to see up to 300 real
+segments actually failing that metric's condition under the current
+filters, plotted on a map, worst mismatch first - larger markers mean a
+bigger gap. It's a separate on-demand query (not loaded with the rest
+of the page, and not cached - it's meant to be a quick "show me" click),
+since the main metrics query is a pure nationwide aggregate with no
+individual segments to plot; this runs a real row-level query instead.
+
 ## Speed-Limits Evaluator
 
 `/speed-limits-evaluator` runs the sign checker's own per-segment logic

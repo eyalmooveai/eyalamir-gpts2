@@ -59,6 +59,30 @@
   preview-only, not a picker: clicking a marker just shows that
   candidate's info, there's no click-to-select/deselect - a deliberate
   scope decision, not a missing feature.
+- **Quality page issue map** ("Map: where the worst mismatches are" card,
+  right below the Filters form in `quality.html`) - "visualize where the
+  issues/accuracies are," the last of the originally-requested mapping
+  capabilities. The Quality page's main query is a pure aggregate
+  (COUNT/SUM, see `build_quality_query`) - it has no per-row geometry to
+  plot, so this needed a genuinely different query shape, not an option
+  bolted onto the existing one:
+  `quality_metrics.build_sample_mismatches_query(f, metric_key, limit)`
+  is row-level, one metric's own condition (from `QUALITY_METRICS`,
+  reusing the exact same `"sql"` each metric's stat tile/aggregate
+  already uses - never a second copy of the condition), ordered by that
+  metric's own `"magnitude_expr"` descending (worst offenders first) and
+  capped at `PREVIEW_MAX_SEGMENTS`. `_common_filter_where_parts(f)`
+  factors out the states/functional_classes/zip_codes/counties portion
+  of the WHERE clause shared with `build_quality_query`, so the two can
+  never silently disagree about what a filter selection means. Served
+  by `GET /speed-limits/sample-mismatches` (metric + the same filter
+  query params as the main page), triggered on demand by a button (not
+  loaded with the rest of the page - it's its own BigQuery query, no
+  reason to pay for it before someone asks). Markers are sized by that
+  segment's own mismatch magnitude relative to the *sample's own*
+  min/max (not a fixed scale) - "how bad" varies a lot by metric (a
+  15mph freeflow overshoot isn't the same severity as a 60mph one), so a
+  fixed radius scale would either be too flat or clip on every request.
 - **Speed-Limits Evaluator** (`/speed-limits-evaluator`,
   `batch_evaluator.py`): runs up to `segment_count` (default 1000)
   candidate segments for one state through the *same* per-segment logic

@@ -68,12 +68,19 @@ GROUP_BY_CHOICES = ("none", "state", "functional_class", "state,functional_class
 # SQL references - together with whether "{infer_field}" appears in
 # "sql", that's everything missing_columns_report needs to know without
 # having to parse the SQL string itself.
+# "magnitude_expr" is how far off/how high this metric's own condition is
+# for a given row - the same left-hand-side expression "sql" compares
+# against @param1/@param2, factored out so it can also drive "ORDER BY
+# ... DESC" (worst offenders first) for the issue map's sampled-segments
+# query (see build_sample_mismatches_query) without re-deriving it from
+# "sql" or keeping a second copy that could drift out of sync.
 QUALITY_METRICS = [
     {
         "key": "diff_osm",
         "name": "vs. OSM",
         "label_template": "Disagrees with OSM by {param1}+ mph",
         "sql": "ABS({infer_field} - speed_limit_osm_mph) >= @param1",
+        "magnitude_expr": "ABS({infer_field} - speed_limit_osm_mph)",
         "required_columns": ["speed_limit_osm_mph"],
     },
     {
@@ -81,6 +88,7 @@ QUALITY_METRICS = [
         "name": "vs. HERE",
         "label_template": "Disagrees with HERE by {param1}+ mph",
         "sql": "ABS({infer_field} - speed_limit_here_mph) >= @param1",
+        "magnitude_expr": "ABS({infer_field} - speed_limit_here_mph)",
         "required_columns": ["speed_limit_here_mph"],
     },
     {
@@ -88,6 +96,7 @@ QUALITY_METRICS = [
         "name": "vs. observed avg speed",
         "label_template": "Disagrees with observed avg speed by {param1}+ mph",
         "sql": "ABS({infer_field} - speed_AVG_mph) >= @param1",
+        "magnitude_expr": "ABS({infer_field} - speed_AVG_mph)",
         "required_columns": ["speed_AVG_mph"],
     },
     {
@@ -95,6 +104,7 @@ QUALITY_METRICS = [
         "name": "vs. freeflow speed",
         "label_template": "Disagrees with freeflow speed by {param1}+ mph",
         "sql": "ABS({infer_field} - freeflow_mph) >= @param1",
+        "magnitude_expr": "ABS({infer_field} - freeflow_mph)",
         "required_columns": ["freeflow_mph"],
     },
     {
@@ -102,6 +112,7 @@ QUALITY_METRICS = [
         "name": "observed avg speed implausible",
         "label_template": "Observed avg speed over {param2} mph (implausible)",
         "sql": "speed_AVG_mph > @param2",
+        "magnitude_expr": "speed_AVG_mph",
         "required_columns": ["speed_AVG_mph"],
     },
     {
@@ -109,9 +120,12 @@ QUALITY_METRICS = [
         "name": "freeflow speed implausible",
         "label_template": "Freeflow speed over {param2} mph (implausible)",
         "sql": "freeflow_mph > @param2",
+        "magnitude_expr": "freeflow_mph",
         "required_columns": ["freeflow_mph"],
     },
 ]
+
+QUALITY_METRIC_KEYS = tuple(m["key"] for m in QUALITY_METRICS)
 
 DEFAULT_INFER_FIELD = "speed_limit_infer_mph_corrected"
 
@@ -282,6 +296,28 @@ def full_table_name(f: QualityFilters) -> str:
     return f"{f.project}.{f.dataset}.{f.table}"
 
 
+def _common_filter_where_parts(f: QualityFilters) -> tuple[list[str], list[bigquery.ScalarQueryParameter]]:
+    """The states/functional_classes/zip_codes/counties portion of a
+    QualityFilters' WHERE clause - shared between build_quality_query
+    (the nationwide aggregate) and build_sample_mismatches_query (the
+    issue map's sampled worst-offenders query), so the two can never
+    silently disagree about what a given filter selection means."""
+    where_parts: list[str] = []
+    params: list[bigquery.ScalarQueryParameter] = []
+    if f.states:
+        for s in f.states:
+            _validate_identifier(s, STATE_RE, "state (expected 2 letters, e.g. NC)")
+        where_parts.append("state IN UNNEST(@states)")
+        params.append(bigquery.ArrayQueryParameter("states", "STRING", [s.upper() for s in f.states]))
+    if f.functional_classes:
+        where_parts.append("functional_class IN UNNEST(@functional_classes)")
+        params.append(bigquery.ArrayQueryParameter("functional_classes", "INT64", list(f.functional_classes)))
+    geo_where_parts, geo_params = build_geo_filter_sql(f.zip_codes, f.counties, f.states)
+    where_parts.extend(geo_where_parts)
+    params.extend(geo_params)
+    return where_parts, params
+
+
 def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
     _validate_identifier(f.project, PROJECT_RE, "project")
     _validate_identifier(f.dataset, DATASET_RE, "dataset")
@@ -296,17 +332,9 @@ def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQue
         bigquery.ScalarQueryParameter("param1", "FLOAT64", float(f.param1)),
         bigquery.ScalarQueryParameter("param2", "FLOAT64", float(f.param2)),
     ]
-    if f.states:
-        for s in f.states:
-            _validate_identifier(s, STATE_RE, "state (expected 2 letters, e.g. NC)")
-        where_parts.append("state IN UNNEST(@states)")
-        params.append(bigquery.ArrayQueryParameter("states", "STRING", [s.upper() for s in f.states]))
-    if f.functional_classes:
-        where_parts.append("functional_class IN UNNEST(@functional_classes)")
-        params.append(bigquery.ArrayQueryParameter("functional_classes", "INT64", list(f.functional_classes)))
-    geo_where_parts, geo_params = build_geo_filter_sql(f.zip_codes, f.counties, f.states)
-    where_parts.extend(geo_where_parts)
-    params.extend(geo_params)
+    common_where_parts, common_params = _common_filter_where_parts(f)
+    where_parts.extend(common_where_parts)
+    params.extend(common_params)
 
     group_cols = f.group_by.split(",") if f.group_by != "none" else []
     select_cols = [f"{c}," for c in group_cols]
@@ -326,6 +354,64 @@ def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQue
         {f"ORDER BY {', '.join(group_cols)}" if group_cols else ""}
     """
     return query, params
+
+
+def build_sample_mismatches_query(
+    f: QualityFilters, metric_key: str, limit: int,
+) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+    """Row-level (not aggregate) query for the Quality page's issue map:
+    up to `limit` real segments failing `metric_key`'s own condition,
+    worst offenders first (by that metric's magnitude_expr) - "where are
+    the worst mismatches, not just how many are there." Same filters
+    (table/infer_field/states/functional_classes/zip_codes/counties) as
+    build_quality_query, plus the one metric's own condition/threshold -
+    this is a fundamentally different query shape (individual rows with
+    geom, not an aggregate), not something build_quality_query itself can
+    answer, which is why this is a separate function/endpoint rather than
+    an option on the existing one."""
+    _validate_identifier(f.project, PROJECT_RE, "project")
+    _validate_identifier(f.dataset, DATASET_RE, "dataset")
+    _validate_identifier(f.table, TABLE_RE, "table")
+    _validate_identifier(f.infer_field, TABLE_RE, "infer_field")
+    metric = next((m for m in QUALITY_METRICS if m["key"] == metric_key), None)
+    if metric is None:
+        raise ValueError(f"Invalid metric {metric_key!r} - must be one of {QUALITY_METRIC_KEYS}")
+
+    where_parts = [f"{f.infer_field} IS NOT NULL", metric["sql"].format(infer_field=f.infer_field)]
+    params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("param1", "FLOAT64", float(f.param1)),
+        bigquery.ScalarQueryParameter("param2", "FLOAT64", float(f.param2)),
+    ]
+    common_where_parts, common_params = _common_filter_where_parts(f)
+    where_parts.extend(common_where_parts)
+    params.extend(common_params)
+
+    magnitude_expr = metric["magnitude_expr"].format(infer_field=f.infer_field)
+    query = f"""
+        SELECT
+          here_segment_id, street_name, functional_class, state,
+          ST_Y(ST_CENTROID(geom)) AS lat, ST_X(ST_CENTROID(geom)) AS lon,
+          {f.infer_field} AS infer_value,
+          {magnitude_expr} AS magnitude
+        FROM `{f.project}.{f.dataset}.{f.table}`
+        WHERE {' AND '.join(where_parts)}
+        ORDER BY magnitude DESC
+        LIMIT {int(limit)}
+    """
+    return query, params
+
+
+def fetch_sample_mismatches(f: QualityFilters, metric_key: str, limit: int, log=lambda msg: None) -> list[dict]:
+    """Runs build_sample_mismatches_query - not cached the way
+    fetch_quality_metrics is (a LIMIT'd, ORDER-BY-magnitude query is
+    already cheap relative to the nationwide aggregate, and caching it
+    keyed on every metric/limit combination isn't worth the complexity
+    for what's meant to be an on-demand "show me" click, not something
+    polled or reloaded repeatedly)."""
+    client = bigquery.Client(project=f.project)
+    query, params = build_sample_mismatches_query(f, metric_key, limit)
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
 
 
 def fetch_quality_metrics(f: QualityFilters, log=lambda msg: None) -> list[dict]:
