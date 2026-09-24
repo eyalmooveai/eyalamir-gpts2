@@ -20,8 +20,9 @@ import threading
 import uuid
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
+from batch_evaluator import BatchConfig, csv_path_if_exists, list_batches, read_status, run_batch
 from find_bad_speed_limit import (
     CRITERIA_DEFS,
     DEFAULT_DATASET,
@@ -60,6 +61,7 @@ from quality_metrics import (
 # a href that 404s.
 HUB_MODELS = [
     {"name": "Speed Limits", "description": "Inferred speed limit quality vs. OSM/HERE/observed speeds, and a per-segment Street View sign checker.", "href": "/speed-limits"},
+    {"name": "Speed-Limits Evaluator", "description": "Batch-check up to 1000 road segments' signs at once for a state, concurrently - durable, resumable-to-check-on status, CSV export.", "href": "/speed-limits-evaluator"},
     {"name": "Lanes", "description": "Not yet available in Archimedes.", "href": None},
     {"name": "Construction Zones", "description": "Not yet available in Archimedes.", "href": None},
     {"name": "Accident Prediction", "description": "Not yet available in Archimedes.", "href": None},
@@ -95,6 +97,14 @@ WEB_DEFAULT_WALK_SEGMENT_SPACING_M = 2
 WEB_DEFAULT_SIDE_MODE = "sides"
 WEB_DEFAULT_CANDIDATES = 3
 
+# Speed-Limits Evaluator (batch) defaults - segment count/concurrency per
+# the user's own spec; walk/side/headings/fov reuse the same "what
+# actually works" defaults as the single-segment sign checker above.
+EVALUATOR_DEFAULT_SEGMENT_COUNT = 1000
+EVALUATOR_DEFAULT_CONCURRENCY = 10
+MAX_EVALUATOR_CONCURRENCY = 30  # a sanity ceiling on the form, not a hard API limit
+EVALUATOR_MAX_JOBS_IN_MEMORY = 20  # cap on live threading.Event registry - old ones are done, don't need one
+
 # Load once at startup (not just inside run_pipeline's background thread) so
 # GOOGLE_MAPS_API_KEY is available for embedding in a page - e.g. the
 # Google Maps JavaScript API script tag - even before any job has run.
@@ -119,9 +129,31 @@ QUALITY_JOBS: dict[str, dict] = {}
 QUALITY_JOBS_LOCK = threading.Lock()
 MAX_QUALITY_JOBS = 20
 
+# Batch evaluator runs are durable (status/results live in
+# output/_batch_jobs/, see batch_evaluator.py) - this registry is only
+# for cancelling a batch that's actually running in *this* process, via
+# its threading.Event. It's fine for this to be lost on a restart (the
+# batch's own background thread would already be gone too in that case);
+# it's not the source of truth for status the way JOBS/QUALITY_JOBS are.
+BATCH_CANCEL_EVENTS: dict[str, threading.Event] = {}
+BATCH_CANCEL_EVENTS_LOCK = threading.Lock()
+
 
 def _image_url(path: Path) -> str:
     return "/images/" + str(Path(path).relative_to(OUT_DIR)).replace(os.sep, "/")
+
+
+def _now_label_suffix() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _requester_email() -> str:
+    """The signed-in user's email, from the header IAP sets on every
+    forwarded request (see CLAUDE.md's IAP notes) - falls back to
+    "unknown" for local dev, where there's no IAP in front of the app."""
+    raw = request.headers.get("X-Goog-Authenticated-User-Email", "")
+    return raw.split(":", 1)[-1] if raw else "unknown"
 
 
 def _google_maps_js_key() -> str:
@@ -602,6 +634,141 @@ def error_page(job_id):
     if not job:
         return render_template("error.html", message="Unknown or expired job.", log=[])
     return render_template("error.html", message=job["error"] or "Unknown error.", log=job["log"])
+
+
+@app.route("/speed-limits-evaluator", methods=["GET"])
+def evaluator_index():
+    return render_template(
+        "evaluator.html",
+        batches=list_batches(),
+        criteria_defs=CRITERIA_DEFS,
+        us_state_codes=US_STATE_CODES,
+        default_year=DEFAULT_QUALITY_YEAR,
+        default_month=DEFAULT_QUALITY_MONTH,
+        default_project=DEFAULT_PROJECT,
+        default_dataset=DEFAULT_DATASET,
+        default_segment_count=EVALUATOR_DEFAULT_SEGMENT_COUNT,
+        default_concurrency=EVALUATOR_DEFAULT_CONCURRENCY,
+        max_concurrency=MAX_EVALUATOR_CONCURRENCY,
+        default_headings=WEB_DEFAULT_HEADINGS,
+        default_headings_relative=WEB_DEFAULT_HEADINGS_RELATIVE,
+        default_fov=WEB_DEFAULT_FOV,
+        min_fov=MIN_FOV,
+        max_fov=MAX_FOV,
+        default_walk_segment=WEB_DEFAULT_WALK_SEGMENT,
+        default_walk_segment_spacing_m=WEB_DEFAULT_WALK_SEGMENT_SPACING_M,
+        default_side_mode=WEB_DEFAULT_SIDE_MODE,
+        default_auto_side_offset=WEB_DEFAULT_AUTO_SIDE_OFFSET,
+    )
+
+
+@app.route("/speed-limits-evaluator/start", methods=["POST"])
+def evaluator_start():
+    state = request.form.get("state", "").strip().upper()
+    year = request.form.get("year", "").strip()
+    month = request.form.get("month", "").strip()
+    project = request.form.get("project", "").strip() or DEFAULT_PROJECT
+    dataset = request.form.get("dataset", "").strip() or DEFAULT_DATASET
+    label = request.form.get("label", "").strip()
+
+    if not (state and year and month):
+        return render_template("error.html", message="State, year, and month are all required.", log=[])
+
+    try:
+        segment_count = max(1, int(request.form.get("segment_count") or EVALUATOR_DEFAULT_SEGMENT_COUNT))
+    except ValueError:
+        segment_count = EVALUATOR_DEFAULT_SEGMENT_COUNT
+    try:
+        concurrency = max(1, min(MAX_EVALUATOR_CONCURRENCY, int(request.form.get("concurrency") or EVALUATOR_DEFAULT_CONCURRENCY)))
+    except ValueError:
+        concurrency = EVALUATOR_DEFAULT_CONCURRENCY
+
+    walk_segment = request.form.get("walk_segment") is not None
+    try:
+        walk_segment_spacing_m = float(request.form.get("walk_segment_spacing_m") or WEB_DEFAULT_WALK_SEGMENT_SPACING_M)
+    except ValueError:
+        walk_segment_spacing_m = WEB_DEFAULT_WALK_SEGMENT_SPACING_M
+    side_mode = request.form.get("side_mode", "").strip()
+    if side_mode not in SIDE_MODES:
+        side_mode = WEB_DEFAULT_SIDE_MODE
+    try:
+        side_offset_m = float(request.form.get("side_offset_m") or 20.0)
+    except ValueError:
+        side_offset_m = 20.0
+    auto_side_offset = request.form.get("auto_side_offset") is not None
+    headings_raw = request.form.get("headings", "").strip()
+    try:
+        headings = parse_headings(headings_raw) if headings_raw else DEFAULT_HEADINGS
+    except ValueError:
+        headings = DEFAULT_HEADINGS
+    headings_relative = request.form.get("headings_relative") is not None
+    try:
+        fov = int(float(request.form.get("fov") or WEB_DEFAULT_FOV))
+    except ValueError:
+        fov = WEB_DEFAULT_FOV
+    if not (MIN_FOV <= fov <= MAX_FOV):
+        fov = WEB_DEFAULT_FOV
+    criteria = _read_criteria_from_form(request.form)
+
+    label = label or f"{state}_{year}_{month}_{_now_label_suffix()}"
+
+    config = BatchConfig(
+        label=label, state=state, year=year, month=month, project=project, dataset=dataset,
+        segment_count=segment_count, concurrency=concurrency, criteria=criteria,
+        walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+        side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+        headings=headings, headings_relative=headings_relative, fov=fov,
+        started_by=_requester_email(),
+    )
+
+    batch_id = uuid.uuid4().hex
+    cancel_event = threading.Event()
+    with BATCH_CANCEL_EVENTS_LOCK:
+        BATCH_CANCEL_EVENTS[batch_id] = cancel_event
+        while len(BATCH_CANCEL_EVENTS) > EVALUATOR_MAX_JOBS_IN_MEMORY:
+            del BATCH_CANCEL_EVENTS[next(iter(BATCH_CANCEL_EVENTS))]
+
+    thread = threading.Thread(target=run_batch, args=(batch_id, config, cancel_event), daemon=True)
+    thread.start()
+    return redirect(url_for("evaluator_status_page", batch_id=batch_id))
+
+
+@app.route("/speed-limits-evaluator/<batch_id>")
+def evaluator_status_page(batch_id):
+    status = read_status(batch_id)
+    if not status:
+        return render_template("error.html", message="Unknown or expired batch run.", log=[])
+    return render_template("evaluator_status.html", batch_id=batch_id, status=status)
+
+
+@app.route("/speed-limits-evaluator/<batch_id>/status")
+def evaluator_status_json(batch_id):
+    status = read_status(batch_id)
+    if not status:
+        return jsonify({"run_status": "error", "error": "Unknown or expired batch run."})
+    return jsonify(status)
+
+
+@app.route("/speed-limits-evaluator/<batch_id>/cancel", methods=["POST"])
+def evaluator_cancel(batch_id):
+    with BATCH_CANCEL_EVENTS_LOCK:
+        event = BATCH_CANCEL_EVENTS.get(batch_id)
+    if event:
+        event.set()
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "message": "Not running in this process (already finished, or a prior instance)."})
+
+
+@app.route("/speed-limits-evaluator/<batch_id>/csv")
+def evaluator_csv(batch_id):
+    path = csv_path_if_exists(batch_id)
+    if not path:
+        return render_template("error.html", message="No CSV available for this batch run yet.", log=[])
+    return Response(
+        path.read_text(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{batch_id}.csv"'},
+    )
 
 
 @app.route("/images/<path:filename>")

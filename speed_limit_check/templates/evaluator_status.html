@@ -1,0 +1,130 @@
+{% extends "layout.html" %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / <a href="/speed-limits-evaluator">Speed-Limits Evaluator</a> / {{ status.label }}</p>{% endblock %}
+{% block heading %}{{ status.label }}{% endblock %}
+{% block subtitle %}{{ status.state }} &middot; {{ status.year }}-{{ status.month }} &middot; started by {{ status.started_by }}{% endblock %}
+{% block content %}
+<div class="card">
+  <p id="ev-badge">
+    {% if status.run_status == 'running' %}<span class="badge">Running</span>
+    {% elif status.run_status == 'done' %}<span class="badge ok">Done</span>
+    {% elif status.run_status == 'cancelled' %}<span class="badge warn">Cancelled</span>
+    {% else %}<span class="badge err">Error</span>{% endif %}
+  </p>
+  <p id="ev-message" style="margin:0 0 10px;">{{ status.message }}</p>
+  <div class="progress-indeterminate" id="ev-progress-bar" style="{% if status.run_status != 'running' %}display:none;{% endif %}"></div>
+  {% if status.error %}<pre class="log">{{ status.error }}</pre>{% endif %}
+
+  <div class="stat-grid" style="margin-top:14px;">
+    <div class="stat-tile"><div class="stat-value" id="ev-done">{{ status.done_count }}/{{ status.total_count }}</div><div class="stat-label">Segments checked</div></div>
+    <div class="stat-tile"><div class="stat-value" id="ev-matched">{{ status.matched_count }}</div><div class="stat-label">Signs found</div></div>
+    <div class="stat-tile"><div class="stat-value" id="ev-no-sign">{{ status.no_sign_count }}</div><div class="stat-label">No readable sign</div></div>
+    <div class="stat-tile"><div class="stat-value" id="ev-no-coverage">{{ status.no_coverage_count }}</div><div class="stat-label">No Street View coverage</div></div>
+    <div class="stat-tile"><div class="stat-value" id="ev-errors">{{ status.error_count }}</div><div class="stat-label">Errors</div></div>
+  </div>
+
+  <p style="margin:14px 0 0;">
+    <a id="ev-csv-link" class="btn-secondary" style="text-decoration:none; display:inline-block; {% if status.run_status == 'running' %}opacity:0.45; pointer-events:none;{% endif %}" href="/speed-limits-evaluator/{{ batch_id }}/csv">Download CSV</a>
+    <button id="ev-cancel-btn" type="button" onclick="evCancel()" style="{% if status.run_status != 'running' %}display:none;{% endif %} margin-left:8px;">Cancel run</button>
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Run configuration</h3>
+  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Recorded with this run so a later run over the same streets can be compared fairly - same criteria/walk settings, or a deliberately different set.</p>
+  {% set cfg = status.config %}
+  {% if cfg %}
+  <table>
+    <tr><td>Segments requested</td><td>{{ cfg.segment_count }}</td></tr>
+    <tr><td>Concurrency</td><td>{{ cfg.concurrency }}</td></tr>
+    <tr><td>Project / dataset</td><td><code>{{ cfg.project }}.{{ cfg.dataset }}</code></td></tr>
+    <tr><td>Selection criteria</td><td>{% for k, v in cfg.criteria.items() %}{% if v[0] %}<code>{{ k }} ({{ v[1] }})</code>{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}</td></tr>
+    <tr><td>Walk each segment's length</td><td>{{ cfg.walk_segment }}{% if cfg.walk_segment %} (spacing {{ cfg.walk_segment_spacing_m }}m){% endif %}</td></tr>
+    <tr><td>Side mode</td><td>{{ cfg.side_mode }} (offset {{ cfg.side_offset_m }}m{% if cfg.auto_side_offset %}, auto-detected{% endif %})</td></tr>
+    <tr><td>Headings</td><td>{{ cfg.headings }}{% if cfg.headings_relative %} (relative to direction of travel){% endif %}</td></tr>
+    <tr><td>Camera field of view</td><td>{{ cfg.fov }}</td></tr>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Results</h3>
+  <div style="max-height:480px; overflow-y:auto;">
+    <table>
+      <tr><th>Segment</th><th>Status</th><th>Matched speed (mph)</th></tr>
+      <tbody id="ev-results-body">
+        {% for r in status.results %}
+          <tr>
+            <td><code>{{ r.segment_id }}</code></td>
+            <td>{{ r.status }}{% if r.error %}: {{ r.error }}{% endif %}</td>
+            <td>{{ r.matched_speed_mph if r.matched_speed_mph is defined else '' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  const batchId = {{ batch_id|tojson }};
+  let running = {{ (status.run_status == 'running') | tojson }};
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function render(data) {
+    document.getElementById('ev-message').textContent = data.message || '';
+    document.getElementById('ev-done').textContent = data.done_count + '/' + data.total_count;
+    document.getElementById('ev-matched').textContent = data.matched_count;
+    document.getElementById('ev-no-sign').textContent = data.no_sign_count;
+    document.getElementById('ev-no-coverage').textContent = data.no_coverage_count;
+    document.getElementById('ev-errors').textContent = data.error_count;
+
+    const badgeEl = document.getElementById('ev-badge');
+    if (data.run_status === 'running') {
+      badgeEl.innerHTML = '<span class="badge">Running</span>';
+    } else if (data.run_status === 'done') {
+      badgeEl.innerHTML = '<span class="badge ok">Done</span>';
+    } else if (data.run_status === 'cancelled') {
+      badgeEl.innerHTML = '<span class="badge warn">Cancelled</span>';
+    } else {
+      badgeEl.innerHTML = '<span class="badge err">Error</span>';
+    }
+
+    const tbody = document.getElementById('ev-results-body');
+    tbody.innerHTML = (data.results || []).map(r => {
+      const statusText = r.status + (r.error ? ': ' + escapeHtml(r.error) : '');
+      const mph = (typeof r.matched_speed_mph !== 'undefined') ? r.matched_speed_mph : '';
+      return `<tr><td><code>${escapeHtml(r.segment_id)}</code></td><td>${statusText}</td><td>${mph}</td></tr>`;
+    }).join('');
+
+    if (data.run_status !== 'running') {
+      running = false;
+      document.getElementById('ev-progress-bar').style.display = 'none';
+      document.getElementById('ev-cancel-btn').style.display = 'none';
+      const csvLink = document.getElementById('ev-csv-link');
+      csvLink.style.opacity = '1';
+      csvLink.style.pointerEvents = 'auto';
+    }
+  }
+
+  function poll() {
+    if (!running) return;
+    fetch('/speed-limits-evaluator/' + batchId + '/status')
+      .then(r => r.json())
+      .then(data => {
+        render(data);
+        if (running) setTimeout(poll, 2000);
+      })
+      .catch(() => setTimeout(poll, 4000));
+  }
+
+  window.evCancel = function () {
+    fetch('/speed-limits-evaluator/' + batchId + '/cancel', {method: 'POST'});
+  };
+
+  if (running) poll();
+})();
+</script>
+{% endblock %}

@@ -1,13 +1,70 @@
 # speed_limit_check - working conventions
 
 - This app is "Archimedes", MooveAI's data quality hub - one Flask app
-  (`app.py`), one deployment, three pages: `/` (hub, model catalog),
+  (`app.py`), one deployment, four pages: `/` (hub, model catalog),
   `/speed-limits` (Speed-Limits Quality - nationwide BigQuery metrics),
-  `/sign-checker` (the original per-segment Street View sign checker,
-  linked from the Quality page). Keep it this way - do not split into
-  separate apps/deployments unless explicitly asked to (this was tried
-  and explicitly reverted: "stop -- i want them all in one app, one
-  deployment").
+  `/sign-checker` (the original per-segment Street View sign checker),
+  `/speed-limits-evaluator` (Speed-Limits Evaluator - batch/concurrent
+  version of the sign checker, see below). Keep it this way - do not
+  split into separate apps/deployments unless explicitly asked to (this
+  was tried and explicitly reverted: "stop -- i want them all in one
+  app, one deployment").
+- **Speed-Limits Evaluator** (`/speed-limits-evaluator`,
+  `batch_evaluator.py`): runs up to `segment_count` (default 1000)
+  candidate segments for one state through the *same* per-segment logic
+  the sign checker uses, concurrently (default 10 workers, user-settable)
+  instead of one at a time. Built by extracting `run_pipeline`'s
+  per-candidate loop body in `find_bad_speed_limit.py` into a standalone
+  `_process_one_candidate()` - `run_pipeline` itself now just calls that
+  once per candidate serially (behavior verified unchanged via a direct
+  test - walk_all stop-at-match semantics, attempt ordering/statuses, all
+  preserved), and `batch_evaluator.py` calls the same function from a
+  `ThreadPoolExecutor`. Deliberately did NOT add a new rate limiter for
+  this: `find_bad_speed_limit.py`'s Street View throttle
+  (`_streetview_throttle_lock`, a process-global `threading.Lock`) already
+  serializes every worker thread's Street View calls correctly regardless
+  of concurrency - don't reintroduce per-thread-only throttling here, the
+  existing global lock is what makes concurrency safe against Google's
+  rate limits.
+  - **Durability**: status/results are NOT just in-memory - they're
+    written to `output/_batch_jobs/<batch_id>/status.json` (+ `results.csv`
+    on completion, + an `index.json` listing every run) and mirrored to
+    GCS the same way every other cache in this app is
+    (`gcs_cache_pull`/`gcs_cache_push`). A status page always reads fresh
+    from there, not from any in-memory job dict - that's what makes
+    "leave and come back later" actually work. The persisted status
+    includes the run's full `config` (criteria, walk/side/heading/fov
+    settings) too, not just headline fields - needed for the "compare
+    against a later run over the same streets" use case this was built
+    for; don't strip that down to save space.
+  - **NOT resumable across an instance restart** - if the one Cloud Run
+    instance dies mid-batch (e.g. scaled to zero from idling), that
+    batch's background thread dies with it; status.json is left at its
+    last written snapshot, not silently continued elsewhere. Fixing the
+    "idle instance gets recycled mid-batch" half of this needs
+    `--min-instances=1` in `deploy.sh`/`gcloud run deploy` - **not
+    currently added**, since it's a standing-cost commitment (an always-on
+    instance) that wasn't explicitly signed off on. Ask before adding it,
+    don't add it silently just because a batch run would benefit.
+  - **Cancellation** is in-memory only (`app.py`'s `BATCH_CANCEL_EVENTS`,
+    a `threading.Event` per running batch) - works for stopping a batch
+    that's actually running in the current process; cannot stop one
+    that's "running" only because the process that started it died
+    without updating its status (same instance-restart gap as above).
+  - **"Who ran it"** comes from the `X-Goog-Authenticated-User-Email`
+    header IAP sets on every forwarded request (`app.py`'s
+    `_requester_email()`) - reads as `"unknown"` for local dev, where
+    there's no IAP in front. This only works because IAP is already live
+    (see the access-model notes below) - don't build a separate
+    auth/identity mechanism for this.
+  - Images use the exact same per-segment `gcs_cache_push` calls as the
+    single-run sign checker (same `_process_one_candidate` code, just
+    called concurrently) - the post-run "sync to GCS" step
+    (`batch_evaluator._sync_images_to_gcs`) is a best-effort sweep/safety
+    net, not a second caching mechanism.
+  - `Dockerfile`'s `COPY` line must include `batch_evaluator.py` - same
+    "don't forget the new module" mistake this file already warns about
+    for `quality_metrics.py`/`bq_cache.py`.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

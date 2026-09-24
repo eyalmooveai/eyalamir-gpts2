@@ -1154,197 +1154,23 @@ def run_pipeline(
 
     vision_client = vision.ImageAnnotatorClient()
     n = len(candidates)
-    span = 1.0 / n
 
     for i, row in enumerate(candidates):
-        lat, lon = row["centroid_lat"], row["centroid_lon"]
-        seg_id = row["here_segment_id"]
-        base = i * span
-        tag = f"[{i + 1}/{n}]"
-        seg_dir_root = out_root / safe_segment_dirname(seg_id)
-        row_dict = _jsonable_row(row)
-
-        coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or side_mode != "center" or headings_relative) else []
-        if walk_segment and coords:
-            point_count = points_for_spacing(coords, walk_segment_spacing_m)
-            base_points = sample_points_along_line(coords, point_count)  # [(lat, lon, bearing), ...]
-            walked = True
-        else:
-            base_points = [(lat, lon, overall_bearing(coords) if coords else 0.0)]
-            walked = False
-
-        # Flatten each base position into its side_mode query points -
-        # "center" is just the point itself, "sides" is the two
-        # perpendicular offset points only (skipping the center - useful
-        # when a here_segment_id spans two genuinely separate trunks and
-        # only the offset ones land on the one(s) of interest), "both" is
-        # center plus both sides. Directory naming preserves the exact
-        # prior layout when a mode is off, so existing caches on disk are
-        # still reused: flat seg_dir_root with side_mode="center" and no
-        # walk_segment, point<N> with only walk_segment, so only
-        # combinations actually using a new mode get new subdirectories.
-        # Each point carries the road's local bearing there, so
-        # headings_relative can rotate the requested headings to face
-        # "forward along this point's direction of travel" rather than a
-        # fixed compass direction.
-        include_center = side_mode in ("center", "both")
-        include_left = side_mode in ("left", "sides", "both")
-        include_right = side_mode in ("right", "sides", "both")
-        include_sides = include_left or include_right
-
-        effective_side_offset_m = side_offset_m
-        if include_sides and auto_side_offset:
-            if coords:
-                mid_lat, mid_lon, mid_bearing = sample_points_along_line(coords, 3)[1]
-            else:
-                mid_lat, mid_lon, mid_bearing = lat, lon, 0.0
-            log(f"{tag} Auto-detecting side offset from the segment's middle position...")
-            progress(base, f"{tag} Auto-detecting side offset...")
-            estimated = _estimate_side_offset_m(mid_lat, mid_lon, mid_bearing, api_key, log=log)
-            if estimated is not None:
-                effective_side_offset_m = estimated
-                log(f"{tag} Auto-detected side offset: {effective_side_offset_m:.0f}m")
-            else:
-                log(f"{tag} Auto side offset found nothing within range - using manual side offset {side_offset_m:.0f}m instead")
-
-        sample_points = []  # [lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing] - bearing may be corrected below
-        for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
-            point_prefix = f"point{p_idx}" if walked else None
-            if include_center:
-                sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
-            if include_left:
-                l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, effective_side_offset_m)
-                sample_points.append([l_lat, l_lon, point_prefix, "left", p_idx, p_bearing])
-            if include_right:
-                r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, effective_side_offset_m)
-                sample_points.append([r_lat, r_lon, point_prefix, "right", p_idx, p_bearing])
-
-        offset_desc = f"±{effective_side_offset_m:.0f}m" + (" auto" if include_sides and auto_side_offset and effective_side_offset_m != side_offset_m else "")
-        mode_desc = []
-        if walked:
-            mode_desc.append(f"walking {len(base_points)} position(s)")
-        if side_mode == "both":
-            mode_desc.append(f"{offset_desc} both sides")
-        elif side_mode == "sides":
-            mode_desc.append(f"{offset_desc} sides only (no center)")
-        elif side_mode in ("left", "right"):
-            mode_desc.append(f"{offset_desc} {side_mode} side only (no center)")
-        where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
-        log(f"{tag} here_segment_id={seg_id} - {where}")
-        for key, value in row_dict.items():
-            if key in ("here_segment_id", "centroid_lat", "centroid_lon"):
-                continue  # already shown on the summary line above
-            log(f"    {key}: {value}")
-
-        image_details: list[ImageDetail] = []
-        reading = None
-        num_pts = len(sample_points)
-        point_span = span / num_pts
-
-        # With headings_relative + a walked side, each offset point is only
-        # a guess at where a separate, unmapped trunk might be - it isn't
-        # guaranteed to run parallel to the centerline it was guessed from
-        # (e.g. a diverging ramp). Resolve every point's actual Street View
-        # coverage up front (still exactly one call per point overall - the
-        # main loop below reuses these results instead of re-querying) so
-        # each side's real local bearing can be derived from its own
-        # consecutive resolved panorama positions before any images are
-        # captured, rather than reusing the centerline's bearing.
-        coverage_by_point: dict[int, Optional[dict]] = {}
-        if headings_relative and include_sides and walked:
-            progress(base, f"{tag} Resolving Street View coverage to determine each side's actual direction of travel...")
-            for pt_i, sp in enumerate(sample_points):
-                coverage_by_point[pt_i] = streetview_coverage(sp[0], sp[1], api_key, log=log)
-            for side_label in ("left", "right"):
-                idxs = [pt_i for pt_i, sp in enumerate(sample_points) if sp[3] == side_label]
-                actual_positions = []
-                for pt_i in idxs:
-                    loc = (coverage_by_point.get(pt_i) or {}).get("location") or {}
-                    actual_positions.append((loc["lat"], loc["lng"]) if "lat" in loc and "lng" in loc else None)
-                fallback = [sample_points[pt_i][5] for pt_i in idxs]
-                corrected = bearings_from_actual_positions(actual_positions, fallback)
-                if sum(1 for p in actual_positions if p is not None) >= 2:
-                    log(f"  {tag} {side_label}: derived this trunk's actual direction of travel from its own "
-                        f"resolved Street View panorama positions, rather than the queried segment's centerline bearing.")
-                for local_j, pt_i in enumerate(idxs):
-                    sample_points[pt_i][5] = corrected[local_j]
-
-        for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx, p_bearing) in enumerate(sample_points):
-            point_base = base + pt_i * point_span
-            label_bits = [b for b in (f"position {base_idx + 1}/{len(base_points)}" if walked else None, side_label) if b]
-            ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
-            progress(point_base, f"{ptag} Checking Street View coverage...")
-
-            coverage = coverage_by_point[pt_i] if pt_i in coverage_by_point else streetview_coverage(p_lat, p_lon, api_key, log=log)
-            if not coverage:
-                log(f"  {ptag}: no Street View coverage here.")
-                progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
-                continue
-
-            point_dir = seg_dir_root
-            if point_prefix:
-                point_dir = point_dir / point_prefix
-            if side_label:
-                # left/right directories encode the actual offset used, not
-                # just the side, so a cached image is never silently reused
-                # under a different offset - the auto-detected offset can
-                # vary per candidate, and a manual --side-offset-m change
-                # between runs previously collided with a stale cache too.
-                point_dir = point_dir / (f"{side_label}_{effective_side_offset_m:.0f}m" if side_label in ("left", "right") else side_label)
-            actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
-            progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
-            image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, fov=fov, log=log)
-
-            for k, image_path in enumerate(image_paths):
-                progress(
-                    point_base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * point_span,
-                    f"{ptag} Running OCR on image {k + 1}/{len(image_paths)}...",
-                )
-                reading, ocr_text = find_sign_in_image(vision_client, image_path, log=log)
-                snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
-                log(f"    {image_path.name}: OCR saw: {snippet}")
-                image_details.append(
-                    ImageDetail(path=image_path, lat=p_lat, lon=p_lon, heading=heading_from_filename(image_path), ocr_snippet=snippet)
-                )
-                if reading:
-                    break
-
-            if reading:
-                break
-            progress(point_base + point_span, f"{ptag} No readable sign, trying next position...")
-
-        if not image_details:
-            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_coverage", row=row_dict))
-            log("  No Street View coverage at any checked position, trying next candidate.")
-            progress(base + span, f"{tag} No Street View coverage, trying next candidate...")
-            continue
-
-        if not reading:
-            result.attempts.append(CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", image_details=image_details, row=row_dict))
-            log("  Street View imagery found, but no speed limit sign could be read in it. Trying next candidate.")
-            progress(base + span, f"{tag} No readable sign, trying next candidate...")
-            continue
-
-        matched_index = len(image_details) - 1
-        annotated_path = reading.image_path.parent / "sign_detected.jpg"
-        save_annotated_image(reading, annotated_path)
-        gcs_cache_push(annotated_path, log=log)
-
-        result.attempts.append(
-            CandidateAttempt(
-                i + 1, seg_id, lat, lon, "match", reading.evidence,
-                image_details=image_details, annotated_image=annotated_path, matched_image_index=matched_index, row=row_dict,
-            )
+        attempt, match = _process_one_candidate(
+            i, n, row,
+            api_key=api_key, vision_client=vision_client, out_root=out_root,
+            walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+            side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+            headings=headings, headings_relative=headings_relative, fov=fov,
+            log=log, progress=progress,
         )
-        result.matches.append(
-            Match(row=row_dict, reading=reading, annotated_image=annotated_path, image_details=image_details, matched_image_index=matched_index)
-        )
-        log(f"Match found: {reading.speed_mph} mph on segment {seg_id}.")
-
-        if not walk_all:
-            progress(1.0, f"Match found: {reading.speed_mph} mph.")
-            return result
-        progress(base + span, f"{tag} Match found: {reading.speed_mph} mph. Continuing...")
+        result.attempts.append(attempt)
+        if match:
+            result.matches.append(match)
+            if not walk_all:
+                progress(1.0, f"Match found: {match.reading.speed_mph} mph.")
+                return result
+            progress((i + 1) / n, f"[{i + 1}/{n}] Match found: {match.reading.speed_mph} mph. Continuing...")
 
     if result.matches:
         message = f"Done. {len(result.matches)} match(es) found out of {n} candidate(s)."
@@ -1353,6 +1179,216 @@ def run_pipeline(
     log(message)
     progress(1.0, message)
     return result
+
+
+def _process_one_candidate(
+    i: int,
+    n: int,
+    row,
+    *,
+    api_key: str,
+    vision_client,
+    out_root: Path,
+    walk_segment: bool,
+    walk_segment_spacing_m: float,
+    side_mode: str,
+    side_offset_m: float,
+    auto_side_offset: bool,
+    headings: tuple[int, ...],
+    headings_relative: bool,
+    fov: int,
+    log=lambda msg: None,
+    progress=lambda fraction, message: None,
+) -> tuple["CandidateAttempt", Optional["Match"]]:
+    """Walks one candidate segment's sample points/sides/headings until a
+    readable speed-limit sign is found (or every position is exhausted) -
+    the actual unit of work `run_pipeline` loops over serially above, one
+    candidate at a time. Extracted so batch_evaluator.py can run many of
+    these concurrently across candidates instead - same work, no per-batch
+    "stop at first match" semantics (that's run_pipeline's own call, made
+    with the two return values this gives back). Returns the attempt
+    record (always) and a Match (only when a sign was actually read).
+    """
+    span = 1.0 / n
+    base = i * span
+    tag = f"[{i + 1}/{n}]"
+
+    lat, lon = row["centroid_lat"], row["centroid_lon"]
+    seg_id = row["here_segment_id"]
+    seg_dir_root = out_root / safe_segment_dirname(seg_id)
+    row_dict = _jsonable_row(row)
+
+    coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or side_mode != "center" or headings_relative) else []
+    if walk_segment and coords:
+        point_count = points_for_spacing(coords, walk_segment_spacing_m)
+        base_points = sample_points_along_line(coords, point_count)  # [(lat, lon, bearing), ...]
+        walked = True
+    else:
+        base_points = [(lat, lon, overall_bearing(coords) if coords else 0.0)]
+        walked = False
+
+    # Flatten each base position into its side_mode query points -
+    # "center" is just the point itself, "sides" is the two
+    # perpendicular offset points only (skipping the center - useful
+    # when a here_segment_id spans two genuinely separate trunks and
+    # only the offset ones land on the one(s) of interest), "both" is
+    # center plus both sides. Directory naming preserves the exact
+    # prior layout when a mode is off, so existing caches on disk are
+    # still reused: flat seg_dir_root with side_mode="center" and no
+    # walk_segment, point<N> with only walk_segment, so only
+    # combinations actually using a new mode get new subdirectories.
+    # Each point carries the road's local bearing there, so
+    # headings_relative can rotate the requested headings to face
+    # "forward along this point's direction of travel" rather than a
+    # fixed compass direction.
+    include_center = side_mode in ("center", "both")
+    include_left = side_mode in ("left", "sides", "both")
+    include_right = side_mode in ("right", "sides", "both")
+    include_sides = include_left or include_right
+
+    effective_side_offset_m = side_offset_m
+    if include_sides and auto_side_offset:
+        if coords:
+            mid_lat, mid_lon, mid_bearing = sample_points_along_line(coords, 3)[1]
+        else:
+            mid_lat, mid_lon, mid_bearing = lat, lon, 0.0
+        log(f"{tag} Auto-detecting side offset from the segment's middle position...")
+        progress(base, f"{tag} Auto-detecting side offset...")
+        estimated = _estimate_side_offset_m(mid_lat, mid_lon, mid_bearing, api_key, log=log)
+        if estimated is not None:
+            effective_side_offset_m = estimated
+            log(f"{tag} Auto-detected side offset: {effective_side_offset_m:.0f}m")
+        else:
+            log(f"{tag} Auto side offset found nothing within range - using manual side offset {side_offset_m:.0f}m instead")
+
+    sample_points = []  # [lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing] - bearing may be corrected below
+    for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
+        point_prefix = f"point{p_idx}" if walked else None
+        if include_center:
+            sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
+        if include_left:
+            l_lat, l_lon = _destination_point(p_lat, p_lon, p_bearing - 90, effective_side_offset_m)
+            sample_points.append([l_lat, l_lon, point_prefix, "left", p_idx, p_bearing])
+        if include_right:
+            r_lat, r_lon = _destination_point(p_lat, p_lon, p_bearing + 90, effective_side_offset_m)
+            sample_points.append([r_lat, r_lon, point_prefix, "right", p_idx, p_bearing])
+
+    offset_desc = f"±{effective_side_offset_m:.0f}m" + (" auto" if include_sides and auto_side_offset and effective_side_offset_m != side_offset_m else "")
+    mode_desc = []
+    if walked:
+        mode_desc.append(f"walking {len(base_points)} position(s)")
+    if side_mode == "both":
+        mode_desc.append(f"{offset_desc} both sides")
+    elif side_mode == "sides":
+        mode_desc.append(f"{offset_desc} sides only (no center)")
+    elif side_mode in ("left", "right"):
+        mode_desc.append(f"{offset_desc} {side_mode} side only (no center)")
+    where = f"({lat:.6f}, {lon:.6f})" if not mode_desc else ", ".join(mode_desc)
+    log(f"{tag} here_segment_id={seg_id} - {where}")
+    for key, value in row_dict.items():
+        if key in ("here_segment_id", "centroid_lat", "centroid_lon"):
+            continue  # already shown on the summary line above
+        log(f"    {key}: {value}")
+
+    image_details: list[ImageDetail] = []
+    reading = None
+    num_pts = len(sample_points)
+    point_span = span / num_pts
+
+    # With headings_relative + a walked side, each offset point is only
+    # a guess at where a separate, unmapped trunk might be - it isn't
+    # guaranteed to run parallel to the centerline it was guessed from
+    # (e.g. a diverging ramp). Resolve every point's actual Street View
+    # coverage up front (still exactly one call per point overall - the
+    # main loop below reuses these results instead of re-querying) so
+    # each side's real local bearing can be derived from its own
+    # consecutive resolved panorama positions before any images are
+    # captured, rather than reusing the centerline's bearing.
+    coverage_by_point: dict[int, Optional[dict]] = {}
+    if headings_relative and include_sides and walked:
+        progress(base, f"{tag} Resolving Street View coverage to determine each side's actual direction of travel...")
+        for pt_i, sp in enumerate(sample_points):
+            coverage_by_point[pt_i] = streetview_coverage(sp[0], sp[1], api_key, log=log)
+        for side_label in ("left", "right"):
+            idxs = [pt_i for pt_i, sp in enumerate(sample_points) if sp[3] == side_label]
+            actual_positions = []
+            for pt_i in idxs:
+                loc = (coverage_by_point.get(pt_i) or {}).get("location") or {}
+                actual_positions.append((loc["lat"], loc["lng"]) if "lat" in loc and "lng" in loc else None)
+            fallback = [sample_points[pt_i][5] for pt_i in idxs]
+            corrected = bearings_from_actual_positions(actual_positions, fallback)
+            if sum(1 for p in actual_positions if p is not None) >= 2:
+                log(f"  {tag} {side_label}: derived this trunk's actual direction of travel from its own "
+                    f"resolved Street View panorama positions, rather than the queried segment's centerline bearing.")
+            for local_j, pt_i in enumerate(idxs):
+                sample_points[pt_i][5] = corrected[local_j]
+
+    for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx, p_bearing) in enumerate(sample_points):
+        point_base = base + pt_i * point_span
+        label_bits = [b for b in (f"position {base_idx + 1}/{len(base_points)}" if walked else None, side_label) if b]
+        ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
+        progress(point_base, f"{ptag} Checking Street View coverage...")
+
+        coverage = coverage_by_point[pt_i] if pt_i in coverage_by_point else streetview_coverage(p_lat, p_lon, api_key, log=log)
+        if not coverage:
+            log(f"  {ptag}: no Street View coverage here.")
+            progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
+            continue
+
+        point_dir = seg_dir_root
+        if point_prefix:
+            point_dir = point_dir / point_prefix
+        if side_label:
+            # left/right directories encode the actual offset used, not
+            # just the side, so a cached image is never silently reused
+            # under a different offset - the auto-detected offset can
+            # vary per candidate, and a manual --side-offset-m change
+            # between runs previously collided with a stale cache too.
+            point_dir = point_dir / (f"{side_label}_{effective_side_offset_m:.0f}m" if side_label in ("left", "right") else side_label)
+        actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
+        progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
+        image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, fov=fov, log=log)
+
+        for k, image_path in enumerate(image_paths):
+            progress(
+                point_base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * point_span,
+                f"{ptag} Running OCR on image {k + 1}/{len(image_paths)}...",
+            )
+            reading, ocr_text = find_sign_in_image(vision_client, image_path, log=log)
+            snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
+            log(f"    {image_path.name}: OCR saw: {snippet}")
+            image_details.append(
+                ImageDetail(path=image_path, lat=p_lat, lon=p_lon, heading=heading_from_filename(image_path), ocr_snippet=snippet)
+            )
+            if reading:
+                break
+
+        if reading:
+            break
+        progress(point_base + point_span, f"{ptag} No readable sign, trying next position...")
+
+    if not image_details:
+        log("  No Street View coverage at any checked position.")
+        progress(base + span, f"{tag} No Street View coverage.")
+        return CandidateAttempt(i + 1, seg_id, lat, lon, "no_coverage", row=row_dict), None
+
+    if not reading:
+        log("  Street View imagery found, but no speed limit sign could be read in it.")
+        progress(base + span, f"{tag} No readable sign.")
+        return CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", image_details=image_details, row=row_dict), None
+
+    matched_index = len(image_details) - 1
+    annotated_path = reading.image_path.parent / "sign_detected.jpg"
+    save_annotated_image(reading, annotated_path)
+    gcs_cache_push(annotated_path, log=log)
+
+    attempt = CandidateAttempt(
+        i + 1, seg_id, lat, lon, "match", reading.evidence,
+        image_details=image_details, annotated_image=annotated_path, matched_image_index=matched_index, row=row_dict,
+    )
+    match = Match(row=row_dict, reading=reading, annotated_image=annotated_path, image_details=image_details, matched_image_index=matched_index)
+    log(f"Match found: {reading.speed_mph} mph on segment {seg_id}.")
+    return attempt, match
 
 
 def main() -> int:

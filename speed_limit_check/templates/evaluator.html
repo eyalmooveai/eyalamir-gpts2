@@ -1,0 +1,151 @@
+{% extends "layout.html" %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / Speed-Limits Evaluator</p>{% endblock %}
+{% block heading %}Speed-Limits Evaluator{% endblock %}
+{% block subtitle %}Batch-check up to {{ default_segment_count }} road segments' signs at once for a state - concurrent, durable, exportable{% endblock %}
+{% block content %}
+<div class="card">
+  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">
+    Runs the same per-segment sign check as the <a href="/sign-checker">Street View Sign Checker</a>, across many
+    candidate segments concurrently instead of one at a time. A run can take a while - this page's status/results
+    (below, and at each run's own link) are saved durably, so you can leave and come back to check on it, and every
+    completed run stays listed here with a CSV you can download or compare against a later run over the same streets.
+  </p>
+</div>
+
+{% if batches %}
+<div class="card">
+  <h3 style="margin-top:0;">Past &amp; running runs</h3>
+  <table>
+    <tr>
+      <th>Label</th><th>State</th><th>Month</th><th>Started by</th><th>Started</th>
+      <th>Status</th><th>Progress</th><th>Signs found</th><th></th>
+    </tr>
+    {% for b in batches %}
+      <tr>
+        <td><a href="/speed-limits-evaluator/{{ b.batch_id }}">{{ b.label }}</a></td>
+        <td>{{ b.state }}</td>
+        <td>{{ b.year }}-{{ b.month }}</td>
+        <td>{{ b.started_by }}</td>
+        <td>{{ b.started_at[:19].replace('T', ' ') }} UTC</td>
+        <td>
+          {% if b.run_status == 'running' %}<span class="badge">Running</span>
+          {% elif b.run_status == 'done' %}<span class="badge ok">Done</span>
+          {% elif b.run_status == 'cancelled' %}<span class="badge warn">Cancelled</span>
+          {% else %}<span class="badge err">Error</span>{% endif %}
+        </td>
+        <td>{{ b.done_count }}/{{ b.total_count }}</td>
+        <td>{{ b.matched_count }}</td>
+        <td><a href="/speed-limits-evaluator/{{ b.batch_id }}/csv">CSV</a></td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0;">Start a new run</h3>
+  <form method="post" action="/speed-limits-evaluator/start">
+    <label for="label">Label (optional - blank auto-generates one from state/month/date)</label>
+    <input type="text" id="label" name="label" placeholder="e.g. nc-aug-2026-baseline">
+
+    <div class="row-2">
+      <div>
+        <label for="state">State</label>
+        <input type="text" id="state" name="state" placeholder="e.g. NC" list="state-list" maxlength="2" required>
+        <datalist id="state-list">
+          {% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}
+        </datalist>
+      </div>
+      <div>
+        <label for="year">Year</label>
+        <input type="text" id="year" name="year" value="{{ default_year }}" required>
+      </div>
+    </div>
+    <label for="month">Month</label>
+    <input type="text" id="month" name="month" value="{{ default_month }}" required style="max-width:120px;">
+
+    <div class="row-2" style="margin-top:10px;">
+      <div>
+        <label for="segment_count">Segments to check</label>
+        <input type="number" id="segment_count" name="segment_count" value="{{ default_segment_count }}" min="1" max="10000">
+      </div>
+      <div>
+        <label for="concurrency">Concurrency (parallel workers)</label>
+        <input type="number" id="concurrency" name="concurrency" value="{{ default_concurrency }}" min="1" max="{{ max_concurrency }}">
+        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Street View requests are still globally rate-limited regardless of this number (see README) - higher concurrency overlaps OCR/network wait time across segments, it doesn't bypass that pacing.</p>
+      </div>
+    </div>
+
+    <div class="row-2" style="margin-top:10px;">
+      <div>
+        <label for="project">Project</label>
+        <input type="text" id="project" name="project" value="{{ default_project }}">
+      </div>
+      <div>
+        <label for="dataset">Dataset</label>
+        <input type="text" id="dataset" name="dataset" value="{{ default_dataset }}">
+      </div>
+    </div>
+
+    <h3 style="margin:18px 0 4px;">Selection criteria</h3>
+    <p style="color:var(--muted); font-size:0.78rem; margin:0 0 8px;">Same candidate-selection criteria as the sign checker - ranked by the first checked criterion's mismatch size, largest first.</p>
+    {% for c in criteria_defs %}
+      <div class="criterion-row">
+        <input type="checkbox" name="crit_{{ c.key }}_enabled" id="ev_crit_{{ c.key }}_enabled" {% if c.default_enabled %}checked{% endif %}>
+        <label for="ev_crit_{{ c.key }}_enabled">{{ c.label }}</label>
+        <input type="number" step="0.5" name="crit_{{ c.key }}_value" value="{{ c.default_value }}">
+      </div>
+    {% endfor %}
+
+    <h3 style="margin:18px 0 4px;">Per-segment walk settings</h3>
+    <div class="criterion-row">
+      <input type="checkbox" id="walk_segment" name="walk_segment" {% if default_walk_segment %}checked{% endif %}>
+      <label for="walk_segment">Slow-walk each segment's full length (not just its centroid) until a sign is read</label>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="walk_segment_spacing_m">Spacing between positions (meters)</label>
+        <input type="number" id="walk_segment_spacing_m" name="walk_segment_spacing_m" value="{{ default_walk_segment_spacing_m }}" min="2" max="200">
+      </div>
+      <div>
+        <label for="side_mode">Which side(s) of the road</label>
+        <select id="side_mode" name="side_mode">
+          <option value="center" {% if default_side_mode == 'center' %}selected{% endif %}>Center only</option>
+          <option value="left" {% if default_side_mode == 'left' %}selected{% endif %}>Left only</option>
+          <option value="right" {% if default_side_mode == 'right' %}selected{% endif %}>Right only</option>
+          <option value="sides" {% if default_side_mode == 'sides' %}selected{% endif %}>Sides only (no center)</option>
+          <option value="both" {% if default_side_mode == 'both' %}selected{% endif %}>Center + both sides</option>
+        </select>
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="side_offset_m">Side offset (meters)</label>
+        <input type="number" id="side_offset_m" name="side_offset_m" value="20" min="1" max="200">
+      </div>
+      <div>
+        <div class="criterion-row" style="margin-top:22px;">
+          <input type="checkbox" id="auto_side_offset" name="auto_side_offset" {% if default_auto_side_offset %}checked{% endif %}>
+          <label for="auto_side_offset">Auto-detect the offset from each segment's own width</label>
+        </div>
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="headings">Headings to capture (comma-separated degrees)</label>
+        <input type="text" id="headings" name="headings" value="{{ default_headings }}">
+      </div>
+      <div>
+        <div class="criterion-row" style="margin-top:22px;">
+          <input type="checkbox" id="headings_relative" name="headings_relative" {% if default_headings_relative %}checked{% endif %}>
+          <label for="headings_relative">Headings relative to direction of travel</label>
+        </div>
+      </div>
+    </div>
+    <label for="fov">Camera zoom (field of view, {{ min_fov }}-{{ max_fov }})</label>
+    <input type="number" id="fov" name="fov" value="{{ default_fov }}" min="{{ min_fov }}" max="{{ max_fov }}" style="max-width:120px;">
+
+    <p style="margin-top:18px;"><button type="submit">Start batch run</button></p>
+  </form>
+</div>
+{% endblock %}

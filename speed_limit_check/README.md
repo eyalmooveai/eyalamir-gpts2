@@ -18,6 +18,11 @@ app, one deployment - see `app.py`):
   that location. Linked from the Speed-Limits Quality page. Most of this
   README (Query/Setup/Usage/Output/Resilience/Caching/How sign reading
   works) is about this tool specifically.
+- **`/speed-limits-evaluator`** - **Speed-Limits Evaluator**: the sign
+  checker's own per-segment logic, run across up to 1000 segments for a
+  state concurrently instead of one at a time - durable status you can
+  check on later, CSV export, and a history of past runs to compare
+  against. See "Speed-Limits Evaluator" below.
 
 ## Query
 
@@ -375,6 +380,81 @@ All three share the same disk (and GCS, when `GCS_CACHE_BUCKET` is set -
 see "Deploying to Cloud Run") cache mechanism as the rest of this app -
 see `bq_cache.py` and "Caching" below.
 
+## Speed-Limits Evaluator
+
+`/speed-limits-evaluator` runs the sign checker's own per-segment logic
+(`find_bad_speed_limit._process_one_candidate` - the exact same "walk
+positions/sides/headings until a sign is read" work `run_pipeline` does
+one candidate at a time) across up to a configurable number of candidate
+segments for one state **concurrently**, instead of checking one segment
+at a time. It exists for the case the sign checker's single-run UI
+doesn't cover well: "how good is this model across hundreds of streets in
+a state," not "what's the sign on this one street."
+
+### Starting a run
+
+The launch form (state, year/month, project/dataset, segment count -
+default 1000, concurrency - default 10 parallel workers) reuses the same
+selection-criteria checkboxes and walk/side/heading/fov settings as the
+sign checker's own form, with the same "what actually works" defaults.
+An optional label identifies the run in its history; left blank, one is
+generated from the state/month/timestamp.
+
+**Concurrency** doesn't bypass Street View's rate limit - the throttle in
+`find_bad_speed_limit.py` (`_streetview_throttle_lock`) is a process-wide
+lock all worker threads share, so Street View calls stay correctly paced
+regardless of how many workers are running. Higher concurrency mostly
+buys overlap on Vision OCR and network latency between segments, which is
+still a real speedup, just a safer one than true unpaced parallelism.
+
+### Checking on a run
+
+Every run gets a stable URL (`/speed-limits-evaluator/<batch_id>`)
+showing live progress (segments checked, signs found, errors), a
+per-segment results table, and a Cancel button while it's running. This
+page - and the run's entry in `/speed-limits-evaluator`'s history table -
+work from **durably persisted status**, not just an in-memory job you
+have to keep a browser tab open for: status is written to
+`output/_batch_jobs/<batch_id>/status.json` (and mirrored to GCS, same as
+everywhere else in this app) as the run progresses, so navigating back
+later - even in a different browser, even after some time - shows real
+state, not a stale in-memory snapshot.
+
+This does **not** make a run resumable across a Cloud Run instance
+restart, though - if the one instance running it dies mid-batch, that
+batch's background thread dies too, leaving status.json at its last
+written snapshot. See "Deploying to Cloud Run" for the `--min-instances=1`
+follow-up that would prevent Cloud Run from idling the instance to zero
+mid-run in the first place (not yet applied - a standing-cost decision
+left to whoever owns that call).
+
+### Results: CSV export and comparing runs over time
+
+Every completed (or cancelled) run's per-segment results are written to
+a CSV (`output/_batch_jobs/<batch_id>/results.csv`, downloadable from its
+status page) - segment id, match status, matched speed, the segment's
+own OSM/HERE/inferred/observed/freeflow values, and a full JSON dump of
+its source row for anything not broken out into its own column. The
+run's full configuration (every criteria/walk/side/heading/fov setting,
+not just the headline label) is recorded alongside it too, specifically
+so a later run over the *same* streets - after a model change - can be
+compared on equal footing. `/speed-limits-evaluator`'s history table
+lists every run (label, state, who ran it - from the `X-Goog-Authenticated-User-Email`
+header IAP sets, or "unknown" without IAP in front - started/finished
+time, status, counts) so a past run is easy to find again without having
+bookmarked its exact URL.
+
+### Images
+
+Each segment's Street View/annotated images are cached exactly the way
+the sign checker's own single runs already are (see "Caching" below) -
+this doesn't add a second caching mechanism, it's the same
+`gcs_cache_push` calls inside the same per-segment code, just invoked
+many times concurrently instead of once. After a run finishes, a best-effort
+sweep re-pushes every image under that run's output directory to GCS as
+a safety net, catching anything an individual push failed on transiently
+mid-run.
+
 ## Output
 
 For every matched segment (the first one found, or every one if walking
@@ -506,6 +586,15 @@ browser polls `/status/<job_id>`):
   poll for a job it never started would report "unknown job". This
   caps the service at one run at a time, which matches how it's meant to
   be used anyway.
+- **`--min-instances=1` is not currently set, and probably should be for
+  the Speed-Limits Evaluator specifically.** Cloud Run can otherwise idle
+  the one instance down to zero when there's no traffic - fine for a
+  sign-checker run that finishes in a couple minutes with someone
+  watching, much less fine for an Evaluator batch that might run for a
+  long while unattended: if the instance gets recycled mid-batch, that
+  batch's background thread dies with it. This is a real standing-cost
+  tradeoff (an always-on instance vs. scale-to-zero savings), not applied
+  here automatically - decide deliberately before adding it.
 
 ### Scripted (recommended)
 
