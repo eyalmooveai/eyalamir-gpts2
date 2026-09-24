@@ -65,6 +65,35 @@
   - `Dockerfile`'s `COPY` line must include `batch_evaluator.py` - same
     "don't forget the new module" mistake this file already warns about
     for `quality_metrics.py`/`bq_cache.py`.
+  - **The launch form's cost/time estimator learns from real run
+    history, not a fixed formula** - it started as a pure guessed-formula
+    estimate (positions/segment × headings × sides), which turned out to
+    be badly wrong in practice (a real 10-segment NC run took >60s
+    against a ~12s guess). Fixed by instrumenting actual usage:
+    `find_bad_speed_limit.py` has process-wide, thread-safe counters
+    (`reset_api_call_counts`/`get_api_call_counts`/`_count_api_call`) at
+    the two real billed-call sites - inside `_throttle_streetview_call()`
+    (every real Street View request, metadata+image alike - cache hits
+    never reach it) and inside `_get_ocr_data()` right before the actual
+    Vision call (same cache-hit exclusion). `run_batch` resets them
+    before its ThreadPoolExecutor starts, captures them (plus real
+    wall-clock `elapsed_seconds`) into `status.json` - both at the end
+    AND periodically during the run, so a page you're watching shows
+    real numbers climbing, not just a final tally. Don't remove this
+    instrumentation or route around it with a new counting mechanism -
+    it's the single source of truth `run_history_stats()` learns from.
+  - `batch_evaluator.run_history_stats()` aggregates every completed
+    run's real `elapsed_seconds`/call-counts into per-segment rates,
+    bucketed by (walk_segment, side_mode, headings_count), plus a pooled
+    "overall" bucket (key `walk_segment: None`) for configs with no exact
+    match. Passed to `evaluator.html` as `history_stats` (JSON embedded
+    in the page); its JS estimator prefers an exact config match, falls
+    back to the overall bucket, and only uses the original hardcoded
+    formula guess when `history_stats` is empty (no runs completed yet).
+    This means the estimate genuinely gets more accurate the more the
+    page is used - don't "fix" an estimate that looks off without first
+    checking whether it's actually using history yet (the estimator box
+    always says which basis it used).
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

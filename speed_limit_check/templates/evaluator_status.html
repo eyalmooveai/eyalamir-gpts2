@@ -20,7 +20,10 @@
     <div class="stat-tile"><div class="stat-value" id="ev-no-sign">{{ status.no_sign_count }}</div><div class="stat-label">No readable sign</div></div>
     <div class="stat-tile"><div class="stat-value" id="ev-no-coverage">{{ status.no_coverage_count }}</div><div class="stat-label">No Street View coverage</div></div>
     <div class="stat-tile"><div class="stat-value" id="ev-errors">{{ status.error_count }}</div><div class="stat-label">Errors</div></div>
+    <div class="stat-tile"><div class="stat-value" id="ev-elapsed">{{ "%.0f"|format(status.elapsed_seconds) + "s" if status.elapsed_seconds else "-" }}</div><div class="stat-label">Elapsed (real)</div></div>
+    <div class="stat-tile"><div class="stat-value" id="ev-api-calls">{{ "{:,}".format(status.actual_streetview_calls + status.actual_vision_calls) if status.actual_streetview_calls is defined else "-" }}</div><div class="stat-label">Street View + Vision calls (real)</div></div>
   </div>
+  <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;">These are real measured numbers, not an estimate - they feed the launch form's estimator for future runs (see batch_evaluator.run_history_stats).</p>
 
   <p style="margin:14px 0 0;">
     <a id="ev-csv-link" class="btn-secondary" style="text-decoration:none; display:inline-block; {% if status.run_status == 'running' %}opacity:0.45; pointer-events:none;{% endif %}" href="/speed-limits-evaluator/{{ batch_id }}/csv">Download CSV</a>
@@ -80,6 +83,9 @@
     document.getElementById('ev-no-sign').textContent = data.no_sign_count;
     document.getElementById('ev-no-coverage').textContent = data.no_coverage_count;
     document.getElementById('ev-errors').textContent = data.error_count;
+    document.getElementById('ev-elapsed').textContent = data.elapsed_seconds ? Math.round(data.elapsed_seconds) + 's' : '-';
+    document.getElementById('ev-api-calls').textContent = (typeof data.actual_streetview_calls === 'number')
+      ? (data.actual_streetview_calls + data.actual_vision_calls).toLocaleString() : '-';
 
     const badgeEl = document.getElementById('ev-badge');
     if (data.run_status === 'running') {

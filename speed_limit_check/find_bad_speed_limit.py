@@ -88,14 +88,47 @@ STREET_WIDTH_TRACK_RATIO = 0.6
 _streetview_throttle_lock = threading.Lock()
 _last_streetview_call_ts = 0.0
 
+# Process-wide counters of actual billed API calls made (cache hits don't
+# reach either call site below, so these only count real usage) - reset
+# and read around a unit of work (see reset_api_call_counts/
+# get_api_call_counts) to measure real elapsed-time/call-count data for
+# it, e.g. batch_evaluator.py's per-run history log. Global rather than
+# scoped to one caller since that's the simplest thing that works given
+# this app's existing "one thing running at a time" design (--max-instances=1,
+# the single-process JOBS/QUALITY_JOBS singletons) - if two features that
+# both hit these call sites ever run genuinely concurrently in the same
+# process, their counts would mix; not a concern under that existing
+# assumption, but worth knowing if it's ever violated.
+_api_call_counts_lock = threading.Lock()
+_api_call_counts = {"streetview": 0, "vision": 0}
+
+
+def reset_api_call_counts() -> None:
+    with _api_call_counts_lock:
+        _api_call_counts["streetview"] = 0
+        _api_call_counts["vision"] = 0
+
+
+def get_api_call_counts() -> dict:
+    with _api_call_counts_lock:
+        return dict(_api_call_counts)
+
+
+def _count_api_call(kind: str) -> None:
+    with _api_call_counts_lock:
+        _api_call_counts[kind] += 1
+
 
 def _throttle_streetview_call() -> None:
     """Blocks just long enough to keep consecutive Street View API calls
     (across metadata and image requests alike) at least
     STREETVIEW_MIN_INTERVAL_S apart, to avoid bursting past the API's rate
     limit and triggering transient errors from firing requests back to
-    back with no pacing."""
+    back with no pacing. Also the single choke point every real (not
+    cache-hit) Street View call goes through, so it doubles as where
+    _count_api_call("streetview") happens."""
     global _last_streetview_call_ts
+    _count_api_call("streetview")
     with _streetview_throttle_lock:
         now = time.monotonic()
         wait = STREETVIEW_MIN_INTERVAL_S - (now - _last_streetview_call_ts)
@@ -826,6 +859,7 @@ def _get_ocr_data(vision_client: vision.ImageAnnotatorClient, image_path: Path, 
     content = image_path.read_bytes()
     with Image.open(image_path) as im:
         img_h = im.height
+    _count_api_call("vision")
     response = vision_client.text_detection(image=vision.Image(content=content))
     if response.error.message:
         print(f"  Vision API error on {image_path.name}: {response.error.message}", file=sys.stderr)

@@ -151,11 +151,7 @@
         <div><div class="stat-value" id="ev-est-time" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated time to completion</div></div>
         <div><div class="stat-value" id="ev-est-calls" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Street View + Vision calls</div></div>
       </div>
-      <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;">
-        Rough, not a quote: assumes ~3 walked positions/segment on average when walking segments (real segments
-        vary in length), Street View ~$7/1000 &amp; Vision ~$1.50/1000 requests (check your actual billing tier),
-        and the ~100ms global Street View pacing that applies regardless of concurrency (see README).
-      </p>
+      <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;" id="ev-est-basis">-</p>
     </div>
 
     <p style="margin-top:14px;"><button type="submit">Start batch run</button></p>
@@ -165,6 +161,7 @@
 <script>
 (function () {
   const ids = ['segment_count', 'concurrency', 'walk_segment', 'side_mode', 'headings'];
+  const historyStats = {{ history_stats | tojson }};
   const STREETVIEW_RATE_PER_1000 = 7.00;
   const VISION_RATE_PER_1000 = 1.50;
   const STREETVIEW_MIN_INTERVAL_S = 0.1;
@@ -180,6 +177,17 @@
     return (seconds / 3600).toFixed(1) + ' hr';
   }
 
+  // Prefer a history bucket that actually matches this form's walk/side/
+  // headings config (see batch_evaluator.run_history_stats); fall back to
+  // the pooled "overall" bucket (walk_segment===null) when there's no
+  // exact match, and to a hardcoded guess when there's no history at all.
+  function findHistoryMatch(walkSegment, sideMode, headingsCount) {
+    const exact = historyStats.find(h => h.walk_segment === walkSegment && h.side_mode === sideMode && h.headings_count === headingsCount);
+    if (exact) return {stats: exact, exact: true};
+    const overall = historyStats.find(h => h.walk_segment === null);
+    return overall ? {stats: overall, exact: false} : null;
+  }
+
   function updateEstimate() {
     const segmentCount = Math.max(0, parseInt(document.getElementById('segment_count').value) || 0);
     const concurrency = Math.max(1, parseInt(document.getElementById('concurrency').value) || 1);
@@ -187,28 +195,41 @@
     const sideMode = document.getElementById('side_mode').value;
     const headingsCount = document.getElementById('headings').value.split(',').map(s => s.trim()).filter(Boolean).length || 1;
 
-    const sideMultiplier = {center: 1, left: 1, right: 1, sides: 2, both: 3}[sideMode] || 1;
-    const positionsPerSegment = (walkSegment ? TYPICAL_POSITIONS_WHEN_WALKED : 1) * sideMultiplier;
+    const match = findHistoryMatch(walkSegment, sideMode, headingsCount);
+    let streetviewCalls, visionCalls, estSeconds, basisText;
 
-    const streetviewCallsPerPosition = 1 + headingsCount; // 1 coverage check + 1 image fetch per heading
-    const visionCallsPerPosition = headingsCount; // 1 OCR call per fetched image
+    if (match) {
+      const st = match.stats;
+      streetviewCalls = segmentCount * st.streetview_calls_per_segment;
+      visionCalls = segmentCount * st.vision_calls_per_segment;
+      const totalCalls = streetviewCalls + visionCalls;
+      estSeconds = (totalCalls * st.worker_seconds_per_call) / concurrency;
+      basisText = `Based on ${st.sample_count} past run(s) totaling ${st.segment_count.toLocaleString()} real segment(s)` +
+        (match.exact ? ' with this same config.' : ' (no run yet with this exact config - using the overall average across past runs).');
+    } else {
+      // No usable history yet at all - fall back to a rough physics-based
+      // guess (see README) until at least one real run exists to learn from.
+      const sideMultiplier = {center: 1, left: 1, right: 1, sides: 2, both: 3}[sideMode] || 1;
+      const positionsPerSegment = (walkSegment ? TYPICAL_POSITIONS_WHEN_WALKED : 1) * sideMultiplier;
+      const streetviewCallsPerPosition = 1 + headingsCount; // 1 coverage check + 1 image fetch per heading
+      const visionCallsPerPosition = headingsCount; // 1 OCR call per fetched image
+      streetviewCalls = segmentCount * positionsPerSegment * streetviewCallsPerPosition;
+      visionCalls = segmentCount * positionsPerSegment * visionCallsPerPosition;
+      // Street View calls are globally rate-limited (STREETVIEW_MIN_INTERVAL_S
+      // apart) regardless of concurrency - that's the floor this guess uses.
+      const streetviewTimeSeconds = streetviewCalls * STREETVIEW_MIN_INTERVAL_S;
+      const visionTimeSeconds = (visionCalls * VISION_LATENCY_S) / concurrency;
+      estSeconds = Math.max(streetviewTimeSeconds, visionTimeSeconds);
+      basisText = 'No run history yet - this is a rough formula-based guess, not measured. It will use real data once at least one run completes.';
+    }
 
-    const streetviewCalls = segmentCount * positionsPerSegment * streetviewCallsPerPosition;
-    const visionCalls = segmentCount * positionsPerSegment * visionCallsPerPosition;
     const totalCalls = streetviewCalls + visionCalls;
-
     const estCost = (streetviewCalls / 1000) * STREETVIEW_RATE_PER_1000 + (visionCalls / 1000) * VISION_RATE_PER_1000;
-
-    // Street View calls are globally rate-limited (STREETVIEW_MIN_INTERVAL_S
-    // apart) regardless of concurrency - that's the real floor. Vision calls
-    // overlap across `concurrency` workers.
-    const streetviewTimeSeconds = streetviewCalls * STREETVIEW_MIN_INTERVAL_S;
-    const visionTimeSeconds = (visionCalls * VISION_LATENCY_S) / concurrency;
-    const estSeconds = Math.max(streetviewTimeSeconds, visionTimeSeconds);
 
     document.getElementById('ev-est-cost').textContent = segmentCount ? '~' + fmtMoney(estCost) : '-';
     document.getElementById('ev-est-time').textContent = segmentCount ? '~' + fmtTime(estSeconds) : '-';
     document.getElementById('ev-est-calls').textContent = segmentCount ? '~' + Math.round(totalCalls).toLocaleString() : '-';
+    document.getElementById('ev-est-basis').textContent = segmentCount ? basisText : '-';
   }
 
   ids.forEach(id => {

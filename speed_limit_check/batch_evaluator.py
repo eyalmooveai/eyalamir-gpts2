@@ -38,6 +38,7 @@ import csv as csv_module
 import dataclasses
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,7 +59,9 @@ from find_bad_speed_limit import (
     fetch_candidates,
     gcs_cache_pull,
     gcs_cache_push,
+    get_api_call_counts,
     load_keys_file,
+    reset_api_call_counts,
     table_name,
 )
 
@@ -159,6 +162,77 @@ def read_status(batch_id: str) -> Optional[dict]:
         return None
 
 
+def run_history_stats() -> list[dict]:
+    """Empirical per-segment call rates and per-call timing, learned from
+    every completed run's *real* measured usage (elapsed_seconds,
+    actual_streetview_calls, actual_vision_calls - see run_batch) rather
+    than a guessed formula. One bucket per distinct (walk_segment,
+    side_mode, headings_count) config actually run, plus one overall
+    bucket pooling everything, for a config with no exact match yet - the
+    launch form's estimator uses whichever's the best available match.
+    Runs from before this was tracked (no elapsed_seconds recorded) are
+    skipped, not treated as zero.
+    """
+    samples = []
+    for b in list_batches():
+        s = read_status(b["batch_id"])
+        if not s or s.get("run_status") not in ("done", "cancelled"):
+            continue
+        if not s.get("done_count") or not s.get("elapsed_seconds"):
+            continue
+        total_calls = (s.get("actual_streetview_calls") or 0) + (s.get("actual_vision_calls") or 0)
+        if total_calls <= 0:
+            continue
+        cfg = s.get("config") or {}
+        samples.append({
+            "walk_segment": cfg.get("walk_segment"),
+            "side_mode": cfg.get("side_mode"),
+            "headings_count": len(cfg.get("headings") or []),
+            "done_count": s["done_count"],
+            "concurrency": s.get("concurrency") or cfg.get("concurrency") or 1,
+            "elapsed_seconds": s["elapsed_seconds"],
+            "streetview_calls": s.get("actual_streetview_calls") or 0,
+            "vision_calls": s.get("actual_vision_calls") or 0,
+        })
+
+    if not samples:
+        return []
+
+    def aggregate(rows: list[dict]) -> Optional[dict]:
+        n = sum(r["done_count"] for r in rows)
+        total_calls = sum(r["streetview_calls"] + r["vision_calls"] for r in rows)
+        if n <= 0 or total_calls <= 0:
+            return None
+        # "Worker-seconds per call": elapsed time already spread across
+        # that run's own concurrency, normalized per call - so it can be
+        # projected onto a *different* concurrency for a new estimate
+        # (predicted_seconds = new_total_calls * this / new_concurrency).
+        worker_seconds_per_call = sum(r["elapsed_seconds"] * r["concurrency"] for r in rows) / total_calls
+        return {
+            "sample_count": len(rows),
+            "segment_count": n,
+            "streetview_calls_per_segment": sum(r["streetview_calls"] for r in rows) / n,
+            "vision_calls_per_segment": sum(r["vision_calls"] for r in rows) / n,
+            "worker_seconds_per_call": worker_seconds_per_call,
+        }
+
+    buckets: dict[tuple, list[dict]] = {}
+    for r in samples:
+        key = (r["walk_segment"], r["side_mode"], r["headings_count"])
+        buckets.setdefault(key, []).append(r)
+
+    result = []
+    for (walk_segment, side_mode, headings_count), rows in buckets.items():
+        agg = aggregate(rows)
+        if agg:
+            result.append({"walk_segment": walk_segment, "side_mode": side_mode, "headings_count": headings_count, **agg})
+
+    overall = aggregate(samples)
+    if overall:
+        result.append({"walk_segment": None, "side_mode": None, "headings_count": None, **overall})
+    return result
+
+
 def _write_status(batch_id: str, status: dict) -> None:
     path = _status_path(batch_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -228,6 +302,18 @@ def _sync_images_to_gcs(out_root: Path, log=lambda msg: None) -> None:
         gcs_cache_push(image_path, log=log)
 
 
+def _finalize_usage(status: dict, run_started_monotonic: float) -> None:
+    """Records this run's real elapsed time and actual API call counts
+    into its status - called at every exit point of run_batch (done,
+    cancelled, or error) so even a failed/cancelled run leaves behind
+    real partial-usage data for run_history_stats() to learn from,
+    rather than only ever recording successful completions."""
+    status["elapsed_seconds"] = time.monotonic() - run_started_monotonic
+    counts = get_api_call_counts()
+    status["actual_streetview_calls"] = counts["streetview"]
+    status["actual_vision_calls"] = counts["vision"]
+
+
 def _worker(i: int, n: int, row, config: BatchConfig, api_key: str, vision_client, out_root: Path, cancel_event: threading.Event):
     if cancel_event.is_set():
         return i, None, None, None
@@ -253,6 +339,7 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
     thread (see app.py) - never raises, all errors land in the durable
     status instead."""
     started_at = _now_iso()
+    run_started_monotonic = time.monotonic()
     status = {
         "batch_id": batch_id, "label": config.label, "state": config.state,
         "year": config.year, "month": config.month, "project": config.project,
@@ -267,6 +354,15 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
         # a new model") - every selection-criteria/walk/side/heading/fov
         # setting this run actually used, not just the headline label.
         "config": dataclasses.asdict(config),
+        # Real, measured usage - not a formula's guess. elapsed_seconds is
+        # wall-clock from the top of this function (BigQuery candidates
+        # query included, since that's real time too); the call counts are
+        # actual billed API calls (cache hits never reach those call
+        # sites - see find_bad_speed_limit.get_api_call_counts). This is
+        # what run_history_stats() below learns from for future estimates.
+        "elapsed_seconds": None,
+        "actual_streetview_calls": 0,
+        "actual_vision_calls": 0,
     }
     _write_status(batch_id, status)
 
@@ -299,6 +395,7 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
         vision_client = vision.ImageAnnotatorClient()
         results_lock = threading.Lock()
         csv_rows: list[dict] = []
+        reset_api_call_counts()
 
         with ThreadPoolExecutor(max_workers=max(1, config.concurrency)) as pool:
             futures = [
@@ -330,8 +427,11 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                     # Written periodically, not on every single completion -
                     # frequent enough for a "switch back in" check to see
                     # fresh progress, without a GCS round-trip per segment
-                    # under high concurrency.
+                    # under high concurrency. Usage refreshed here too, so
+                    # someone watching a long run sees real elapsed
+                    # time/call counts climb, not just at the very end.
                     if status["done_count"] % 10 == 0 or status["done_count"] == n:
+                        _finalize_usage(status, run_started_monotonic)
                         _write_status(batch_id, status)
 
         _write_csv(batch_id, csv_rows)
@@ -344,14 +444,17 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
             if status["run_status"] == "cancelled"
             else f"Done. {status['matched_count']} sign(s) found out of {status['done_count']} segment(s) checked."
         )
+        _finalize_usage(status, run_started_monotonic)
         _write_status(batch_id, status)
     except (NoUsableApiKey, StreetViewAuthError, ValueError) as e:
         status["run_status"] = "error"
         status["error"] = str(e)
         status["finished_at"] = _now_iso()
+        _finalize_usage(status, run_started_monotonic)
         _write_status(batch_id, status)
     except Exception as e:
         status["run_status"] = "error"
         status["error"] = f"{type(e).__name__}: {e}"
         status["finished_at"] = _now_iso()
+        _finalize_usage(status, run_started_monotonic)
         _write_status(batch_id, status)

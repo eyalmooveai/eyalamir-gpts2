@@ -407,18 +407,46 @@ regardless of how many workers are running. Higher concurrency mostly
 buys overlap on Vision OCR and network latency between segments, which is
 still a real speedup, just a safer one than true unpaced parallelism.
 
+### The cost/time estimate, and why it gets more accurate over time
+
+The launch form shows an estimated cost, time to completion, and total
+Street View+Vision call count, updating live as you change the form.
+The first time you ever use this page, there's no run history yet, so it
+falls back to a rough formula-based guess (labeled as such) - which can
+be quite wrong, since it assumes a fixed "typical" number of walked
+positions per segment that real segments don't actually match.
+
+Every completed (or cancelled) run records its **real measured usage** -
+actual elapsed wall-clock time and actual Street View/Vision call counts
+(`find_bad_speed_limit.get_api_call_counts()`, incremented at the exact
+call sites that make a real billed request - a cache hit never reaches
+them, so this only counts calls that actually happened, not attempts).
+`batch_evaluator.run_history_stats()` aggregates every completed run's
+real numbers into empirical per-segment call rates and per-call timing,
+bucketed by (walk_segment, side_mode, headings count) - and the launch
+form uses whichever bucket matches its current settings once at least
+one such run exists, falling back to the pooled average across all past
+runs for a config with no exact match yet, and only reaching for the
+rough formula guess when there's no history at all. The estimator box
+always says which of these it used ("based on N past run(s)... with this
+same config" vs. "...using the overall average" vs. "no run history yet
+- rough guess"), so it's never a mystery how much to trust a given
+number. In short: **the more this page gets used, the better its own
+estimates get** - there's nothing to configure, it just learns.
+
 ### Checking on a run
 
 Every run gets a stable URL (`/speed-limits-evaluator/<batch_id>`)
-showing live progress (segments checked, signs found, errors), a
-per-segment results table, and a Cancel button while it's running. This
-page - and the run's entry in `/speed-limits-evaluator`'s history table -
-work from **durably persisted status**, not just an in-memory job you
-have to keep a browser tab open for: status is written to
-`output/_batch_jobs/<batch_id>/status.json` (and mirrored to GCS, same as
-everywhere else in this app) as the run progresses, so navigating back
-later - even in a different browser, even after some time - shows real
-state, not a stale in-memory snapshot.
+showing live progress (segments checked, signs found, errors, and - live
+- the real elapsed time and real Street View+Vision call count so far,
+the same numbers that feed the estimator above), a per-segment results
+table, and a Cancel button while it's running. This page - and the run's
+entry in `/speed-limits-evaluator`'s history table - work from **durably
+persisted status**, not just an in-memory job you have to keep a browser
+tab open for: status is written to `output/_batch_jobs/<batch_id>/status.json`
+(and mirrored to GCS, same as everywhere else in this app) as the run
+progresses, so navigating back later - even in a different browser, even
+after some time - shows real state, not a stale in-memory snapshot.
 
 This does **not** make a run resumable across a Cloud Run instance
 restart, though - if the one instance running it dies mid-batch, that

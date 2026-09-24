@@ -22,7 +22,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
-from batch_evaluator import BatchConfig, csv_path_if_exists, list_batches, read_status, run_batch
+from batch_evaluator import BatchConfig, csv_path_if_exists, list_batches, read_status, run_batch, run_history_stats
 from find_bad_speed_limit import (
     CRITERIA_DEFS,
     DEFAULT_DATASET,
@@ -658,6 +658,7 @@ def evaluator_index():
         default_walk_segment_spacing_m=WEB_DEFAULT_WALK_SEGMENT_SPACING_M,
         default_side_mode=WEB_DEFAULT_SIDE_MODE,
         default_auto_side_offset=WEB_DEFAULT_AUTO_SIDE_OFFSET,
+        history_stats=run_history_stats(),
     )
 
 
