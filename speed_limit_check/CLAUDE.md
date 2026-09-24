@@ -41,6 +41,24 @@
   `dataclasses.asdict(QualityFilters)`) includes zip_codes/counties -
   don't let a new caching path forget them, or a filtered and
   unfiltered request could wrongly share a cached result.
+- **"Preview candidates on map"** (Sign Checker's `index.html` and the
+  Evaluator's `evaluator.html`, both near their submit button) - a
+  preview-only projection of the roads the current form's state/
+  criteria/zip/county filters would select, before committing to an
+  actual run. `app.py`'s shared `_preview_candidates_response()` backs
+  both `/sign-checker/preview-candidates` and
+  `/speed-limits-evaluator/preview-candidates` - the same
+  `fetch_candidates()` call a real run makes, capped at
+  `PREVIEW_MAX_SEGMENTS` (300, independent of the real run's own
+  segment_count/candidates cap) so the preview query and map stay cheap
+  and responsive regardless of how large the actual run is configured
+  for. Only the fields that affect *which* segments get selected are
+  read (state/year/month/project/dataset/criteria/zip_codes/counties) -
+  walk/side/heading/fov settings don't matter here, they only affect how
+  each already-selected segment is later checked. This is explicitly
+  preview-only, not a picker: clicking a marker just shows that
+  candidate's info, there's no click-to-select/deselect - a deliberate
+  scope decision, not a missing feature.
 - **Speed-Limits Evaluator** (`/speed-limits-evaluator`,
   `batch_evaluator.py`): runs up to `segment_count` (default 1000)
   candidate segments for one state through the *same* per-segment logic

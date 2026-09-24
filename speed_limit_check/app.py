@@ -47,12 +47,16 @@ from find_bad_speed_limit import (
     MAX_FOV,
     MIN_FOV,
     SIDE_MODES,
+    STATE_RE,
     NoUsableApiKey,
     StreetViewAuthError,
+    _validate_identifier,
+    fetch_candidates,
     gcs_cache_pull,
     load_keys_file,
     parse_headings,
     run_pipeline,
+    table_name,
 )
 from quality_metrics import (
     DEFAULT_INFER_FIELD,
@@ -122,6 +126,13 @@ MAX_EVALUATOR_CONCURRENCY = 30  # a sanity ceiling on the form, not a hard API l
 # independent of, and on top of, DAILY_COST_CAP_USD below.
 MAX_EVALUATOR_SEGMENT_COUNT = MAX_SEGMENT_COUNT
 EVALUATOR_MAX_JOBS_IN_MEMORY = 20  # cap on live threading.Event registry - old ones are done, don't need one
+# Cap on the "preview these candidates on a map before running" endpoints
+# (evaluator_preview_candidates/sign_checker_preview_candidates) -
+# independent of segment_count/candidates, which can ask for up to 1000/50
+# respectively: a preview is for eyeballing what a run would cover, not
+# for actually processing, so it stays cheap and the map stays responsive
+# regardless of how large a real run is configured for.
+PREVIEW_MAX_SEGMENTS = 300
 
 # Load once at startup (not just inside run_pipeline's background thread) so
 # GOOGLE_MAPS_API_KEY is available for embedding in a page - e.g. the
@@ -199,6 +210,47 @@ def _parse_csv_field(raw: str, *, upper: bool = False) -> tuple[str, ...]:
     Actual validity (5-digit zip, real county name) is checked downstream
     by find_bad_speed_limit.build_geo_filter_sql, not here."""
     return tuple((s.strip().upper() if upper else s.strip()) for s in raw.split(",") if s.strip())
+
+
+def _preview_candidates_response(
+    project: str, dataset: str, state: str, year: str, month: str,
+    criteria: dict, zip_codes: tuple[str, ...], counties: tuple[str, ...], requested_count: int,
+):
+    """Shared body of the "preview these candidates on a map before
+    running" endpoints (sign checker + Evaluator launch pages) - the same
+    fetch_candidates() call a real run would make, just capped at
+    PREVIEW_MAX_SEGMENTS and returning JSON instead of kicking off a job.
+    Walk/side/heading/fov settings don't affect *which* segments get
+    selected (only how each one is later checked), so this only needs
+    state/year/month/project/dataset/criteria/zip_codes/counties/count -
+    a real subset of what evaluator_start()/run() read from their forms."""
+    if not (state and year and month):
+        return jsonify({"error": "State, year, and month are all required."}), 400
+    preview_limit = max(1, min(requested_count, PREVIEW_MAX_SEGMENTS))
+    try:
+        _validate_identifier(state, STATE_RE, "state (expected 2 letters, e.g. NC)")
+        table = table_name(state, year, month)
+        candidates = fetch_candidates(
+            project, dataset, table, criteria, preview_limit, state=state, zip_codes=zip_codes, counties=counties,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    points = [
+        {
+            "segment_id": c.get("here_segment_id"), "lat": c.get("centroid_lat"), "lon": c.get("centroid_lon"),
+            "street_name": c.get("street_name"), "functional_class": c.get("functional_class"),
+        }
+        for c in candidates
+    ]
+    return jsonify({
+        "points": points,
+        "shown": len(points),
+        "requested": requested_count,
+        "truncated": requested_count > preview_limit or len(points) >= preview_limit,
+    })
 
 
 def _new_job(state: str, year: str, month: str, segment_id: str | None, walk_all: bool, walk_segment: bool) -> str:
@@ -540,6 +592,23 @@ def sign_checker():
     )
 
 
+@app.route("/sign-checker/preview-candidates", methods=["POST"])
+def sign_checker_preview_candidates():
+    project = request.form.get("project", "").strip() or DEFAULT_PROJECT
+    dataset = request.form.get("dataset", "").strip() or DEFAULT_DATASET
+    try:
+        requested_count = max(1, int(request.form.get("candidates") or WEB_DEFAULT_CANDIDATES))
+    except ValueError:
+        requested_count = WEB_DEFAULT_CANDIDATES
+    return _preview_candidates_response(
+        project, dataset,
+        request.form.get("state", "").strip().upper(), request.form.get("year", "").strip(), request.form.get("month", "").strip(),
+        _read_criteria_from_form(request.form),
+        _parse_csv_field(request.form.get("zip_codes", "")), _parse_csv_field(request.form.get("counties", "")),
+        requested_count,
+    )
+
+
 @app.route("/run", methods=["POST"])
 def run():
     state = request.form.get("state", "").strip().upper()
@@ -731,6 +800,23 @@ def evaluator_index():
         vision_rate_per_1000=VISION_RATE_PER_1000,
         daily_cost_cap=DAILY_COST_CAP_USD,
         today_spent=daily_spend_for_user(_requester_email()),
+    )
+
+
+@app.route("/speed-limits-evaluator/preview-candidates", methods=["POST"])
+def evaluator_preview_candidates():
+    project = request.form.get("project", "").strip() or DEFAULT_PROJECT
+    dataset = request.form.get("dataset", "").strip() or DEFAULT_DATASET
+    try:
+        requested_count = max(1, min(MAX_EVALUATOR_SEGMENT_COUNT, int(request.form.get("segment_count") or EVALUATOR_DEFAULT_SEGMENT_COUNT)))
+    except ValueError:
+        requested_count = EVALUATOR_DEFAULT_SEGMENT_COUNT
+    return _preview_candidates_response(
+        project, dataset,
+        request.form.get("state", "").strip().upper(), request.form.get("year", "").strip(), request.form.get("month", "").strip(),
+        _read_criteria_from_form(request.form),
+        _parse_csv_field(request.form.get("zip_codes", "")), _parse_csv_field(request.form.get("counties", "")),
+        requested_count,
     )
 
 

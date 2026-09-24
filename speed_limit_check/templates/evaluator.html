@@ -1,4 +1,8 @@
 {% extends "layout.html" %}
+{% block extra_head %}
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+{% endblock %}
 {% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / <a href="/speed-limits">Speed-Limits Quality</a> / Speed-Limits Evaluator</p>{% endblock %}
 {% block heading %}Speed-Limits Evaluator{% endblock %}
 {% block subtitle %}Batch-check up to {{ default_segment_count }} road segments' signs at once for a state - concurrent, durable, exportable{% endblock %}
@@ -59,7 +63,7 @@
 
 <div class="card">
   <h3 style="margin-top:0;">Start a new run</h3>
-  <form method="post" action="/speed-limits-evaluator/start">
+  <form id="evaluator-form" method="post" action="/speed-limits-evaluator/start">
     <label for="label">Label (optional - blank auto-generates one from state/month/date)</label>
     <input type="text" id="label" name="label" placeholder="e.g. nc-aug-2026-baseline">
 
@@ -172,8 +176,13 @@
     <label for="fov">Camera zoom (field of view, {{ min_fov }}-{{ max_fov }})</label>
     <input type="number" id="fov" name="fov" value="{{ default_fov }}" min="{{ min_fov }}" max="{{ max_fov }}" style="max-width:120px;">
 
-    <p style="margin-top:18px;"><button type="submit">Start batch run</button></p>
+    <p style="margin-top:18px;">
+      <button type="button" class="btn-secondary" id="preview-map-btn" onclick="previewCandidatesOnMap()">Preview candidates on map</button>
+      <button type="submit">Start batch run</button>
+    </p>
     <p style="color:var(--muted); font-size:0.78rem; margin:6px 0 0;">See the live cost/time estimate above, near the past runs at the top of this page - it updates as you change the settings here.</p>
+    <p id="preview-map-message" style="color:var(--muted); font-size:0.82rem; margin:10px 0 0; display:none;"></p>
+    <div id="preview-map" style="height:420px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
   </form>
 </div>
 
@@ -268,6 +277,74 @@
     el.addEventListener('change', updateEstimate);
   });
   updateEstimate();
+})();
+
+// --- "Preview candidates on map" - a projection of the roads the
+// current form's state/criteria/zip/county filters would select, before
+// committing to an actual run (see app.py's evaluator_preview_candidates
+// - the same fetch_candidates() call a real run makes, capped at
+// PREVIEW_MAX_SEGMENTS). Preview only - clicking a marker just shows
+// that candidate's info, it doesn't select/deselect it.
+(function () {
+  let previewMap = null;
+  let previewLayer = null;
+  const PREVIEW_MARKER_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2f6fed';
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  window.previewCandidatesOnMap = function () {
+    const btn = document.getElementById('preview-map-btn');
+    const msgEl = document.getElementById('preview-map-message');
+    const mapEl = document.getElementById('preview-map');
+    btn.disabled = true;
+    msgEl.style.display = 'block';
+    msgEl.textContent = 'Loading preview...';
+    mapEl.style.display = 'none';
+
+    const form = document.getElementById('evaluator-form');
+    fetch('/speed-limits-evaluator/preview-candidates', { method: 'POST', body: new FormData(form) })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        btn.disabled = false;
+        if (!ok || data.error) {
+          msgEl.textContent = 'Could not load preview: ' + (data.error || 'unknown error');
+          return;
+        }
+        const points = data.points || [];
+        msgEl.textContent = points.length
+          ? `Showing ${data.shown} candidate(s)${data.truncated ? ` (capped for preview - a real run would use its own ${data.requested} limit)` : ''}. This is a preview of what a run would select, not a live-updating list.`
+          : 'No candidates matched these filters.';
+        if (!points.length) return;
+
+        mapEl.style.display = 'block';
+        if (!previewMap) {
+          previewMap = L.map('preview-map', { scrollWheelZoom: false });
+          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(previewMap);
+          previewLayer = L.layerGroup().addTo(previewMap);
+        }
+        previewLayer.clearLayers();
+        const coords = [];
+        points.forEach(p => {
+          const lat = parseFloat(p.lat), lon = parseFloat(p.lon);
+          if (Number.isNaN(lat) || Number.isNaN(lon)) return;
+          coords.push([lat, lon]);
+          const marker = L.circleMarker([lat, lon], { radius: 5, color: '#fff', weight: 1, fillColor: PREVIEW_MARKER_COLOR, fillOpacity: 0.85 });
+          const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`];
+          if (p.street_name) bits.push(escapeHtml(p.street_name));
+          if (p.functional_class !== null && typeof p.functional_class !== 'undefined') bits.push(`functional class ${p.functional_class}`);
+          marker.bindPopup(bits.join('<br>'));
+          marker.addTo(previewLayer);
+        });
+        setTimeout(() => previewMap.invalidateSize(), 0);
+        if (coords.length) previewMap.fitBounds(coords, { padding: [24, 24], maxZoom: 15 });
+      })
+      .catch(err => {
+        btn.disabled = false;
+        msgEl.textContent = 'Could not load preview: ' + err.message;
+      });
+  };
 })();
 </script>
 {% endblock %}

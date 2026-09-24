@@ -295,6 +295,18 @@ state(s) are already selected in that tool - pick states too if you
 mean one specific county and its name is common. Zip codes are already
 globally unique and don't need this.
 
+### Previewing candidates on a map
+
+The Sign Checker and Evaluator launch pages both have a "Preview
+candidates on map" button, next to their submit button - it shows the
+roads the current state/criteria/zip/county filters would actually
+select, on a map, before you commit to a real run. This is a preview,
+not a picker: it doesn't let you click individual roads to include or
+exclude them, and the candidates an actual run picks are still decided
+by the same ranked-query logic as always. It's capped at 300 segments
+regardless of how many the real run is configured for, so the preview
+stays fast even for a 1000-segment run.
+
 ## Speed-Limits Quality
 
 `/speed-limits` is a nationwide, no-imagery, table-only counterpart to the
