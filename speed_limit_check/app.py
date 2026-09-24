@@ -22,7 +22,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
-from batch_evaluator import BatchConfig, csv_path_if_exists, list_batches, read_status, run_batch, run_history_stats
+from batch_evaluator import BatchConfig, breakdown_by_functional_class, csv_path_if_exists, list_batches, read_status, run_batch, run_history_stats
 from find_bad_speed_limit import (
     CRITERIA_DEFS,
     DEFAULT_DATASET,
@@ -738,7 +738,12 @@ def evaluator_status_page(batch_id):
     status = read_status(batch_id)
     if not status:
         return render_template("error.html", message="Unknown or expired batch run.", log=[])
-    return render_template("evaluator_status.html", batch_id=batch_id, status=status)
+    return render_template(
+        "evaluator_status.html",
+        batch_id=batch_id,
+        status=status,
+        fc_breakdown=breakdown_by_functional_class(status.get("results") or []),
+    )
 
 
 @app.route("/speed-limits-evaluator/<batch_id>/status")

@@ -32,6 +32,26 @@
 </div>
 
 <div class="card">
+  <h3 style="margin-top:0;">Breakdown by functional class</h3>
+  <table>
+    <tr><th>Functional class</th><th>Segments checked</th><th>Signs found</th><th>No readable sign</th><th>No coverage</th><th>Errors</th><th>Match rate</th></tr>
+    <tbody id="ev-fc-breakdown-body">
+      {% for b in fc_breakdown %}
+        <tr>
+          <td>{{ b.functional_class }}</td>
+          <td>{{ b.total }}</td>
+          <td>{{ b.matched }}</td>
+          <td>{{ b.no_sign_count }}</td>
+          <td>{{ b.no_coverage_count }}</td>
+          <td>{{ b.error_count }}</td>
+          <td>{{ "%.1f"|format(b.match_rate_pct) }}%</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
   <h3 style="margin-top:0;">Run configuration</h3>
   <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Recorded with this run so a later run over the same streets can be compared fairly - same criteria/walk settings, or a deliberately different set.</p>
   {% set cfg = status.config %}
@@ -51,15 +71,24 @@
 
 <div class="card">
   <h3 style="margin-top:0;">Results</h3>
-  <div style="max-height:480px; overflow-y:auto;">
+  <div style="max-height:480px; overflow:auto;">
     <table>
-      <tr><th>Segment</th><th>Status</th><th>Matched speed (mph)</th></tr>
+      <tr>
+        <th>Segment</th><th>Functional class</th><th>Status</th><th>Matched (mph)</th>
+        <th>OSM (mph)</th><th>HERE (mph)</th><th>Inferred (mph)</th><th>Avg observed (mph)</th><th>Freeflow (mph)</th>
+      </tr>
       <tbody id="ev-results-body">
         {% for r in status.results %}
           <tr>
             <td><code>{{ r.segment_id }}</code></td>
+            <td>{{ r.functional_class if r.functional_class is defined else '' }}</td>
             <td>{{ r.status }}{% if r.error %}: {{ r.error }}{% endif %}</td>
             <td>{{ r.matched_speed_mph if r.matched_speed_mph is defined else '' }}</td>
+            <td>{{ r.speed_limit_osm_mph if r.speed_limit_osm_mph is defined else '' }}</td>
+            <td>{{ r.speed_limit_here_mph if r.speed_limit_here_mph is defined else '' }}</td>
+            <td>{{ r.speed_limit_infer_mph if r.speed_limit_infer_mph is defined else '' }}</td>
+            <td>{{ r.speed_AVG_mph if r.speed_AVG_mph is defined else '' }}</td>
+            <td>{{ r.freeflow_mph if r.freeflow_mph is defined else '' }}</td>
           </tr>
         {% endfor %}
       </tbody>
@@ -98,11 +127,36 @@
       badgeEl.innerHTML = '<span class="badge err">Error</span>';
     }
 
+    const cell = v => (typeof v !== 'undefined' && v !== null) ? v : '';
     const tbody = document.getElementById('ev-results-body');
     tbody.innerHTML = (data.results || []).map(r => {
       const statusText = r.status + (r.error ? ': ' + escapeHtml(r.error) : '');
-      const mph = (typeof r.matched_speed_mph !== 'undefined') ? r.matched_speed_mph : '';
-      return `<tr><td><code>${escapeHtml(r.segment_id)}</code></td><td>${statusText}</td><td>${mph}</td></tr>`;
+      return `<tr><td><code>${escapeHtml(r.segment_id)}</code></td><td>${cell(r.functional_class)}</td><td>${statusText}</td>` +
+        `<td>${cell(r.matched_speed_mph)}</td><td>${cell(r.speed_limit_osm_mph)}</td><td>${cell(r.speed_limit_here_mph)}</td>` +
+        `<td>${cell(r.speed_limit_infer_mph)}</td><td>${cell(r.speed_AVG_mph)}</td><td>${cell(r.freeflow_mph)}</td></tr>`;
+    }).join('');
+
+    // Breakdown by functional class - mirrors batch_evaluator.breakdown_by_functional_class
+    const fcBuckets = {};
+    (data.results || []).forEach(r => {
+      const fc = (typeof r.functional_class !== 'undefined' && r.functional_class !== null) ? r.functional_class : '(unknown)';
+      if (!fcBuckets[fc]) fcBuckets[fc] = {functional_class: fc, total: 0, matched: 0, no_sign_count: 0, no_coverage_count: 0, error_count: 0};
+      const b = fcBuckets[fc];
+      b.total += 1;
+      if (r.status === 'match') b.matched += 1;
+      else if (r.status === 'no_sign_read') b.no_sign_count += 1;
+      else if (r.status === 'no_coverage') b.no_coverage_count += 1;
+      else if (r.status === 'error') b.error_count += 1;
+    });
+    const fcRows = Object.values(fcBuckets).sort((a, b) => {
+      const aUnknown = a.functional_class === '(unknown)', bUnknown = b.functional_class === '(unknown)';
+      if (aUnknown !== bUnknown) return aUnknown ? 1 : -1;
+      return aUnknown ? 0 : (a.functional_class - b.functional_class);
+    });
+    document.getElementById('ev-fc-breakdown-body').innerHTML = fcRows.map(b => {
+      const rate = b.total ? (100.0 * b.matched / b.total).toFixed(1) : '0.0';
+      return `<tr><td>${b.functional_class}</td><td>${b.total}</td><td>${b.matched}</td><td>${b.no_sign_count}</td>` +
+        `<td>${b.no_coverage_count}</td><td>${b.error_count}</td><td>${rate}%</td></tr>`;
     }).join('');
 
     if (data.run_status !== 'running') {

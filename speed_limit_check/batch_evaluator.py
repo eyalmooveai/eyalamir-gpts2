@@ -162,6 +162,35 @@ def read_status(batch_id: str) -> Optional[dict]:
         return None
 
 
+def breakdown_by_functional_class(results: list[dict]) -> list[dict]:
+    """Segments-checked/matched/etc. counts grouped by functional_class,
+    from a (possibly still-growing) batch's own status["results"] list -
+    computed on the fly rather than persisted, so it's always consistent
+    with whatever `results` the caller already has (server-side initial
+    render, or the client's own poll data - see evaluator_status.html).
+    functional_class missing/null groups under "(unknown)"."""
+    buckets: dict = {}
+    for r in results:
+        fc = r.get("functional_class")
+        key = fc if fc is not None else "(unknown)"
+        b = buckets.setdefault(key, {"functional_class": key, "total": 0, "matched": 0, "no_sign_count": 0, "no_coverage_count": 0, "error_count": 0})
+        b["total"] += 1
+        if r.get("status") == "match":
+            b["matched"] += 1
+        elif r.get("status") == "no_sign_read":
+            b["no_sign_count"] += 1
+        elif r.get("status") == "no_coverage":
+            b["no_coverage_count"] += 1
+        elif r.get("status") == "error":
+            b["error_count"] += 1
+    for b in buckets.values():
+        b["match_rate_pct"] = round(100.0 * b["matched"] / b["total"], 1) if b["total"] else 0.0
+    # (unknown) sorts last - comparing it against a numeric functional_class
+    # would otherwise raise (str vs int); the tuple's first element keeps
+    # that comparison from ever happening except among same-"unknown-ness" buckets.
+    return sorted(buckets.values(), key=lambda b: (b["functional_class"] == "(unknown)", b["functional_class"]))
+
+
 def run_history_stats() -> list[dict]:
     """Empirical per-segment call rates and per-call timing, learned from
     every completed run's *real* measured usage (elapsed_seconds,
@@ -253,6 +282,25 @@ def _write_status(batch_id: str, status: dict) -> None:
         "done_count": status["done_count"],
         "matched_count": status["matched_count"],
     })
+
+
+def _row_context(row_dict: dict) -> dict:
+    """The subset of a segment's source row worth carrying per-segment in
+    status.json (results table + breakdown-by-category) - not the full
+    row (the CSV's row_json column already has that), just the fields
+    worth scanning/grouping by at a glance. Prefers the corrected
+    inferred value when the table has it, same fallback as the CSV."""
+    infer = row_dict.get("speed_limit_infer_mph_corrected")
+    if infer is None:
+        infer = row_dict.get("speed_limit_infer_mph")
+    return {
+        "functional_class": row_dict.get("functional_class"),
+        "speed_limit_osm_mph": row_dict.get("speed_limit_osm_mph"),
+        "speed_limit_here_mph": row_dict.get("speed_limit_here_mph"),
+        "speed_limit_infer_mph": infer,
+        "speed_AVG_mph": row_dict.get("speed_AVG_mph"),
+        "freeflow_mph": row_dict.get("freeflow_mph"),
+    }
 
 
 def _build_csv_row(candidate_row, attempt, match, error: Optional[str]) -> dict:
@@ -412,15 +460,19 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                     if error:
                         status["error_count"] += 1
                         seg_summary = {"segment_id": candidates[i].get("here_segment_id"), "status": "error", "error": error}
+                        seg_summary.update(_row_context(dict(candidates[i].items())))
                     elif attempt.status == "match":
                         status["matched_count"] += 1
                         seg_summary = {"segment_id": attempt.segment_id, "status": "match", "matched_speed_mph": match.reading.speed_mph}
+                        seg_summary.update(_row_context(attempt.row))
                     elif attempt.status == "no_sign_read":
                         status["no_sign_count"] += 1
                         seg_summary = {"segment_id": attempt.segment_id, "status": "no_sign_read"}
+                        seg_summary.update(_row_context(attempt.row))
                     else:
                         status["no_coverage_count"] += 1
                         seg_summary = {"segment_id": attempt.segment_id, "status": "no_coverage"}
+                        seg_summary.update(_row_context(attempt.row))
                     status["results"].append(seg_summary)
                     status["message"] = f"{status['done_count']}/{n} segments checked ({status['matched_count']} sign(s) found so far)..."
                     status["heartbeat_at"] = _now_iso()

@@ -439,14 +439,19 @@ estimates get** - there's nothing to configure, it just learns.
 Every run gets a stable URL (`/speed-limits-evaluator/<batch_id>`)
 showing live progress (segments checked, signs found, errors, and - live
 - the real elapsed time and real Street View+Vision call count so far,
-the same numbers that feed the estimator above), a per-segment results
-table, and a Cancel button while it's running. This page - and the run's
-entry in `/speed-limits-evaluator`'s history table - work from **durably
-persisted status**, not just an in-memory job you have to keep a browser
-tab open for: status is written to `output/_batch_jobs/<batch_id>/status.json`
-(and mirrored to GCS, same as everywhere else in this app) as the run
-progresses, so navigating back later - even in a different browser, even
-after some time - shows real state, not a stale in-memory snapshot.
+the same numbers that feed the estimator above), a breakdown table
+grouped by `functional_class` (segments checked/matched/no-sign/
+no-coverage/errors/match rate per class), a per-segment results table
+(functional_class plus the segment's OSM/HERE/inferred/observed-average/
+freeflow speed values alongside its match status - the same fields the
+CSV export carries), and a Cancel button while it's running. This page -
+and the run's entry in `/speed-limits-evaluator`'s history table - work
+from **durably persisted status**, not just an in-memory job you have to
+keep a browser tab open for: status is written to
+`output/_batch_jobs/<batch_id>/status.json` (and mirrored to GCS, same as
+everywhere else in this app) as the run progresses, so navigating back
+later - even in a different browser, even after some time - shows real
+state, not a stale in-memory snapshot.
 
 This does **not** make a run resumable across a Cloud Run instance
 restart, though - if the one instance running it dies mid-batch, that

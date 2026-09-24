@@ -94,6 +94,20 @@
     page is used - don't "fix" an estimate that looks off without first
     checking whether it's actually using history yet (the estimator box
     always says which basis it used).
+  - **Per-segment results carry `functional_class` plus the segment's
+    OSM/HERE/inferred/observed-average/freeflow speed values**, not just
+    segment_id/status - `batch_evaluator._row_context()` pulls these from
+    `CandidateAttempt.row` (or the raw candidate row for an `error`
+    result, which has no `attempt`) into each `status["results"]` entry.
+    `batch_evaluator.breakdown_by_functional_class()` groups those same
+    results by `functional_class` (segments checked/matched/no-sign/
+    no-coverage/errors/match rate per class) - computed on the fly from
+    `results`, not persisted separately, so it can't drift out of sync
+    with the results list it's derived from. `evaluator_status.html`
+    mirrors this exact grouping logic in JS (`render()`'s `fcBuckets`
+    block) so the live-polling view matches the server-rendered initial
+    one - if `_row_context`'s field set ever changes, update both the
+    Jinja results-table columns AND that JS block together.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -
