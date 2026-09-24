@@ -22,7 +22,20 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
-from batch_evaluator import BatchConfig, breakdown_by_functional_class, csv_path_if_exists, list_batches, read_status, run_batch, run_history_stats
+from batch_evaluator import (
+    DAILY_COST_CAP_USD,
+    MAX_SEGMENT_COUNT,
+    STREETVIEW_RATE_PER_1000,
+    VISION_RATE_PER_1000,
+    BatchConfig,
+    breakdown_by_functional_class,
+    csv_path_if_exists,
+    daily_spend_for_user,
+    list_batches,
+    read_status,
+    run_batch,
+    run_history_stats,
+)
 from find_bad_speed_limit import (
     CRITERIA_DEFS,
     DEFAULT_DATASET,
@@ -104,6 +117,10 @@ WEB_DEFAULT_CANDIDATES = 3
 EVALUATOR_DEFAULT_SEGMENT_COUNT = 1000
 EVALUATOR_DEFAULT_CONCURRENCY = 10
 MAX_EVALUATOR_CONCURRENCY = 30  # a sanity ceiling on the form, not a hard API limit
+# Hard ceiling on segments per run (see batch_evaluator.MAX_SEGMENT_COUNT,
+# the single source of truth this just re-exports for readability here) -
+# independent of, and on top of, DAILY_COST_CAP_USD below.
+MAX_EVALUATOR_SEGMENT_COUNT = MAX_SEGMENT_COUNT
 EVALUATOR_MAX_JOBS_IN_MEMORY = 20  # cap on live threading.Event registry - old ones are done, don't need one
 
 # Load once at startup (not just inside run_pipeline's background thread) so
@@ -665,6 +682,7 @@ def evaluator_index():
         default_project=DEFAULT_PROJECT,
         default_dataset=DEFAULT_DATASET,
         default_segment_count=EVALUATOR_DEFAULT_SEGMENT_COUNT,
+        max_segment_count=MAX_EVALUATOR_SEGMENT_COUNT,
         default_concurrency=EVALUATOR_DEFAULT_CONCURRENCY,
         max_concurrency=MAX_EVALUATOR_CONCURRENCY,
         default_headings=WEB_DEFAULT_HEADINGS,
@@ -677,6 +695,10 @@ def evaluator_index():
         default_side_mode=WEB_DEFAULT_SIDE_MODE,
         default_auto_side_offset=WEB_DEFAULT_AUTO_SIDE_OFFSET,
         history_stats=run_history_stats(),
+        streetview_rate_per_1000=STREETVIEW_RATE_PER_1000,
+        vision_rate_per_1000=VISION_RATE_PER_1000,
+        daily_cost_cap=DAILY_COST_CAP_USD,
+        today_spent=daily_spend_for_user(_requester_email()),
     )
 
 
@@ -693,7 +715,7 @@ def evaluator_start():
         return render_template("error.html", message="State, year, and month are all required.", log=[])
 
     try:
-        segment_count = max(1, int(request.form.get("segment_count") or EVALUATOR_DEFAULT_SEGMENT_COUNT))
+        segment_count = max(1, min(MAX_EVALUATOR_SEGMENT_COUNT, int(request.form.get("segment_count") or EVALUATOR_DEFAULT_SEGMENT_COUNT)))
     except ValueError:
         segment_count = EVALUATOR_DEFAULT_SEGMENT_COUNT
     try:
@@ -730,13 +752,30 @@ def evaluator_start():
 
     label = label or f"{state}_{year}_{month}_{_now_label_suffix()}"
 
+    # Same $600/day/user cap run_batch itself re-checks live as the run
+    # progresses (see batch_evaluator.DAILY_COST_CAP_USD) - checked here
+    # too so a user who's already over today's cap gets a clear rejection
+    # immediately, rather than a batch that's created only to be stopped
+    # at its very first status write.
+    requester = _requester_email()
+    spent_today = daily_spend_for_user(requester)
+    if spent_today >= DAILY_COST_CAP_USD:
+        return render_template(
+            "error.html",
+            message=(
+                f"Daily cost cap reached: {requester} has already spent ${spent_today:,.2f} today, "
+                f"at or over the ${DAILY_COST_CAP_USD:,.0f}/day/user cap. Try again after midnight UTC."
+            ),
+            log=[],
+        )
+
     config = BatchConfig(
         label=label, state=state, year=year, month=month, project=project, dataset=dataset,
         segment_count=segment_count, concurrency=concurrency, criteria=criteria,
         walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
         side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
         headings=headings, headings_relative=headings_relative, fov=fov,
-        started_by=_requester_email(),
+        started_by=requester,
     )
 
     batch_id = uuid.uuid4().hex

@@ -108,6 +108,37 @@
     block) so the live-polling view matches the server-rendered initial
     one - if `_row_context`'s field set ever changes, update both the
     Jinja results-table columns AND that JS block together.
+  - **Two hard caps, both enforced server-side (never trust the HTML
+    form's `min`/`max` alone - those are just UX hints)**:
+    `batch_evaluator.MAX_SEGMENT_COUNT` (1000) clamps `segment_count` in
+    `app.py`'s `evaluator_start()` (`max(1, min(MAX_SEGMENT_COUNT, ...))`,
+    same pattern as the existing `concurrency` clamp); and
+    `batch_evaluator.DAILY_COST_CAP_USD` ($600/user/UTC-day) is enforced
+    in two places - `daily_spend_for_user(email)` sums every batch
+    `email` started today's real `actual_streetview_calls`/
+    `actual_vision_calls` (completed AND currently-running runs alike,
+    since a running batch's status.json carries live counts too), at
+    `STREETVIEW_RATE_PER_1000`/`VISION_RATE_PER_1000`. `evaluator_start()`
+    checks it synchronously before even creating a `BatchConfig` (refuses
+    with a plain error page if already at/over cap), and `run_batch()`
+    checks it again right before writing its own first status (defense
+    against two submissions racing past the app.py check) AND
+    periodically during the run (every 10 segments, same cadence as the
+    existing status/usage writes) - the instant the *real* total for that
+    user crosses the cap, it self-cancels (`cancel_event.set()`, distinct
+    from a user-triggered Cancel via `status["hit_daily_cap"]`) rather
+    than running to completion. This is a soft real-time stop, not an
+    atomic one: workers already in flight when the cap is crossed still
+    finish, so a single run can overshoot by up to
+    `config.concurrency` segments' worth of cost - acceptable, same
+    bound the Cancel button already has. Always computed from real
+    measured usage, never an upfront estimate - the JS launch-form
+    estimator (which now reads `STREETVIEW_RATE_PER_1000`/
+    `VISION_RATE_PER_1000` from the template context instead of its own
+    hardcoded copy, to avoid the two drifting apart) just warns if the
+    estimate would exceed the user's remaining budget; it doesn't gate
+    anything itself. `evaluator.html`'s launch page also shows the
+    requester's spend-so-far-today next to the estimate.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

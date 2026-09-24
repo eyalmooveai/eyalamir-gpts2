@@ -72,6 +72,29 @@ INDEX_PATH = BATCH_ROOT / "index.json"
 
 _index_lock = threading.Lock()
 
+# Same $/1000-call rates the launch form's client-side estimator shows
+# (see evaluator.html, which now reads these from the template context
+# instead of hardcoding its own copy) - defined here once as the single
+# source of truth for both the display estimate and the real enforcement
+# below, so they can't drift apart. Update both together if Google's
+# pricing changes.
+STREETVIEW_RATE_PER_1000 = 7.00
+VISION_RATE_PER_1000 = 1.50
+
+# Hard per-user daily spend cap across every batch run that user starts,
+# regardless of how many separate runs it takes to get there - enforced
+# both before a new run is allowed to start and live during a run (see
+# daily_spend_for_user, run_batch's pre-check, and the periodic check in
+# its main loop). Always computed from each batch's own real, measured
+# actual_streetview_calls/actual_vision_calls - never an upfront estimate,
+# since only real usage should ever gate real spend.
+DAILY_COST_CAP_USD = 600.0
+
+# The hard ceiling on segment_count itself (see app.py's evaluator_start,
+# which clamps to this) - a second, independent guard on cost/runtime per
+# single run, on top of (not a replacement for) the daily $ cap above.
+MAX_SEGMENT_COUNT = 1000
+
 CSV_FIELDNAMES = [
     "segment_id", "state", "functional_class", "status", "matched_speed_mph",
     "lat", "lon", "speed_limit_osm_mph", "speed_limit_here_mph",
@@ -262,6 +285,38 @@ def run_history_stats() -> list[dict]:
     return result
 
 
+def _call_cost(streetview_calls: int, vision_calls: int) -> float:
+    """Real dollar cost of this many Street View + Vision calls, at
+    STREETVIEW_RATE_PER_1000/VISION_RATE_PER_1000 - the one place this
+    conversion happens, shared by daily_spend_for_user's enforcement and
+    (via the template context) the launch form's live estimate."""
+    return (streetview_calls / 1000.0) * STREETVIEW_RATE_PER_1000 + (vision_calls / 1000.0) * VISION_RATE_PER_1000
+
+
+def daily_spend_for_user(email: str, day: Optional[str] = None) -> float:
+    """Real dollar cost (Street View + Vision, at the rates above) of
+    every batch run `email` started on `day` (UTC "YYYY-MM-DD", default
+    today) - completed AND currently-running runs alike, since a running
+    batch's status.json carries live actual_streetview_calls/
+    actual_vision_calls too, refreshed every 10 segments (see run_batch).
+    This is what DAILY_COST_CAP_USD is checked against, both before a new
+    run starts and periodically during one - always real measured usage,
+    never an upfront estimate, since only real usage should gate real
+    spend."""
+    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    total = 0.0
+    for entry in list_batches():
+        if entry.get("started_by") != email:
+            continue
+        if not (entry.get("started_at") or "").startswith(day):
+            continue
+        status = read_status(entry["batch_id"])
+        if not status:
+            continue
+        total += _call_cost(status.get("actual_streetview_calls") or 0, status.get("actual_vision_calls") or 0)
+    return total
+
+
 def _write_status(batch_id: str, status: dict) -> None:
     path = _status_path(batch_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +440,10 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
     (config.concurrency workers), writing durable status as it goes and
     a CSV + GCS image sync once done. Meant to run on its own background
     thread (see app.py) - never raises, all errors land in the durable
-    status instead."""
+    status instead. Refuses to start at all, or stops partway through, if
+    config.started_by has hit DAILY_COST_CAP_USD for the day across every
+    run they've started - see daily_spend_for_user and the two checks
+    below."""
     started_at = _now_iso()
     run_started_monotonic = time.monotonic()
     status = {
@@ -411,7 +469,31 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
         "elapsed_seconds": None,
         "actual_streetview_calls": 0,
         "actual_vision_calls": 0,
+        # Set if this run either never started, or was stopped partway
+        # through, because DAILY_COST_CAP_USD was reached - see the
+        # pre-check right below and the periodic check further down.
+        "hit_daily_cap": False,
     }
+
+    # Checked BEFORE writing this run's own status (so it isn't counted
+    # against itself) - if config.started_by has already spent the daily
+    # cap today across other runs, refuse to spend anything more under
+    # their name. app.py's evaluator_start already checks this
+    # synchronously before even starting this thread; this is defense in
+    # depth against two submissions racing each other past that check.
+    spent_before = daily_spend_for_user(config.started_by, started_at[:10])
+    if spent_before >= DAILY_COST_CAP_USD:
+        status["run_status"] = "error"
+        status["hit_daily_cap"] = True
+        status["error"] = (
+            f"Daily cost cap reached: {config.started_by} has already spent "
+            f"${spent_before:,.2f} today, at or over the ${DAILY_COST_CAP_USD:,.0f}/day/user cap. "
+            f"This run wasn't started. Try again after midnight UTC."
+        )
+        status["finished_at"] = _now_iso()
+        _write_status(batch_id, status)
+        return
+
     _write_status(batch_id, status)
 
     try:
@@ -485,17 +567,34 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                     if status["done_count"] % 10 == 0 or status["done_count"] == n:
                         _finalize_usage(status, run_started_monotonic)
                         _write_status(batch_id, status)
+                        # Real-time enforcement of the same daily cap the
+                        # pre-check above applies at start: re-sums every
+                        # run started_by made today (this one's
+                        # just-written counts included) and stops taking
+                        # on new segments the instant that crosses
+                        # DAILY_COST_CAP_USD. Workers already in flight
+                        # when this fires still finish (see _worker's own
+                        # cancel_event check) - bounded by config.concurrency,
+                        # same as a user-triggered Cancel.
+                        if not cancel_event.is_set() and daily_spend_for_user(config.started_by, started_at[:10]) >= DAILY_COST_CAP_USD:
+                            cancel_event.set()
+                            status["hit_daily_cap"] = True
 
         _write_csv(batch_id, csv_rows)
         _sync_images_to_gcs(out_root)
 
         status["run_status"] = "cancelled" if cancel_event.is_set() and status["done_count"] < n else "done"
         status["finished_at"] = _now_iso()
-        status["message"] = (
-            f"Cancelled after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found)."
-            if status["run_status"] == "cancelled"
-            else f"Done. {status['matched_count']} sign(s) found out of {status['done_count']} segment(s) checked."
-        )
+        if status["run_status"] == "cancelled" and status["hit_daily_cap"]:
+            status["message"] = (
+                f"Stopped after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found) - "
+                f"reached the ${DAILY_COST_CAP_USD:,.0f}/day cost cap for {config.started_by}. "
+                f"Resumes after midnight UTC."
+            )
+        elif status["run_status"] == "cancelled":
+            status["message"] = f"Cancelled after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found)."
+        else:
+            status["message"] = f"Done. {status['matched_count']} sign(s) found out of {status['done_count']} segment(s) checked."
         _finalize_usage(status, run_started_monotonic)
         _write_status(batch_id, status)
     except (NoUsableApiKey, StreetViewAuthError, ValueError) as e:

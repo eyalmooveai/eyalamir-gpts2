@@ -51,6 +51,10 @@
   </div>
   <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;" id="ev-est-basis">-</p>
   <p style="color:var(--muted); font-size:0.78rem; margin:8px 0 0;">Updates live as you change the settings below in "Start a new run" (segments, concurrency, walk/side/heading settings).</p>
+  <p style="font-size:0.82rem; margin:10px 0 0; {% if today_spent >= daily_cost_cap %}color:var(--err);{% endif %}">
+    You've spent <strong>${{ "%.2f"|format(today_spent) }}</strong> of your <strong>${{ "%.0f"|format(daily_cost_cap) }}/day</strong> cap so far today
+    {%- if today_spent >= daily_cost_cap %} - cap reached, new runs will be refused until midnight UTC{% endif %}.
+  </p>
 </div>
 
 <div class="card">
@@ -77,8 +81,8 @@
 
     <div class="row-2" style="margin-top:10px;">
       <div>
-        <label for="segment_count">Segments to check</label>
-        <input type="number" id="segment_count" name="segment_count" value="{{ default_segment_count }}" min="1" max="10000">
+        <label for="segment_count">Segments to check (max {{ max_segment_count }} per run)</label>
+        <input type="number" id="segment_count" name="segment_count" value="{{ default_segment_count }}" min="1" max="{{ max_segment_count }}">
       </div>
       <div>
         <label for="concurrency">Concurrency (parallel workers)</label>
@@ -165,8 +169,14 @@
 (function () {
   const ids = ['segment_count', 'concurrency', 'walk_segment', 'side_mode', 'headings'];
   const historyStats = {{ history_stats | tojson }};
-  const STREETVIEW_RATE_PER_1000 = 7.00;
-  const VISION_RATE_PER_1000 = 1.50;
+  // From batch_evaluator.py (the same constants the $600/day/user cap is
+  // enforced against server-side) - read from here rather than a second
+  // hardcoded copy, so this estimate can't quietly drift from what's
+  // actually charged.
+  const STREETVIEW_RATE_PER_1000 = {{ streetview_rate_per_1000 }};
+  const VISION_RATE_PER_1000 = {{ vision_rate_per_1000 }};
+  const DAILY_COST_CAP = {{ daily_cost_cap }};
+  const TODAY_SPENT = {{ today_spent }};
   const STREETVIEW_MIN_INTERVAL_S = 0.1;
   const VISION_LATENCY_S = 0.4;
   const TYPICAL_POSITIONS_WHEN_WALKED = 3; // a rough average, not the 2-40 hard clamp's ceiling - real segments vary
@@ -228,11 +238,16 @@
 
     const totalCalls = streetviewCalls + visionCalls;
     const estCost = (streetviewCalls / 1000) * STREETVIEW_RATE_PER_1000 + (visionCalls / 1000) * VISION_RATE_PER_1000;
+    const remainingBudget = Math.max(0, DAILY_COST_CAP - TODAY_SPENT);
 
-    document.getElementById('ev-est-cost').textContent = segmentCount ? '~' + fmtMoney(estCost) : '-';
+    const costEl = document.getElementById('ev-est-cost');
+    costEl.textContent = segmentCount ? '~' + fmtMoney(estCost) : '-';
+    costEl.style.color = (segmentCount && estCost > remainingBudget) ? 'var(--err)' : '';
     document.getElementById('ev-est-time').textContent = segmentCount ? '~' + fmtTime(estSeconds) : '-';
     document.getElementById('ev-est-calls').textContent = segmentCount ? '~' + Math.round(totalCalls).toLocaleString() : '-';
-    document.getElementById('ev-est-basis').textContent = segmentCount ? basisText : '-';
+    document.getElementById('ev-est-basis').textContent = segmentCount
+      ? basisText + (estCost > remainingBudget ? ` This would exceed your remaining $${remainingBudget.toFixed(2)} today's budget - the run will be stopped partway (or refused outright) once the $${DAILY_COST_CAP.toFixed(0)}/day cap is hit.` : '')
+      : '-';
   }
 
   ids.forEach(id => {

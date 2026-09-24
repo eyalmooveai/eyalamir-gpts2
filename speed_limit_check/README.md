@@ -397,11 +397,11 @@ a state," not "what's the sign on this one street."
 ### Starting a run
 
 The launch form (state, year/month, project/dataset, segment count -
-default 1000, concurrency - default 10 parallel workers) reuses the same
-selection-criteria checkboxes and walk/side/heading/fov settings as the
-sign checker's own form, with the same "what actually works" defaults.
-An optional label identifies the run in its history; left blank, one is
-generated from the state/month/timestamp.
+default and maximum 1000, concurrency - default 10 parallel workers)
+reuses the same selection-criteria checkboxes and walk/side/heading/fov
+settings as the sign checker's own form, with the same "what actually
+works" defaults. An optional label identifies the run in its history;
+left blank, one is generated from the state/month/timestamp.
 
 **Concurrency** doesn't bypass Street View's rate limit - the throttle in
 `find_bad_speed_limit.py` (`_streetview_throttle_lock`) is a process-wide
@@ -409,6 +409,25 @@ lock all worker threads share, so Street View calls stay correctly paced
 regardless of how many workers are running. Higher concurrency mostly
 buys overlap on Vision OCR and network latency between segments, which is
 still a real speedup, just a safer one than true unpaced parallelism.
+
+### Cost and segment caps
+
+Two hard limits, both enforced server-side regardless of what's typed
+into the form:
+
+- **1000 segments per run.** `segment_count` is clamped to this even if
+  a request asks for more.
+- **$600/day per user.** Every batch run you start counts against your
+  own running total for the current UTC day (Street View + Vision calls
+  at their real per-1000-call rates) - not per run, across every run you
+  start that day. If you're already at or over the cap, a new run is
+  refused outright with an explanation. If a run is in progress when your
+  day's total crosses the cap (from this run's own usage, or combined
+  with others you started), it stops itself partway through rather than
+  running to completion - its status page explains why, and the segments
+  it already checked are kept (not discarded). The cap resets at
+  midnight UTC. The launch page shows how much of today's $600 you've
+  already used, right next to the cost/time estimate.
 
 ### The cost/time estimate, and why it gets more accurate over time
 
