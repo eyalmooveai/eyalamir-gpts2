@@ -214,6 +214,30 @@ MONTH_RE = re.compile(r"^\d{1,2}$")
 PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{4,61}[A-Za-z0-9]$")
 DATASET_RE = re.compile(r"^[A-Za-z0-9_]{1,1024}$")
 SEGMENT_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,200}$")
+# zip_code/county are always passed as query parameters, never interpolated
+# into SQL directly (see build_geo_filter_sql) - validated anyway so a
+# typo/garbage value gets a clear message here instead of a zero-row
+# result (silently "no matches") or, for county, a raw BigQuery error if
+# it's malformed enough to trip something downstream.
+ZIP_CODE_RE = re.compile(r"^\d{5}$")
+COUNTY_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z .'-]{0,80}$")
+
+# US Census state FIPS codes, keyed by 2-letter USPS state code - a fixed,
+# unchanging mapping (not looked up live) used only to scope a county name
+# to the right state(s) when joining against
+# bigquery-public-data.geo_us_boundaries.counties, which has no 2-letter
+# state code column of its own - county names aren't unique nationwide
+# (e.g. "Washington County" exists in a dozen+ states), so an unscoped
+# match could silently pull in the wrong state's county.
+STATE_FIPS_CODES = {
+    "AL": "01", "AK": "02", "AZ": "04", "AR": "05", "CA": "06", "CO": "08", "CT": "09", "DE": "10",
+    "DC": "11", "FL": "12", "GA": "13", "HI": "15", "ID": "16", "IL": "17", "IN": "18", "IA": "19",
+    "KS": "20", "KY": "21", "LA": "22", "ME": "23", "MD": "24", "MA": "25", "MI": "26", "MN": "27",
+    "MS": "28", "MO": "29", "MT": "30", "NE": "31", "NV": "32", "NH": "33", "NJ": "34", "NM": "35",
+    "NY": "36", "NC": "37", "ND": "38", "OH": "39", "OK": "40", "OR": "41", "PA": "42", "RI": "44",
+    "SC": "45", "SD": "46", "TN": "47", "TX": "48", "UT": "49", "VT": "50", "VA": "51", "WA": "53",
+    "WV": "54", "WI": "55", "WY": "56",
+}
 
 # Selectable WHERE-clause criteria for the candidate query, each independently
 # toggleable with an editable threshold in the web UI. `sql` references its
@@ -592,8 +616,80 @@ def load_keys_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def build_geo_filter_sql(
+    zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (), states: tuple[str, ...] = (),
+    *, geom_column: str = "geom",
+) -> tuple[list[str], list[bigquery.ScalarQueryParameter]]:
+    """WHERE-clause fragments restricting `geom_column` to the given zip
+    code(s) and/or county name(s), via a spatial join against
+    bigquery-public-data.geo_us_boundaries (zip_codes/counties) - none of
+    this app's own tables have a zip/county column. `states` (2-letter
+    codes) scopes the county match to the right state(s) - see
+    STATE_FIPS_CODES's docstring for why that matters and zip codes don't
+    need it. Returns ([], []) if neither zip_codes nor counties is given -
+    the common case, so callers can unconditionally extend their own
+    where_parts/params with this call's result.
+
+    ST_INTERSECTS(geom_column, (SELECT ST_UNION_AGG(...) FROM boundary
+    WHERE ...)) - a scalar subquery pre-unioning every matching
+    zip/county polygon into one geography, not a correlated EXISTS/JOIN
+    against the boundary table. BigQuery's optimizer rewrites an
+    EXISTS(...ST_INTERSECTS...) into a LEFT SEMI JOIN and then rejects it
+    ("cannot be used without a condition that is an equality of fields
+    from both sides") since a spatial predicate alone isn't an equality -
+    confirmed by actually running both forms against this project's real
+    tables before picking this one. A segment's line geometry can
+    legitimately touch more than one zip/county polygon at a boundary;
+    unioning them first (rather than joining per-polygon) is exactly what
+    avoids that producing a duplicate row for the same segment.
+
+    Cost note: this is a real geometry predicate, meaningfully more
+    expensive than the plain column-equality filters elsewhere in this
+    app, evaluated against every row of the table it's added to. Both
+    boundary tables are small (~34k zip codes, ~3.2k counties, unioned
+    down to a single geography before the per-row test) and every caller
+    here already scopes its own query to one state or a handful of
+    states first, so this only ever runs against a fraction of a table's
+    full nationwide row count - but it's still not "free" the way the
+    rest of this app's filters are, and shows up as real materially-extra
+    bytes-processed on a query that uses it."""
+    for z in zip_codes:
+        _validate_identifier(z, ZIP_CODE_RE, "zip code (expected 5 digits)")
+    for c in counties:
+        _validate_identifier(c, COUNTY_NAME_RE, "county name")
+
+    where_parts: list[str] = []
+    params: list[bigquery.ScalarQueryParameter] = []
+
+    if zip_codes:
+        where_parts.append(f"""
+            ST_INTERSECTS({geom_column}, (
+              SELECT ST_UNION_AGG(zip_code_geom) FROM `bigquery-public-data.geo_us_boundaries.zip_codes`
+              WHERE zip_code IN UNNEST(@geo_zip_codes)
+            ))
+        """)
+        params.append(bigquery.ArrayQueryParameter("geo_zip_codes", "STRING", list(zip_codes)))
+
+    if counties:
+        fips_codes = (
+            sorted({STATE_FIPS_CODES[s.upper()] for s in states if s.upper() in STATE_FIPS_CODES})
+            if states else list(STATE_FIPS_CODES.values())
+        )
+        where_parts.append(f"""
+            ST_INTERSECTS({geom_column}, (
+              SELECT ST_UNION_AGG(county_geom) FROM `bigquery-public-data.geo_us_boundaries.counties`
+              WHERE county_name IN UNNEST(@geo_counties) AND state_fips_code IN UNNEST(@geo_county_state_fips)
+            ))
+        """)
+        params.append(bigquery.ArrayQueryParameter("geo_counties", "STRING", list(counties)))
+        params.append(bigquery.ArrayQueryParameter("geo_county_state_fips", "STRING", fips_codes))
+
+    return where_parts, params
+
+
 def build_candidates_query(
-    project: str, dataset: str, table: str, criteria: dict[str, tuple[bool, float]], limit: int
+    project: str, dataset: str, table: str, criteria: dict[str, tuple[bool, float]], limit: int,
+    *, state: str = "", zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (),
 ) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
     where_parts = []
     params = []
@@ -606,6 +702,9 @@ def build_candidates_query(
         params.append(bigquery.ScalarQueryParameter(c["key"], "FLOAT64", float(value)))
         if order_expr is None and c.get("magnitude"):
             order_expr = c["order_expr"]
+    geo_where_parts, geo_params = build_geo_filter_sql(zip_codes, counties, (state,) if state else ())
+    where_parts.extend(geo_where_parts)
+    params.extend(geo_params)
     where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
     order_sql = f"ORDER BY {order_expr} DESC" if order_expr else "ORDER BY here_segment_id"
     query = f"""
@@ -623,10 +722,11 @@ def build_candidates_query(
 
 
 def fetch_candidates(
-    project: str, dataset: str, table: str, criteria: dict[str, tuple[bool, float]], limit: int
+    project: str, dataset: str, table: str, criteria: dict[str, tuple[bool, float]], limit: int,
+    *, state: str = "", zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (),
 ) -> list[bigquery.table.Row]:
     client = bigquery.Client(project=project)
-    query, params = build_candidates_query(project, dataset, table, criteria, limit)
+    query, params = build_candidates_query(project, dataset, table, criteria, limit, state=state, zip_codes=zip_codes, counties=counties)
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     return list(client.query(query, job_config=job_config).result())
 
@@ -648,15 +748,24 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
     return list(client.query(query, job_config=job_config).result())
 
 
-def _candidates_cache_key(*, segment_id: Optional[str] = None, criteria=None, max_candidates: Optional[int] = None) -> str:
+def _candidates_cache_key(
+    *, segment_id: Optional[str] = None, criteria=None, max_candidates: Optional[int] = None,
+    zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (),
+) -> str:
     """A stable key identifying a candidates query's exact inputs, for
     caching its result to disk (see _load_candidates_cache/
     _save_candidates_cache) - a speed_limits_<STATE>_<YEAR>_<MONTH>_details
     table is a dated, published monthly snapshot, so the same query
     against it always returns the same rows, exactly the same assumption
     the Street View/OCR caching elsewhere in this file already relies on
-    for its own inputs never changing."""
-    payload = {"segment_id": segment_id} if segment_id is not None else {"criteria": criteria, "max_candidates": max_candidates}
+    for its own inputs never changing. zip_codes/counties must be part of
+    this key (not just criteria/max_candidates) - otherwise a query with
+    a geo filter could wrongly reuse a cached result from one without it,
+    or vice versa."""
+    payload = (
+        {"segment_id": segment_id} if segment_id is not None
+        else {"criteria": criteria, "max_candidates": max_candidates, "zip_codes": sorted(zip_codes), "counties": sorted(counties)}
+    )
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -1018,6 +1127,8 @@ def run_pipeline(
     dataset: str = DEFAULT_DATASET,
     max_candidates: int = 10,
     criteria: Optional[dict[str, tuple[bool, float]]] = None,
+    zip_codes: tuple[str, ...] = (),
+    counties: tuple[str, ...] = (),
     segment_id: Optional[str] = None,
     walk_all: bool = False,
     walk_segment: bool = False,
@@ -1173,7 +1284,7 @@ def run_pipeline(
             candidates = fetch_candidate_by_id(project, dataset, table, segment_id)
             _save_candidates_cache(cache_path, candidates, log=log)
     else:
-        cache_key = _candidates_cache_key(criteria=criteria, max_candidates=max_candidates)
+        cache_key = _candidates_cache_key(criteria=criteria, max_candidates=max_candidates, zip_codes=zip_codes, counties=counties)
         cache_path = _candidates_cache_path(out_root, cache_key)
         candidates = _load_candidates_cache(cache_path, log=log)
         if candidates is not None:
@@ -1182,7 +1293,7 @@ def run_pipeline(
         else:
             log(f"Querying `{project}.{dataset}.{table}` ...")
             progress(0.0, f"Querying `{project}.{dataset}.{table}` ...")
-            candidates = fetch_candidates(project, dataset, table, criteria, max_candidates)
+            candidates = fetch_candidates(project, dataset, table, criteria, max_candidates, state=state, zip_codes=zip_codes, counties=counties)
             _save_candidates_cache(cache_path, candidates, log=log)
 
     result = PipelineResult(table=table, project=project, dataset=dataset, attempts=[])

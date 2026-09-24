@@ -275,6 +275,26 @@ python find_bad_speed_limit.py --state NC --year 2026 --month 08
 The CLI always uses the default selection criteria - per-criterion
 enable/threshold customization is currently web-UI only.
 
+## Zip code / county filtering
+
+All three tools (Sign Checker, Evaluator, Speed-Limits Quality) can
+narrow candidates to one or more zip codes and/or counties, in addition
+to state and functional class. Neither this app's tables nor the
+Evaluator/Quality queries have a zip/county column of their own - this
+is a real spatial join against `bigquery-public-data.geo_us_boundaries`
+(the public zip code / county boundary dataset), matching whenever a
+segment's actual road geometry falls inside the selected boundary. It's
+a genuinely more expensive query than the plain filters (state,
+functional class, mismatch thresholds) - each tool already scopes its
+own query to a state or a handful of states first, which keeps this
+affordable, but expect it to add real time/cost to a query that uses it.
+
+County names aren't unique nationwide (many states have their own
+"Washington County"), so a county filter is matched within whichever
+state(s) are already selected in that tool - pick states too if you
+mean one specific county and its name is common. Zip codes are already
+globally unique and don't need this.
+
 ## Speed-Limits Quality
 
 `/speed-limits` is a nationwide, no-imagery, table-only counterpart to the

@@ -17,7 +17,7 @@ from typing import Optional
 from google.cloud import bigquery
 
 from bq_cache import cache_key, cached_query
-from find_bad_speed_limit import DATASET_RE, PROJECT_RE, STATE_RE, _validate_identifier, table_name
+from find_bad_speed_limit import DATASET_RE, PROJECT_RE, STATE_RE, _validate_identifier, build_geo_filter_sql, table_name
 
 # calc_out table/column names are plain identifiers (letters/digits/
 # underscore) - same shape find_bad_speed_limit.py validates dataset/
@@ -141,6 +141,8 @@ class QualityFilters:
     param2: float = 80.0
     states: tuple[str, ...] = ()  # empty = all states
     functional_classes: tuple[int, ...] = ()  # empty = all classes
+    zip_codes: tuple[str, ...] = ()  # see find_bad_speed_limit.build_geo_filter_sql
+    counties: tuple[str, ...] = ()  # scoped to `states` when set, else matched nationwide
     group_by: str = "none"  # one of GROUP_BY_CHOICES
 
 
@@ -302,6 +304,9 @@ def build_quality_query(f: QualityFilters) -> tuple[str, list[bigquery.ScalarQue
     if f.functional_classes:
         where_parts.append("functional_class IN UNNEST(@functional_classes)")
         params.append(bigquery.ArrayQueryParameter("functional_classes", "INT64", list(f.functional_classes)))
+    geo_where_parts, geo_params = build_geo_filter_sql(f.zip_codes, f.counties, f.states)
+    where_parts.extend(geo_where_parts)
+    params.extend(geo_params)
 
     group_cols = f.group_by.split(",") if f.group_by != "none" else []
     select_cols = [f"{c}," for c in group_cols]

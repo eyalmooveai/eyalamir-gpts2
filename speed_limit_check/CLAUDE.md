@@ -9,6 +9,38 @@
   split into separate apps/deployments unless explicitly asked to (this
   was tried and explicitly reverted: "stop -- i want them all in one
   app, one deployment").
+- **Zip code / county filtering, in all three tools** (sign checker,
+  Evaluator, Quality) - `find_bad_speed_limit.build_geo_filter_sql(
+  zip_codes, counties, states, geom_column="geom")` is the single shared
+  implementation (`quality_metrics.build_quality_query` and
+  `find_bad_speed_limit.build_candidates_query`/`fetch_candidates` both
+  call it), since none of this app's own tables have a zip/county column
+  - it's a real spatial join against `bigquery-public-data.geo_us_boundaries`
+  (`zip_codes`/`counties`), which does. **Must use
+  `ST_INTERSECTS(geom, (SELECT ST_UNION_AGG(...) FROM boundary WHERE
+  ...))` - a scalar subquery pre-unioning the matching polygon(s) into
+  one geography - not a correlated `EXISTS(...ST_INTERSECTS...)`/JOIN
+  against the boundary table.** The EXISTS form was the first thing
+  tried and looked reasonable, but BigQuery's optimizer rewrites it into
+  a LEFT SEMI JOIN and then rejects it ("cannot be used without a
+  condition that is an equality of fields from both sides") since a
+  spatial predicate alone isn't an equality condition - confirmed by
+  actually running both forms against this project's real tables (not
+  just reasoning about it) before picking the one that works. County
+  names aren't unique nationwide (many states have a "Washington
+  County") - `STATE_FIPS_CODES` (a fixed USPS-code -> FIPS mapping, not
+  looked up live) scopes the county match to whatever state(s) are
+  already in play, since `bigquery-public-data.geo_us_boundaries.counties`
+  has no 2-letter state code column of its own; zip codes are already
+  globally unique and don't need this. This is a real, materially more
+  expensive query than this app's other (plain column-equality) filters
+  - don't add it to a query path that doesn't already scope itself to a
+  state or a handful of states first. Every candidates-cache key
+  (`find_bad_speed_limit._candidates_cache_key`) and quality-metrics
+  cache key (`quality_metrics.fetch_quality_metrics`, via
+  `dataclasses.asdict(QualityFilters)`) includes zip_codes/counties -
+  don't let a new caching path forget them, or a filtered and
+  unfiltered request could wrongly share a cached result.
 - **Speed-Limits Evaluator** (`/speed-limits-evaluator`,
   `batch_evaluator.py`): runs up to `segment_count` (default 1000)
   candidate segments for one state through the *same* per-segment logic

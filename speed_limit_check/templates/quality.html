@@ -65,6 +65,17 @@
     </datalist>
     <label for="fc">Functional class(es) (comma-separated, blank = all)</label>
     <input type="text" id="fc" name="fc" value="{{ filters.functional_classes }}" placeholder="e.g. 1,2,3">
+    <div class="row-2">
+      <div>
+        <label for="zip_codes">Zip code(s) (comma-separated, blank = no zip filter)</label>
+        <input type="text" id="zip_codes" name="zip_codes" value="{{ filters.zip_codes }}" placeholder="e.g. 27601,27603">
+      </div>
+      <div>
+        <label for="counties">Count(y/ies) (comma-separated, blank = no county filter)</label>
+        <input type="text" id="counties" name="counties" value="{{ filters.counties }}" placeholder="e.g. Wake,Durham">
+      </div>
+    </div>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Zip/county narrow to segments whose geometry falls inside those boundaries (a real spatial join, not a plain column filter - slower than the filters above). County names are matched within the states selected above, or nationwide if none are selected - a name like "Washington" exists in many states, so pick states too if you mean one specific county.</p>
     <label for="group_by">Break down by</label>
     <select id="group_by" name="group_by">
       <option value="none" {% if filters.group_by == 'none' %}selected{% endif %}>Nothing - one nationwide (or filtered) number</option>

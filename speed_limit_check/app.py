@@ -192,6 +192,15 @@ def _read_criteria_from_form(form) -> dict[str, tuple[bool, float]]:
     return criteria
 
 
+def _parse_csv_field(raw: str, *, upper: bool = False) -> tuple[str, ...]:
+    """A comma-separated form field ("27601, 27603" or "Wake, Durham") into
+    a tuple of trimmed, non-empty values - the same shape zip_codes/
+    counties (and states/functional_classes) are threaded through as.
+    Actual validity (5-digit zip, real county name) is checked downstream
+    by find_bad_speed_limit.build_geo_filter_sql, not here."""
+    return tuple((s.strip().upper() if upper else s.strip()) for s in raw.split(",") if s.strip())
+
+
 def _new_job(state: str, year: str, month: str, segment_id: str | None, walk_all: bool, walk_segment: bool) -> str:
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
@@ -235,6 +244,8 @@ def _run_job(
     dataset: str,
     max_candidates: int,
     criteria: dict[str, tuple[bool, float]],
+    zip_codes: tuple[str, ...],
+    counties: tuple[str, ...],
     segment_id: str | None,
     walk_all: bool,
     walk_segment: bool,
@@ -263,6 +274,8 @@ def _run_job(
             dataset=dataset,
             max_candidates=max_candidates,
             criteria=criteria,
+            zip_codes=zip_codes,
+            counties=counties,
             segment_id=segment_id,
             walk_all=walk_all,
             walk_segment=walk_segment,
@@ -428,6 +441,8 @@ def speed_limits_quality():
         "param2": request.args.get("param2", "80").strip() or "80",
         "states": request.args.get("states", "").strip(),
         "functional_classes": request.args.get("fc", "").strip(),
+        "zip_codes": request.args.get("zip_codes", "").strip(),
+        "counties": request.args.get("counties", "").strip(),
         "group_by": request.args.get("group_by", "none").strip() or "none",
     }
 
@@ -447,13 +462,15 @@ def speed_limits_quality():
             param2 = float(filters_echo["param2"])
             states = tuple(s.strip().upper() for s in filters_echo["states"].split(",") if s.strip())
             fcs = tuple(int(v.strip()) for v in filters_echo["functional_classes"].split(",") if v.strip())
+            zip_codes = _parse_csv_field(filters_echo["zip_codes"])
+            counties = _parse_csv_field(filters_echo["counties"])
             group_by = filters_echo["group_by"] if filters_echo["group_by"] in GROUP_BY_CHOICES else "none"
             filters_echo["group_by"] = group_by
 
             base = QualityFilters(
                 project=DEFAULT_PROJECT, dataset=selected_dataset, table=selected_table,
                 infer_field=selected_infer_field, param1=param1, param2=param2,
-                states=states, functional_classes=fcs,
+                states=states, functional_classes=fcs, zip_codes=zip_codes, counties=counties,
             )
             job_id = _new_quality_job()
             thread = threading.Thread(target=_run_quality_job, args=(job_id, base, group_by, param1, param2), daemon=True)
@@ -559,6 +576,8 @@ def run():
     if not (MIN_FOV <= fov <= MAX_FOV):
         fov = DEFAULT_FOV
     criteria = _read_criteria_from_form(request.form)
+    zip_codes = _parse_csv_field(request.form.get("zip_codes", ""))
+    counties = _parse_csv_field(request.form.get("counties", ""))
 
     if not (state and year and month):
         return render_template("error.html", message="State, year, and month are all required.", log=[])
@@ -568,7 +587,7 @@ def run():
         target=_run_job,
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
-            criteria, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
+            criteria, zip_codes, counties, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
             side_mode, side_offset_m, auto_side_offset, headings, headings_relative, fov,
         ),
         daemon=True,
@@ -749,6 +768,8 @@ def evaluator_start():
     if not (MIN_FOV <= fov <= MAX_FOV):
         fov = WEB_DEFAULT_FOV
     criteria = _read_criteria_from_form(request.form)
+    zip_codes = _parse_csv_field(request.form.get("zip_codes", ""))
+    counties = _parse_csv_field(request.form.get("counties", ""))
 
     label = label or f"{state}_{year}_{month}_{_now_label_suffix()}"
 
@@ -772,6 +793,7 @@ def evaluator_start():
     config = BatchConfig(
         label=label, state=state, year=year, month=month, project=project, dataset=dataset,
         segment_count=segment_count, concurrency=concurrency, criteria=criteria,
+        zip_codes=zip_codes, counties=counties,
         walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
         side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
         headings=headings, headings_relative=headings_relative, fov=fov,

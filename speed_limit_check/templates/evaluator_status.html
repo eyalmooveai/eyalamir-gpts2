@@ -77,6 +77,8 @@
     <tr><td>Concurrency</td><td>{{ cfg.concurrency }}</td></tr>
     <tr><td>Project / dataset</td><td><code>{{ cfg.project }}.{{ cfg.dataset }}</code></td></tr>
     <tr><td>Selection criteria</td><td>{% for k, v in cfg.criteria.items() %}{% if v[0] %}<code>{{ k }} ({{ v[1] }})</code>{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}</td></tr>
+    {% if cfg.zip_codes %}<tr><td>Zip code(s)</td><td>{{ cfg.zip_codes|join(', ') }}</td></tr>{% endif %}
+    {% if cfg.counties %}<tr><td>Count(y/ies)</td><td>{{ cfg.counties|join(', ') }}</td></tr>{% endif %}
     <tr><td>Walk each segment's length</td><td>{{ cfg.walk_segment }}{% if cfg.walk_segment %} (spacing {{ cfg.walk_segment_spacing_m }}m){% endif %}</td></tr>
     <tr><td>Side mode</td><td>{{ cfg.side_mode }} (offset {{ cfg.side_offset_m }}m{% if cfg.auto_side_offset %}, auto-detected{% endif %})</td></tr>
     <tr><td>Headings</td><td>{{ cfg.headings }}{% if cfg.headings_relative %} (relative to direction of travel){% endif %}</td></tr>

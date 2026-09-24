@@ -102,6 +102,18 @@
       </div>
     </div>
 
+    <div class="row-2" style="margin-top:10px;">
+      <div>
+        <label for="zip_codes">Zip code(s) (comma-separated, optional)</label>
+        <input type="text" id="zip_codes" name="zip_codes" placeholder="e.g. 27601,27603">
+      </div>
+      <div>
+        <label for="counties">Count(y/ies) (comma-separated, optional)</label>
+        <input type="text" id="counties" name="counties" placeholder="e.g. Wake,Durham">
+        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">Narrows candidates to this run's State field via a real spatial join - matched within that one state, so no ambiguity between same-named counties elsewhere.</p>
+      </div>
+    </div>
+
     <h3 style="margin:18px 0 4px;">Selection criteria</h3>
     <p style="color:var(--muted); font-size:0.78rem; margin:0 0 8px;">Same candidate-selection criteria as the sign checker - ranked by the first checked criterion's mismatch size, largest first.</p>
     {% for c in criteria_defs %}

@@ -49,6 +49,18 @@
     </div>
   {% endfor %}
 
+  <div class="row-2">
+    <div>
+      <label for="zip_codes">Zip code(s) (comma-separated, optional)</label>
+      <input type="text" id="zip_codes" name="zip_codes" form="run-form" placeholder="e.g. 27601,27603">
+    </div>
+    <div>
+      <label for="counties">Count(y/ies) (comma-separated, optional)</label>
+      <input type="text" id="counties" name="counties" form="run-form" placeholder="e.g. Wake,Durham">
+    </div>
+  </div>
+  <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Narrows candidates to this state via a real spatial join, so no ambiguity between same-named counties elsewhere. Ignored when checking one specific segment above.</p>
+
   <label for="candidates">Candidates to try</label>
   <input type="number" id="candidates" name="candidates" form="run-form" value="{{ default_candidates }}" min="1" max="50">
 </div>

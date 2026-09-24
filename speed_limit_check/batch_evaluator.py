@@ -119,6 +119,8 @@ class BatchConfig:
     segment_count: int = 1000
     concurrency: int = 10
     criteria: dict = dataclasses.field(default_factory=dict)
+    zip_codes: tuple = ()  # see find_bad_speed_limit.build_geo_filter_sql
+    counties: tuple = ()
     walk_segment: bool = True
     walk_segment_spacing_m: float = 15.0
     side_mode: str = "center"
@@ -527,7 +529,10 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
 
         table = table_name(config.state, config.year, config.month)
         out_root = Path("output") / f"{config.state.upper()}_{config.year}_{config.month}"
-        candidates = fetch_candidates(config.project, config.dataset, table, config.criteria, config.segment_count)
+        candidates = fetch_candidates(
+            config.project, config.dataset, table, config.criteria, config.segment_count,
+            state=config.state, zip_codes=config.zip_codes, counties=config.counties,
+        )
         n = len(candidates)
         status["total_count"] = n
         status["message"] = f"Found {n} candidate segment(s)." if n else "No road segments matched the selection criteria."
