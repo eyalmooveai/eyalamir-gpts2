@@ -145,7 +145,78 @@
     <label for="fov">Camera zoom (field of view, {{ min_fov }}-{{ max_fov }})</label>
     <input type="number" id="fov" name="fov" value="{{ default_fov }}" min="{{ min_fov }}" max="{{ max_fov }}" style="max-width:120px;">
 
-    <p style="margin-top:18px;"><button type="submit">Start batch run</button></p>
+    <div style="margin-top:18px; padding:12px 14px; background:var(--bg); border:1px solid var(--border); border-radius:10px;">
+      <div style="display:flex; gap:24px; flex-wrap:wrap;">
+        <div><div class="stat-value" id="ev-est-cost" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated cost</div></div>
+        <div><div class="stat-value" id="ev-est-time" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated time to completion</div></div>
+        <div><div class="stat-value" id="ev-est-calls" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Street View + Vision calls</div></div>
+      </div>
+      <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;">
+        Rough, not a quote: assumes ~3 walked positions/segment on average when walking segments (real segments
+        vary in length), Street View ~$7/1000 &amp; Vision ~$1.50/1000 requests (check your actual billing tier),
+        and the ~100ms global Street View pacing that applies regardless of concurrency (see README).
+      </p>
+    </div>
+
+    <p style="margin-top:14px;"><button type="submit">Start batch run</button></p>
   </form>
 </div>
+
+<script>
+(function () {
+  const ids = ['segment_count', 'concurrency', 'walk_segment', 'side_mode', 'headings'];
+  const STREETVIEW_RATE_PER_1000 = 7.00;
+  const VISION_RATE_PER_1000 = 1.50;
+  const STREETVIEW_MIN_INTERVAL_S = 0.1;
+  const VISION_LATENCY_S = 0.4;
+  const TYPICAL_POSITIONS_WHEN_WALKED = 3; // a rough average, not the 2-40 hard clamp's ceiling - real segments vary
+
+  function fmtMoney(n) {
+    return '$' + n.toLocaleString(undefined, {maximumFractionDigits: n < 10 ? 2 : 0});
+  }
+  function fmtTime(seconds) {
+    if (seconds < 60) return Math.ceil(seconds) + ' sec';
+    if (seconds < 3600) return Math.ceil(seconds / 60) + ' min';
+    return (seconds / 3600).toFixed(1) + ' hr';
+  }
+
+  function updateEstimate() {
+    const segmentCount = Math.max(0, parseInt(document.getElementById('segment_count').value) || 0);
+    const concurrency = Math.max(1, parseInt(document.getElementById('concurrency').value) || 1);
+    const walkSegment = document.getElementById('walk_segment').checked;
+    const sideMode = document.getElementById('side_mode').value;
+    const headingsCount = document.getElementById('headings').value.split(',').map(s => s.trim()).filter(Boolean).length || 1;
+
+    const sideMultiplier = {center: 1, left: 1, right: 1, sides: 2, both: 3}[sideMode] || 1;
+    const positionsPerSegment = (walkSegment ? TYPICAL_POSITIONS_WHEN_WALKED : 1) * sideMultiplier;
+
+    const streetviewCallsPerPosition = 1 + headingsCount; // 1 coverage check + 1 image fetch per heading
+    const visionCallsPerPosition = headingsCount; // 1 OCR call per fetched image
+
+    const streetviewCalls = segmentCount * positionsPerSegment * streetviewCallsPerPosition;
+    const visionCalls = segmentCount * positionsPerSegment * visionCallsPerPosition;
+    const totalCalls = streetviewCalls + visionCalls;
+
+    const estCost = (streetviewCalls / 1000) * STREETVIEW_RATE_PER_1000 + (visionCalls / 1000) * VISION_RATE_PER_1000;
+
+    // Street View calls are globally rate-limited (STREETVIEW_MIN_INTERVAL_S
+    // apart) regardless of concurrency - that's the real floor. Vision calls
+    // overlap across `concurrency` workers.
+    const streetviewTimeSeconds = streetviewCalls * STREETVIEW_MIN_INTERVAL_S;
+    const visionTimeSeconds = (visionCalls * VISION_LATENCY_S) / concurrency;
+    const estSeconds = Math.max(streetviewTimeSeconds, visionTimeSeconds);
+
+    document.getElementById('ev-est-cost').textContent = segmentCount ? '~' + fmtMoney(estCost) : '-';
+    document.getElementById('ev-est-time').textContent = segmentCount ? '~' + fmtTime(estSeconds) : '-';
+    document.getElementById('ev-est-calls').textContent = segmentCount ? '~' + Math.round(totalCalls).toLocaleString() : '-';
+  }
+
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('input', updateEstimate);
+    el.addEventListener('change', updateEstimate);
+  });
+  updateEstimate();
+})();
+</script>
 {% endblock %}
