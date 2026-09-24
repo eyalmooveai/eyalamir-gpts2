@@ -38,6 +38,17 @@
 
 {% if attempts_view %}
   <div class="card">
+    <h3 style="margin-top:0;">Map</h3>
+    <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Every candidate tried, at the position checked - colored by result. Click a marker for details.</p>
+    <div id="candidates-map" style="height:420px; border-radius:8px; border:1px solid var(--border);"></div>
+    <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:10px; font-size:0.78rem; color:var(--muted);">
+      <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--ok); margin-right:4px;"></span>Sign read</span>
+      <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--warn); margin-right:4px;"></span>No sign read</span>
+      <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--muted); margin-right:4px;"></span>No Street View coverage</span>
+    </div>
+  </div>
+
+  <div class="card">
     <h3 style="margin-top:0;">Candidates tried</h3>
     <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Every image fetched, and what OCR read in it - useful for telling "no sign in frame" apart from "OCR missed it". Click any image to see where it was taken and which way the camera was facing.</p>
     {% for entry in attempts_view %}
@@ -347,5 +358,39 @@
   document.getElementById('gmap-modal').addEventListener('click', (e) => {
     if (e.target.id === 'gmap-modal') closeGoogleMap();
   });
+
+  // --- Overview map: every candidate tried, colored by result ---
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  (function () {
+    const points = {{ map_points_js | tojson }};
+    const mapEl = document.getElementById('candidates-map');
+    if (!mapEl || typeof L === 'undefined' || !points.length) return;
+    const rootStyle = getComputedStyle(document.documentElement);
+    const STATUS_COLOR = {
+      match: rootStyle.getPropertyValue('--ok').trim() || '#1d8a4a',
+      no_sign_read: rootStyle.getPropertyValue('--warn').trim() || '#b25a00',
+      no_coverage: rootStyle.getPropertyValue('--muted').trim() || '#6b6b74',
+    };
+    const map = L.map('candidates-map', { scrollWheelZoom: false });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    const coords = [];
+    points.forEach(p => {
+      const lat = parseFloat(p.lat), lon = parseFloat(p.lon);
+      if (Number.isNaN(lat) || Number.isNaN(lon)) return;
+      coords.push([lat, lon]);
+      const color = STATUS_COLOR[p.status] || STATUS_COLOR.no_coverage;
+      const marker = L.circleMarker([lat, lon], { radius: 6, color: '#fff', weight: 1, fillColor: color, fillOpacity: 0.9 }).addTo(map);
+      const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`, escapeHtml(p.status)];
+      if (p.street_name) bits.push(escapeHtml(p.street_name));
+      marker.bindPopup(bits.join('<br>'));
+    });
+    if (coords.length) {
+      map.fitBounds(coords, { padding: [24, 24], maxZoom: 16 });
+    } else {
+      map.setView([37.8, -96], 4);
+    }
+  })();
 </script>
 {% endblock %}

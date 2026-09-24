@@ -669,6 +669,18 @@ def result_page(job_id):
             }
         )
 
+    # A separate, plain-dict list for the overview map's markers (not
+    # attempts_view itself - CandidateAttempt is a dataclass, not
+    # JSON-serializable via Jinja's |tojson without this).
+    map_points_js = [
+        {
+            "segment_id": a.segment_id, "status": a.status,
+            "lat": entry["explore_lat"], "lon": entry["explore_lon"],
+            "street_name": a.row.get("street_name") if a.row else None,
+        }
+        for entry, a in zip(attempts_view, result.attempts)
+    ]
+
     return render_template(
         "result.html",
         state=job["state"],
@@ -677,6 +689,7 @@ def result_page(job_id):
         result=result,
         log=job["log"],
         attempts_view=attempts_view,
+        map_points_js=map_points_js,
         google_maps_js_key=_google_maps_js_key(),
     )
 

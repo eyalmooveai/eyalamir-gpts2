@@ -154,6 +154,14 @@
     pair to keep in sync - see above). `result.html` shows it both for
     the winning match and per-image in the lightbox. Can be blank/"unknown"
     - Google doesn't always return a capture date.
+  - **This same map pattern also lives on the single-run Sign Checker's
+    result page** (`result.html`'s "Map" card, right above "Candidates
+    tried") - every candidate tried, colored the same way (no `error`
+    case there, since a single-run job either finishes with attempts or
+    surfaces its error on the whole job). `app.py`'s `result_page()`
+    builds a separate plain-dict `map_points_js` list rather than
+    reusing `attempts_view` for this - `CandidateAttempt` is a
+    dataclass, not JSON-serializable via Jinja's `|tojson` as-is.
   - **The status page's Map card** (`evaluator_status.html`, right after
     the main summary card) plots every checked segment at the position
     actually checked (`seg_summary["lat"/"lon"]`, added in `run_batch`'s
