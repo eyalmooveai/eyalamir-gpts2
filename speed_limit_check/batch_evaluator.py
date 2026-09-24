@@ -100,7 +100,7 @@ CSV_FIELDNAMES = [
     "lat", "lon", "speed_limit_osm_mph", "speed_limit_here_mph",
     "speed_limit_infer_mph", "speed_limit_infer_mph_corrected",
     "speed_AVG_mph", "freeflow_mph", "note", "image_count",
-    "annotated_image_path", "error", "row_json",
+    "streetview_capture_date", "annotated_image_path", "error", "row_json",
 ]
 
 
@@ -339,6 +339,22 @@ def _write_status(batch_id: str, status: dict) -> None:
     })
 
 
+def _image_capture_date(attempt, match) -> Optional[str]:
+    """When Google captured the Street View image this segment's result is
+    based on ("YYYY-MM", from the Street View metadata response - see
+    find_bad_speed_limit.ImageDetail.capture_date), so a stale panorama is
+    visible without opening the image itself. Prefers the actual matched
+    image (`match.matched_image_index`) when there's a match; otherwise
+    falls back to the first image checked for this segment, if any - a
+    no_sign_read/no_coverage result still fetched (or tried to fetch)
+    imagery, just didn't read a sign in it."""
+    if match is not None:
+        return match.image_details[match.matched_image_index].capture_date
+    if attempt is not None and attempt.image_details:
+        return attempt.image_details[0].capture_date
+    return None
+
+
 def _row_context(row_dict: dict) -> dict:
     """The subset of a segment's source row worth carrying per-segment in
     status.json (results table + breakdown-by-category) - not the full
@@ -376,6 +392,7 @@ def _build_csv_row(candidate_row, attempt, match, error: Optional[str]) -> dict:
         "freeflow_mph": row_dict.get("freeflow_mph", ""),
         "note": attempt.note if attempt is not None else "",
         "image_count": len(attempt.image_details) if attempt is not None else 0,
+        "streetview_capture_date": _image_capture_date(attempt, match) or "",
         "annotated_image_path": str(attempt.annotated_image) if attempt is not None and attempt.annotated_image else "",
         "error": error or "",
         "row_json": json.dumps(row_dict, default=str),
@@ -545,11 +562,17 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                         seg_summary.update(_row_context(dict(candidates[i].items())))
                     elif attempt.status == "match":
                         status["matched_count"] += 1
-                        seg_summary = {"segment_id": attempt.segment_id, "status": "match", "matched_speed_mph": match.reading.speed_mph}
+                        seg_summary = {
+                            "segment_id": attempt.segment_id, "status": "match", "matched_speed_mph": match.reading.speed_mph,
+                            "streetview_capture_date": _image_capture_date(attempt, match),
+                        }
                         seg_summary.update(_row_context(attempt.row))
                     elif attempt.status == "no_sign_read":
                         status["no_sign_count"] += 1
-                        seg_summary = {"segment_id": attempt.segment_id, "status": "no_sign_read"}
+                        seg_summary = {
+                            "segment_id": attempt.segment_id, "status": "no_sign_read",
+                            "streetview_capture_date": _image_capture_date(attempt, match),
+                        }
                         seg_summary.update(_row_context(attempt.row))
                     else:
                         status["no_coverage_count"] += 1

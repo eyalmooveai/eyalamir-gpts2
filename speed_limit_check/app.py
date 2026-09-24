@@ -630,7 +630,7 @@ def result_page(job_id):
     attempts_view = []
     for a in result.attempts:
         images_js = [
-            {"url": _image_url(d.path), "heading": d.heading, "snippet": d.ocr_snippet, "lat": d.lat, "lon": d.lon}
+            {"url": _image_url(d.path), "heading": d.heading, "snippet": d.ocr_snippet, "lat": d.lat, "lon": d.lon, "date": d.capture_date}
             for d in a.image_details
         ]
         matched_index = a.matched_image_index if a.matched_image_index is not None else 0

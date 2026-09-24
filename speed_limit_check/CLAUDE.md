@@ -108,6 +108,20 @@
     block) so the live-polling view matches the server-rendered initial
     one - if `_row_context`'s field set ever changes, update both the
     Jinja results-table columns AND that JS block together.
+  - **Every result (single sign-checker run and each Evaluator segment)
+    records when Google captured the Street View image it's based on**
+    (`find_bad_speed_limit.ImageDetail.capture_date`, "YYYY-MM" - from the
+    Street View *metadata* response's own `date` field, read off the same
+    metadata call `streetview_coverage()` already makes before fetching
+    images at a position - not a second billed request, and not something
+    derivable from the image bytes themselves). `batch_evaluator._image_capture_date(attempt, match)`
+    picks the matched image's date when there's a match, else the first
+    image tried for that segment - used by both `_build_csv_row`
+    (`streetview_capture_date` column) and the per-segment `status["results"]`
+    entries (`evaluator_status.html`'s Results table, another Jinja/JS
+    pair to keep in sync - see above). `result.html` shows it both for
+    the winning match and per-image in the lightbox. Can be blank/"unknown"
+    - Google doesn't always return a capture date.
   - **Two hard caps, both enforced server-side (never trust the HTML
     form's `min`/`max` alone - those are just UX hints)**:
     `batch_evaluator.MAX_SEGMENT_COUNT` (1000) clamps `segment_count` in

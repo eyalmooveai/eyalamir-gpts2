@@ -968,6 +968,14 @@ class ImageDetail:
     lon: float
     heading: Optional[int]
     ocr_snippet: str = ""
+    # When Google captured this panorama ("YYYY-MM", e.g. "2022-06") - from
+    # the Street View metadata response's own "date" field (see
+    # streetview_coverage), not the image bytes themselves (which carry no
+    # EXIF/capture-date metadata of their own). None if Google didn't
+    # report one for this location. This is the same metadata call already
+    # made to check coverage before fetching images at this point - reading
+    # "date" off it is free, not a second billed request.
+    capture_date: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -1392,7 +1400,10 @@ def _process_one_candidate(
             snippet = " / ".join(ocr_text.split("\n")[:6])[:200] or "(no text detected)"
             log(f"    {image_path.name}: OCR saw: {snippet}")
             image_details.append(
-                ImageDetail(path=image_path, lat=p_lat, lon=p_lon, heading=heading_from_filename(image_path), ocr_snippet=snippet)
+                ImageDetail(
+                    path=image_path, lat=p_lat, lon=p_lon, heading=heading_from_filename(image_path),
+                    ocr_snippet=snippet, capture_date=coverage.get("date"),
+                )
             )
             if reading:
                 break
@@ -1472,6 +1483,7 @@ def main() -> int:
         print(f"Segment: here_segment_id={m.row['here_segment_id']}  street_name={m.row['street_name']}")
         print(f"Segment centroid: {m.row['centroid_lat']:.6f}, {m.row['centroid_lon']:.6f}")
         print(f"Sign location: {matched_detail.lat:.6f}, {matched_detail.lon:.6f}  (heading {matched_detail.heading}°)")
+        print(f"Street View image captured: {matched_detail.capture_date or 'unknown'}")
         print(f"Sign reading: {m.reading.speed_mph} mph  ({m.reading.evidence})")
         print(f"Annotated image: {m.annotated_image}")
         print(f"Raw Street View image: {m.reading.image_path}")

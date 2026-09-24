@@ -20,6 +20,7 @@
         &middot; {{ m.row.street_name or "(unnamed street)" }}
         &middot; {{ "%.6f"|format(m.row.centroid_lat) }}, {{ "%.6f"|format(m.row.centroid_lon) }}
         &middot; <a href="https://www.google.com/maps?q=&layer=c&cbll={{ m.row.centroid_lat }},{{ m.row.centroid_lon }}" target="_blank" rel="noopener">open in Street View</a>
+        &middot; Street View image captured: {{ m.image_details[m.matched_image_index].capture_date or "unknown" }}
       </p>
       <table>
         {% for key, value in m.row.items() %}
@@ -105,6 +106,7 @@
       <div class="lightbox-caption">
         <div class="heading-label" id="lb-heading-label"></div>
         <div id="lb-position" style="color:#bbb; font-size:0.75rem;"></div>
+        <div id="lb-date" style="color:#bbb; font-size:0.75rem;"></div>
         <div id="lb-snippet"></div>
       </div>
       <div class="lightbox-map-wrap"><div id="lb-map"></div></div>
@@ -215,6 +217,7 @@
       (item.heading !== null && item.heading !== undefined) ? `Heading ${item.heading}° (0=N, 90=E, 180=S, 270=W)` : 'Heading unknown';
     document.getElementById('lb-position').textContent =
       (item.lat !== undefined && item.lon !== undefined) ? `${Number(item.lat).toFixed(6)}, ${Number(item.lon).toFixed(6)}` : '';
+    document.getElementById('lb-date').textContent = `Street View image captured: ${item.date || 'unknown'}`;
     document.getElementById('lb-counter').textContent = `${LB_INDEX + 1} / ${LB_IMAGES.length}`;
     document.getElementById('lb-prev').disabled = LB_INDEX <= 0;
     document.getElementById('lb-next').disabled = LB_INDEX >= LB_IMAGES.length - 1;

@@ -465,8 +465,9 @@ the same numbers that feed the estimator above), a breakdown table
 grouped by `functional_class` (segments checked/matched/no-sign/
 no-coverage/errors/match rate per class), a per-segment results table
 (functional_class plus the segment's OSM/HERE/inferred/observed-average/
-freeflow speed values alongside its match status - the same fields the
-CSV export carries), and a Cancel button while it's running. This page -
+freeflow speed values alongside its match status and when Google captured
+the Street View image the result is based on - the same fields the CSV
+export carries), and a Cancel button while it's running. This page -
 and the run's entry in `/speed-limits-evaluator`'s history table - work
 from **durably persisted status**, not just an in-memory job you have to
 keep a browser tab open for: status is written to
