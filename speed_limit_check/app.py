@@ -60,8 +60,7 @@ from quality_metrics import (
 # to add here, so the hub is truthful about what exists without promising
 # a href that 404s.
 HUB_MODELS = [
-    {"name": "Speed Limits", "description": "Inferred speed limit quality vs. OSM/HERE/observed speeds, and a per-segment Street View sign checker.", "href": "/speed-limits"},
-    {"name": "Speed-Limits Evaluator", "description": "Batch-check up to 1000 road segments' signs at once for a state, concurrently - durable, resumable-to-check-on status, CSV export.", "href": "/speed-limits-evaluator"},
+    {"name": "Speed Limits", "description": "Inferred speed limit quality vs. OSM/HERE/observed speeds, a per-segment Street View sign checker, and a batch evaluator across up to 1000 segments at once.", "href": "/speed-limits"},
     {"name": "Lanes", "description": "Not yet available in Archimedes.", "href": None},
     {"name": "Construction Zones", "description": "Not yet available in Archimedes.", "href": None},
     {"name": "Accident Prediction", "description": "Not yet available in Archimedes.", "href": None},
