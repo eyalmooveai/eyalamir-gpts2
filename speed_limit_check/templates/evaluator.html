@@ -42,6 +42,17 @@
 </div>
 {% endif %}
 
+<div class="card" id="ev-estimate-card">
+  <h3 style="margin-top:0;">Estimated cost &amp; time for a new run</h3>
+  <div style="display:flex; gap:24px; flex-wrap:wrap;">
+    <div><div class="stat-value" id="ev-est-cost" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated cost</div></div>
+    <div><div class="stat-value" id="ev-est-time" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated time to completion</div></div>
+    <div><div class="stat-value" id="ev-est-calls" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Street View + Vision calls</div></div>
+  </div>
+  <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;" id="ev-est-basis">-</p>
+  <p style="color:var(--muted); font-size:0.78rem; margin:8px 0 0;">Updates live as you change the settings below in "Start a new run" (segments, concurrency, walk/side/heading settings).</p>
+</div>
+
 <div class="card">
   <h3 style="margin-top:0;">Start a new run</h3>
   <form method="post" action="/speed-limits-evaluator/start">
@@ -145,16 +156,8 @@
     <label for="fov">Camera zoom (field of view, {{ min_fov }}-{{ max_fov }})</label>
     <input type="number" id="fov" name="fov" value="{{ default_fov }}" min="{{ min_fov }}" max="{{ max_fov }}" style="max-width:120px;">
 
-    <div style="margin-top:18px; padding:12px 14px; background:var(--bg); border:1px solid var(--border); border-radius:10px;">
-      <div style="display:flex; gap:24px; flex-wrap:wrap;">
-        <div><div class="stat-value" id="ev-est-cost" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated cost</div></div>
-        <div><div class="stat-value" id="ev-est-time" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Estimated time to completion</div></div>
-        <div><div class="stat-value" id="ev-est-calls" style="font-size:1.3rem; font-weight:700;">-</div><div class="stat-label" style="color:var(--muted); font-size:0.78rem;">Street View + Vision calls</div></div>
-      </div>
-      <p style="color:var(--muted); font-size:0.75rem; margin:8px 0 0;" id="ev-est-basis">-</p>
-    </div>
-
-    <p style="margin-top:14px;"><button type="submit">Start batch run</button></p>
+    <p style="margin-top:18px;"><button type="submit">Start batch run</button></p>
+    <p style="color:var(--muted); font-size:0.78rem; margin:6px 0 0;">See the live cost/time estimate above, near the past runs at the top of this page - it updates as you change the settings here.</p>
   </form>
 </div>
 
