@@ -303,9 +303,12 @@ need, though: only the `calc_out` `_<YEAR>_<MONTH>_details` tables carry
 `speed_limit_here_mph` and `freeflow_mph`. Picking a narrower one (e.g.
 `calc_out.speed_limits_US_latest`, a bare
 `calc_out.speed_limits_US_<YEAR>_<MONTH>` without `_details`, or either
-`archimedes_api.speed_limits_infer` view) surfaces BigQuery's
-"Unrecognized name" error in the page's error card rather than crashing -
-harmless to try, just not something these metrics can be computed from.
+`archimedes_api.speed_limits_infer` view) doesn't crash or show a raw
+BigQuery error - the page checks the selected table's actual columns up
+front and shows a plain-English warning naming what's missing and which
+metric(s) need it, with no query even attempted. Harmless to try, just
+not something these metrics can be computed from; pick a `_details` table
+instead.
 
 ### Choosing the inferred field
 

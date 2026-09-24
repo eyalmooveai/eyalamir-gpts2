@@ -52,7 +52,9 @@ from quality_metrics import (
     full_table_name,
     list_evaluable_tables,
     list_infer_fields,
+    list_table_columns,
     metric_labels,
+    missing_columns_report,
 )
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
@@ -387,6 +389,21 @@ def speed_limits_quality():
         else (infer_field_options[0] if infer_field_options else DEFAULT_INFER_FIELD)
     )
 
+    # Whether the selected table actually has every column the six metrics
+    # below need (they're one query, so even one missing column blocks all
+    # of them) - checked up front so a table like archimedes_api's views,
+    # which are missing speed_limit_here_mph/freeflow_mph, shows a plain-
+    # English explanation instead of a raw BigQuery "Unrecognized name"
+    # error. Same cheap cached metadata lookup as the two above - known
+    # synchronously, so no background job is needed when this fires.
+    warning = None
+    if not error:
+        try:
+            available_columns = list_table_columns(DEFAULT_PROJECT, selected_dataset, selected_table)
+            warning = missing_columns_report(available_columns, selected_infer_field)
+        except Exception as e:
+            error = f"Could not check {selected_option}'s columns: {type(e).__name__}: {e}"
+
     filters_echo = {
         "table": selected_option,
         "infer_field": selected_infer_field,
@@ -407,7 +424,7 @@ def speed_limits_quality():
     # the job (or its cache hit) completes. Only the breakdown table is
     # opt-in (group_by), computed by that same job.
     job_id = None
-    if not error:
+    if not error and not warning:
         try:
             param1 = float(filters_echo["param1"])
             param2 = float(filters_echo["param2"])
@@ -436,6 +453,7 @@ def speed_limits_quality():
         group_by_choices=GROUP_BY_CHOICES,
         us_state_codes=US_STATE_CODES,
         error=error,
+        warning=warning,
     )
 
 

@@ -59,36 +59,57 @@ GROUP_BY_CHOICES = ("none", "state", "functional_class", "state,functional_class
 # filled in with the actual submitted threshold (see metric_labels below)
 # - so the stat tile itself says e.g. "10 mph", not the literal word
 # "param1".
+# "name" is a short, stable label for this metric independent of the
+# current param1/param2 values (unlike label_template) - used when
+# reporting which metric(s) a missing column affects (see
+# missing_columns_report), where "Disagrees with OSM by 10+ mph" would be
+# a strange thing to show since the query isn't even running.
+# "required_columns" is every column besides {infer_field} this metric's
+# SQL references - together with whether "{infer_field}" appears in
+# "sql", that's everything missing_columns_report needs to know without
+# having to parse the SQL string itself.
 QUALITY_METRICS = [
     {
         "key": "diff_osm",
+        "name": "vs. OSM",
         "label_template": "Disagrees with OSM by {param1}+ mph",
         "sql": "ABS({infer_field} - speed_limit_osm_mph) >= @param1",
+        "required_columns": ["speed_limit_osm_mph"],
     },
     {
         "key": "diff_here",
+        "name": "vs. HERE",
         "label_template": "Disagrees with HERE by {param1}+ mph",
         "sql": "ABS({infer_field} - speed_limit_here_mph) >= @param1",
+        "required_columns": ["speed_limit_here_mph"],
     },
     {
         "key": "diff_speed_avg",
+        "name": "vs. observed avg speed",
         "label_template": "Disagrees with observed avg speed by {param1}+ mph",
         "sql": "ABS({infer_field} - speed_AVG_mph) >= @param1",
+        "required_columns": ["speed_AVG_mph"],
     },
     {
         "key": "diff_freeflow",
+        "name": "vs. freeflow speed",
         "label_template": "Disagrees with freeflow speed by {param1}+ mph",
         "sql": "ABS({infer_field} - freeflow_mph) >= @param1",
+        "required_columns": ["freeflow_mph"],
     },
     {
         "key": "speed_avg_high",
+        "name": "observed avg speed implausible",
         "label_template": "Observed avg speed over {param2} mph (implausible)",
         "sql": "speed_AVG_mph > @param2",
+        "required_columns": ["speed_AVG_mph"],
     },
     {
         "key": "freeflow_high",
+        "name": "freeflow speed implausible",
         "label_template": "Freeflow speed over {param2} mph (implausible)",
         "sql": "freeflow_mph > @param2",
+        "required_columns": ["freeflow_mph"],
     },
 ]
 
@@ -134,8 +155,9 @@ def default_table_name(year: str, month: str) -> str:
 # speed_limits_US* family (what the sign checker itself is built on), plus
 # archimedes_api's speed_limits_infer* views over it - the ones the user
 # originally expected this page to show, and still worth offering even
-# though they're missing columns some metrics need (picking one just
-# surfaces that as a normal BigQuery error in the page's error card).
+# though some of them are missing columns these metrics need (picking one
+# of those now shows a friendly warning instead of a raw BigQuery error -
+# see missing_columns_report).
 TABLE_SOURCES = (("calc_out", "speed_limits_US"), ("archimedes_api", "speed_limits_infer"))
 
 
@@ -188,6 +210,64 @@ def list_infer_fields(project: str, dataset: str, table: str, log=lambda msg: No
 
     key = cache_key("infer_fields", project, dataset, table)
     return cached_query(key, run, ttl_seconds=SCHEMA_CACHE_TTL_SECONDS, log=log)
+
+
+def list_table_columns(project: str, dataset: str, table: str, log=lambda msg: None) -> set[str]:
+    """Every column this specific table actually has - used to check
+    up front whether the metrics query below could even run against it
+    (see missing_columns_report), rather than finding out from a raw
+    BigQuery error after the fact. Cached for SCHEMA_CACHE_TTL_SECONDS -
+    see bq_cache."""
+    _validate_identifier(project, PROJECT_RE, "project")
+    _validate_identifier(dataset, DATASET_RE, "dataset")
+    _validate_identifier(table, TABLE_RE, "table")
+
+    def run() -> list[str]:
+        client = bigquery.Client(project=project)
+        query = f"""
+            SELECT column_name
+            FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+            WHERE table_name = @table
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("table", "STRING", table)])
+        return [row["column_name"] for row in client.query(query, job_config=job_config).result()]
+
+    key = cache_key("table_columns", project, dataset, table)
+    return set(cached_query(key, run, ttl_seconds=SCHEMA_CACHE_TTL_SECONDS, log=log))
+
+
+def missing_columns_report(available_columns: set[str], infer_field: str) -> Optional[str]:
+    """None if every metric in QUALITY_METRICS could actually run against
+    a table with these `available_columns` (given the selected
+    `infer_field`) - otherwise a short, plain-English explanation of
+    what's missing and which metric(s) it affects, meant to replace a
+    raw BigQuery "Unrecognized name" error on the page: that's an
+    internal detail, not something to show an end user without
+    explanation or a next step. The query is one shot computing all six
+    metrics together, so even one missing column blocks the whole page -
+    this is checked before attempting it at all."""
+    missing_overall: set[str] = set()
+    affected_metrics: list[str] = []
+    for m in QUALITY_METRICS:
+        needed = set(m["required_columns"])
+        if "{infer_field}" in m["sql"]:
+            needed.add(infer_field)
+        missing = needed - available_columns
+        if missing:
+            missing_overall |= missing
+            affected_metrics.append(m["name"])
+
+    if not missing_overall:
+        return None
+
+    columns_str = ", ".join(f"`{c}`" for c in sorted(missing_overall))
+    metrics_str = ", ".join(affected_metrics)
+    return (
+        f"This table is missing the column(s) {columns_str}, which the {metrics_str} metric(s) need - "
+        f"so none of the metrics on this page can be computed from it (they're all one query). "
+        f"Pick a different table from the dropdown above - the `_details` tables "
+        f"(e.g. `calc_out.speed_limits_US_<YEAR>_<MONTH>_details`) have the full set of columns these metrics need."
+    )
 
 
 def full_table_name(f: QualityFilters) -> str:

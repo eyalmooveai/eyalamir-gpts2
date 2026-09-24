@@ -141,11 +141,22 @@
   option, `archimedes_api`'s two views included, is missing at least
   `speed_limit_here_mph`/`freeflow_mph` (and `_2026_02` is also missing
   `speed_limit_infer_mph_corrected`). Selecting one of those in the
-  dropdown is expected to surface a BigQuery "Unrecognized name" error in
-  the page's error card - this is normal, not a bug to fix. The dropdown's
-  option value is `"<dataset>.<table>"` since the two sources span
-  different datasets - `QualityFilters.dataset` is no longer hardcoded to
-  `DEFAULT_DATASET` for this page, it comes from the selected option.
+  dropdown does NOT surface a raw BigQuery "Unrecognized name" error
+  anymore - `quality_metrics.list_table_columns`/`missing_columns_report`
+  check the selected table's actual columns (against every
+  `QUALITY_METRICS` entry's `required_columns`, plus `infer_field` where
+  used) synchronously, before starting the async metrics job, and
+  `speed_limits_quality()` in app.py renders that as a friendly, amber
+  `.badge.warn` explanation (`quality.html`'s `warning` branch) naming the
+  missing column(s), the affected metric(s), and instructing the user to
+  pick a different table - no query is even attempted in that case. Keep
+  this in sync if a metric's SQL or `required_columns` changes: a metric
+  referencing a new column without updating `required_columns` would let
+  a bad table slip past this check and hit BigQuery's own error again. The
+  dropdown's option value is `"<dataset>.<table>"` since the two sources
+  span different datasets - `QualityFilters.dataset` is no longer
+  hardcoded to `DEFAULT_DATASET` for this page, it comes from the selected
+  option.
 - The "inferred speed limit" column (`QualityFilters.infer_field`, what
   all four diff_* metrics compare against) also varies by table, same as
   the table list itself - don't hardcode

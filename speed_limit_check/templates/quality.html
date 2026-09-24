@@ -9,6 +9,11 @@
       <span class="badge err">Error</span>
       <pre class="log">{{ error }}</pre>
     </div>
+  {% elif warning %}
+    <div class="card">
+      <span class="badge warn">This table can't be evaluated</span>
+      <p style="margin:10px 0 0;">{{ warning }}</p>
+    </div>
   {% elif job_id %}
     <div class="card">
       <p id="quality-loading-message" style="margin-top:0;">Running BigQuery query&hellip;</p>
