@@ -66,6 +66,8 @@ from quality_metrics import (
     US_STATE_CODES,
     QualityFilters,
     default_table_name,
+    fetch_custom_metric,
+    fetch_custom_sample,
     fetch_quality_metrics,
     fetch_sample_mismatches,
     full_table_name,
@@ -75,6 +77,7 @@ from quality_metrics import (
     metric_labels,
     missing_columns_report,
 )
+from custom_metrics import ExpressionError, resolve_custom_criterion
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -192,6 +195,18 @@ def _google_maps_js_key() -> str:
     return "" if key == "your-key-here" else key
 
 
+def _anthropic_api_key() -> str | None:
+    """For the Custom test box's natural-language translation (see
+    custom_metrics.resolve_custom_criterion) - same KEY=VALUE loading as
+    GOOGLE_MAPS_API_KEY (see load_keys_file(DEFAULT_KEYS_FILE) above), a
+    separate key from this app's other Google Cloud credentials. None
+    (not "") when unset, so callers can tell "not configured" apart from
+    "configured as empty" - custom_metrics treats either as "no LLM
+    fallback available" but the two have different causes to report."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    return key or None
+
+
 def _read_criteria_from_form(form) -> dict[str, tuple[bool, float]]:
     criteria = {}
     for c in CRITERIA_DEFS:
@@ -214,9 +229,43 @@ def _parse_csv_field(raw: str, *, upper: bool = False) -> tuple[str, ...]:
     return tuple((s.strip().upper() if upper else s.strip()) for s in raw.split(",") if s.strip())
 
 
+def _quality_filters_from_args(args, *, require_infer_field: bool = False) -> tuple[QualityFilters | None, tuple | None]:
+    """Common table/infer_field/param1/param2/states/fc/zip_codes/counties
+    parsing shared by the Quality page's on-demand JSON endpoints
+    (sample-mismatches, custom-test, custom-test/sample) - returns
+    (QualityFilters, None) on success or (None, (response, status)) on a
+    parse error, so callers can `filters, err = ...(); if err: return err`."""
+    table_option = args.get("table", "").strip()
+    dataset, _, table = table_option.partition(".")
+    infer_field = args.get("infer_field", "").strip()
+    if not (dataset and table) or (require_infer_field and not infer_field):
+        msg = "Table and inferred field are required." if require_infer_field else "Table is required."
+        return None, (jsonify({"error": msg}), 400)
+    try:
+        param1 = float(args.get("param1", "10") or 10)
+        param2 = float(args.get("param2", "80") or 80)
+    except ValueError:
+        return None, (jsonify({"error": "Invalid mismatch/implausible-speed threshold."}), 400)
+    states = _parse_csv_field(args.get("states", ""), upper=True)
+    fcs_raw = _parse_csv_field(args.get("fc", ""))
+    try:
+        fcs = tuple(int(v) for v in fcs_raw)
+    except ValueError:
+        return None, (jsonify({"error": "Functional class(es) must be whole numbers."}), 400)
+    zip_codes = _parse_csv_field(args.get("zip_codes", ""))
+    counties = _parse_csv_field(args.get("counties", ""))
+    filters = QualityFilters(
+        project=DEFAULT_PROJECT, dataset=dataset, table=table, infer_field=infer_field or DEFAULT_INFER_FIELD,
+        param1=param1, param2=param2, states=states, functional_classes=fcs,
+        zip_codes=zip_codes, counties=counties,
+    )
+    return filters, None
+
+
 def _preview_candidates_response(
     project: str, dataset: str, state: str, year: str, month: str,
     criteria: dict, zip_codes: tuple[str, ...], counties: tuple[str, ...], requested_count: int,
+    custom_criterion_text: str = "",
 ):
     """Shared body of the "preview these candidates on a map before
     running" endpoints (sign checker + Evaluator launch pages) - the same
@@ -225,16 +274,30 @@ def _preview_candidates_response(
     Walk/side/heading/fov settings don't affect *which* segments get
     selected (only how each one is later checked), so this only needs
     state/year/month/project/dataset/criteria/zip_codes/counties/count -
-    a real subset of what evaluator_start()/run() read from their forms."""
+    a real subset of what evaluator_start()/run() read from their forms.
+    custom_criterion_text (the Custom test box's raw text, carried over
+    from the Quality page or typed directly here) is re-validated fresh
+    against this specific table's live columns on every call - see
+    custom_metrics.py's module docstring for why that can't be skipped."""
     if not (state and year and month):
         return jsonify({"error": "State, year, and month are all required."}), 400
     preview_limit = max(1, min(requested_count, PREVIEW_MAX_SEGMENTS))
     try:
         _validate_identifier(state, STATE_RE, "state (expected 2 letters, e.g. NC)")
         table = table_name(state, year, month)
+        custom_criterion_sql = None
+        if custom_criterion_text.strip():
+            available_columns = list_table_columns(project, dataset, table)
+            validated, _source, _explanation = resolve_custom_criterion(
+                custom_criterion_text, available_columns, _anthropic_api_key(),
+            )
+            custom_criterion_sql = validated.sql
         candidates = fetch_candidates(
             project, dataset, table, criteria, preview_limit, state=state, zip_codes=zip_codes, counties=counties,
+            custom_criterion_sql=custom_criterion_sql,
         )
+    except ExpressionError as e:
+        return jsonify({"error": f"Custom test: {e}"}), 400
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -300,6 +363,7 @@ def _run_job(
     criteria: dict[str, tuple[bool, float]],
     zip_codes: tuple[str, ...],
     counties: tuple[str, ...],
+    custom_criterion_sql: str | None,
     segment_id: str | None,
     walk_all: bool,
     walk_segment: bool,
@@ -330,6 +394,7 @@ def _run_job(
             criteria=criteria,
             zip_codes=zip_codes,
             counties=counties,
+            custom_criterion_sql=custom_criterion_sql,
             segment_id=segment_id,
             walk_all=walk_all,
             walk_segment=walk_segment,
@@ -589,31 +654,9 @@ def quality_sample_mismatches():
     if metric_key not in QUALITY_METRIC_KEYS:
         return jsonify({"error": f"Invalid metric {metric_key!r} - must be one of {QUALITY_METRIC_KEYS}"}), 400
 
-    table_option = request.args.get("table", "").strip()
-    dataset, _, table = table_option.partition(".")
-    infer_field = request.args.get("infer_field", "").strip()
-    if not (dataset and table and infer_field):
-        return jsonify({"error": "Table and inferred field are required."}), 400
-
-    try:
-        param1 = float(request.args.get("param1", "10") or 10)
-        param2 = float(request.args.get("param2", "80") or 80)
-    except ValueError:
-        return jsonify({"error": "Invalid mismatch/implausible-speed threshold."}), 400
-    states = _parse_csv_field(request.args.get("states", ""), upper=True)
-    fcs_raw = _parse_csv_field(request.args.get("fc", ""))
-    try:
-        fcs = tuple(int(v) for v in fcs_raw)
-    except ValueError:
-        return jsonify({"error": "Functional class(es) must be whole numbers."}), 400
-    zip_codes = _parse_csv_field(request.args.get("zip_codes", ""))
-    counties = _parse_csv_field(request.args.get("counties", ""))
-
-    base = QualityFilters(
-        project=DEFAULT_PROJECT, dataset=dataset, table=table, infer_field=infer_field,
-        param1=param1, param2=param2, states=states, functional_classes=fcs,
-        zip_codes=zip_codes, counties=counties,
-    )
+    base, err = _quality_filters_from_args(request.args, require_infer_field=True)
+    if err:
+        return err
     try:
         rows = fetch_sample_mismatches(base, metric_key, PREVIEW_MAX_SEGMENTS)
     except ValueError as e:
@@ -636,12 +679,103 @@ def quality_sample_mismatches():
     })
 
 
+def _validate_quality_custom_text(text: str, base: QualityFilters):
+    """Returns (validated_expression, source, explanation, None) on
+    success or (None, None, None, (response, status)) on failure -
+    shared by both "Custom test" endpoints below, which must each
+    independently re-validate the raw text against the live current
+    table's columns. Never accept an already-validated SQL string from
+    the client for reuse here - see custom_metrics.py's module docstring
+    for why that would defeat the whole point of validating in the first
+    place."""
+    if not text:
+        return None, None, None, (jsonify({"error": "Enter a comparison, or describe one in plain English."}), 400)
+    try:
+        available_columns = list_table_columns(DEFAULT_PROJECT, base.dataset, base.table)
+    except Exception as e:
+        return None, None, None, (
+            jsonify({"error": f"Could not check {base.dataset}.{base.table}'s columns: {type(e).__name__}: {e}"}), 500,
+        )
+    try:
+        validated, source, explanation = resolve_custom_criterion(text, available_columns, _anthropic_api_key())
+    except ExpressionError as e:
+        return None, None, None, (jsonify({"error": str(e)}), 400)
+    return validated, source, explanation, None
+
+
+@app.route("/speed-limits/custom-test", methods=["POST"])
+def quality_custom_test():
+    """The "Custom test" box's result: how many segments (of the current
+    state/functional_class/zip/county filters) match a user-defined
+    comparison - either typed directly or translated from plain English
+    by Claude (see custom_metrics.py). Synchronous, not a background job
+    - it's one cheap COUNT/SUM aggregate, not the nationwide six-metric
+    query the rest of this page runs."""
+    text = request.form.get("text", "").strip()
+    base, err = _quality_filters_from_args(request.form, require_infer_field=False)
+    if err:
+        return err
+    validated, source, explanation, err = _validate_quality_custom_text(text, base)
+    if err:
+        return err
+    try:
+        result = fetch_custom_metric(base, validated.sql)
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    total = result.get("total_segments") or 0
+    matching = result.get("matching_count") or 0
+    return jsonify({
+        "sql": validated.sql,
+        "has_magnitude": validated.magnitude_sql is not None,
+        "source": source,
+        "explanation": explanation,
+        "total_segments": total,
+        "matching_count": matching,
+        "pct_matching": (100.0 * matching / total) if total else 0.0,
+    })
+
+
+@app.route("/speed-limits/custom-test/sample", methods=["POST"])
+def quality_custom_test_sample():
+    """The Custom test box's "show these on a map" - up to
+    PREVIEW_MAX_SEGMENTS real matching segments, worst-first when the
+    expression has a natural magnitude (see
+    custom_metrics.ValidatedExpression.magnitude_sql)."""
+    text = request.form.get("text", "").strip()
+    base, err = _quality_filters_from_args(request.form, require_infer_field=False)
+    if err:
+        return err
+    validated, source, explanation, err = _validate_quality_custom_text(text, base)
+    if err:
+        return err
+    try:
+        rows = fetch_custom_sample(base, validated.sql, validated.magnitude_sql, PREVIEW_MAX_SEGMENTS)
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify({
+        "points": [
+            {
+                "segment_id": r.get("here_segment_id"), "lat": r.get("lat"), "lon": r.get("lon"),
+                "street_name": r.get("street_name"), "functional_class": r.get("functional_class"),
+                "state": r.get("state"), "magnitude": r.get("magnitude"),
+            }
+            for r in rows
+        ],
+        "shown": len(rows),
+        "cap": PREVIEW_MAX_SEGMENTS,
+        "sql": validated.sql,
+        "source": source,
+    })
+
+
 @app.route("/sign-checker", methods=["GET"])
 def sign_checker():
     return render_template(
         "index.html",
         default_project=DEFAULT_PROJECT,
         default_dataset=DEFAULT_DATASET,
+        default_state=request.args.get("state", "").strip().upper(),
+        default_custom_test=request.args.get("custom_test", ""),
         criteria_defs=CRITERIA_DEFS,
         default_headings=WEB_DEFAULT_HEADINGS,
         default_headings_relative=WEB_DEFAULT_HEADINGS_RELATIVE,
@@ -671,6 +805,7 @@ def sign_checker_preview_candidates():
         _read_criteria_from_form(request.form),
         _parse_csv_field(request.form.get("zip_codes", "")), _parse_csv_field(request.form.get("counties", "")),
         requested_count,
+        custom_criterion_text=request.form.get("custom_test", ""),
     )
 
 
@@ -712,16 +847,33 @@ def run():
     criteria = _read_criteria_from_form(request.form)
     zip_codes = _parse_csv_field(request.form.get("zip_codes", ""))
     counties = _parse_csv_field(request.form.get("counties", ""))
+    custom_criterion_text = request.form.get("custom_test", "").strip()
 
     if not (state and year and month):
         return render_template("error.html", message="State, year, and month are all required.", log=[])
+
+    # Same re-validation as evaluator_start() - ignored (like zip/county
+    # and the checkbox criteria already are) when checking one specific
+    # segment_id, since that path bypasses candidate selection entirely.
+    custom_criterion_sql = None
+    if custom_criterion_text and not segment_id:
+        try:
+            _validate_identifier(state, STATE_RE, "state (expected 2 letters, e.g. NC)")
+            table = table_name(state, year, month)
+            available_columns = list_table_columns(project, dataset, table)
+            validated, _source, _explanation = resolve_custom_criterion(
+                custom_criterion_text, available_columns, _anthropic_api_key(),
+            )
+            custom_criterion_sql = validated.sql
+        except (ValueError, ExpressionError) as e:
+            return render_template("error.html", message=f"Custom test: {e}", log=[])
 
     job_id = _new_job(state, year, month, segment_id, walk_all, walk_segment)
     thread = threading.Thread(
         target=_run_job,
         args=(
             job_id, state, year, month, project, dataset, max_candidates,
-            criteria, zip_codes, counties, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
+            criteria, zip_codes, counties, custom_criterion_sql, segment_id, walk_all, walk_segment, walk_segment_spacing_m,
             side_mode, side_offset_m, auto_side_offset, headings, headings_relative, fov,
         ),
         daemon=True,
@@ -846,7 +998,9 @@ def evaluator_index():
         default_year=DEFAULT_QUALITY_YEAR,
         default_month=DEFAULT_QUALITY_MONTH,
         default_project=DEFAULT_PROJECT,
-        default_dataset=DEFAULT_DATASET,
+        default_dataset=request.args.get("dataset", "").strip() or DEFAULT_DATASET,
+        default_state=request.args.get("state", "").strip().upper(),
+        default_custom_test=request.args.get("custom_test", ""),
         default_segment_count=EVALUATOR_DEFAULT_SEGMENT_COUNT,
         max_segment_count=MAX_EVALUATOR_SEGMENT_COUNT,
         default_concurrency=EVALUATOR_DEFAULT_CONCURRENCY,
@@ -882,6 +1036,7 @@ def evaluator_preview_candidates():
         _read_criteria_from_form(request.form),
         _parse_csv_field(request.form.get("zip_codes", "")), _parse_csv_field(request.form.get("counties", "")),
         requested_count,
+        custom_criterion_text=request.form.get("custom_test", ""),
     )
 
 
@@ -934,8 +1089,28 @@ def evaluator_start():
     criteria = _read_criteria_from_form(request.form)
     zip_codes = _parse_csv_field(request.form.get("zip_codes", ""))
     counties = _parse_csv_field(request.form.get("counties", ""))
+    custom_criterion_text = request.form.get("custom_test", "").strip()
 
     label = label or f"{state}_{year}_{month}_{_now_label_suffix()}"
+
+    # Re-validated here (never trust a client-supplied "already validated"
+    # SQL string) against this specific state/year/month table's live
+    # columns - see custom_metrics.py's module docstring. Done
+    # synchronously so a bad custom test is rejected immediately, same as
+    # every other validation error in this route, rather than starting a
+    # batch that only fails once run_batch gets to it.
+    custom_criterion_sql = None
+    if custom_criterion_text:
+        try:
+            _validate_identifier(state, STATE_RE, "state (expected 2 letters, e.g. NC)")
+            table = table_name(state, year, month)
+            available_columns = list_table_columns(project, dataset, table)
+            validated, _source, _explanation = resolve_custom_criterion(
+                custom_criterion_text, available_columns, _anthropic_api_key(),
+            )
+            custom_criterion_sql = validated.sql
+        except (ValueError, ExpressionError) as e:
+            return render_template("error.html", message=f"Custom test: {e}", log=[])
 
     # Same $600/day/user cap run_batch itself re-checks live as the run
     # progresses (see batch_evaluator.DAILY_COST_CAP_USD) - checked here
@@ -958,6 +1133,7 @@ def evaluator_start():
         label=label, state=state, year=year, month=month, project=project, dataset=dataset,
         segment_count=segment_count, concurrency=concurrency, criteria=criteria,
         zip_codes=zip_codes, counties=counties,
+        custom_criterion_text=custom_criterion_text, custom_criterion_sql=custom_criterion_sql,
         walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
         side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
         headings=headings, headings_relative=headings_relative, fov=fov,

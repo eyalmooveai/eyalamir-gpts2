@@ -20,6 +20,14 @@
 #                    single region - separate from REGION because Cloud
 #                    Run needs a specific region (no "US") while a GCS
 #                    bucket can use a broader multi-region (default: REGION)
+#   ANTHROPIC_API_KEY  Anthropic API key, for the Speed-Limits Quality
+#                      page's "Custom test" box translating plain-English
+#                      comparisons into a query (see speed_limit_check/CLAUDE.md).
+#                      Optional - the box still works for direct
+#                      expressions without this; only the natural-language
+#                      translation needs it. If unset, this script does not
+#                      create/update the ANTHROPIC_API_KEY secret or attach
+#                      it to the service.
 #   SKIP_IAM_GRANTS  Set to any non-empty value to skip every IAM grant
 #                    this script would otherwise make - both the runtime
 #                    service account's roles and the INVOKER_EMAIL grant -
@@ -59,6 +67,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="speed-limit-check"
 SA_NAME="speed-limit-check-runner"
 SECRET_NAME="speed-limit-check-maps-key"
+ANTHROPIC_SECRET_NAME="speed-limit-check-anthropic-key"
 SA="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 
 echo "== Deploying $SERVICE_NAME to project $PROJECT_ID ($REGION) =="
@@ -87,6 +96,17 @@ if gcloud secrets describe "$SECRET_NAME" >/dev/null 2>&1; then
   printf '%s' "$MAPS_API_KEY" | gcloud secrets versions add "$SECRET_NAME" --data-file=-
 else
   printf '%s' "$MAPS_API_KEY" | gcloud secrets create "$SECRET_NAME" --data-file=-
+fi
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "-- Anthropic API key secret --"
+  if gcloud secrets describe "$ANTHROPIC_SECRET_NAME" >/dev/null 2>&1; then
+    printf '%s' "$ANTHROPIC_API_KEY" | gcloud secrets versions add "$ANTHROPIC_SECRET_NAME" --data-file=-
+  else
+    printf '%s' "$ANTHROPIC_API_KEY" | gcloud secrets create "$ANTHROPIC_SECRET_NAME" --data-file=-
+  fi
+else
+  echo "-- Anthropic API key secret -- skipped (ANTHROPIC_API_KEY not set; Custom test's plain-English translation won't work until this is added)"
 fi
 
 echo "-- Runtime service account --"
@@ -131,6 +151,10 @@ else
     gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
   grant_iam "roles/secretmanager.secretAccessor on secret $SECRET_NAME for $SA" \
     gcloud secrets add-iam-policy-binding "$SECRET_NAME" --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    grant_iam "roles/secretmanager.secretAccessor on secret $ANTHROPIC_SECRET_NAME for $SA" \
+      gcloud secrets add-iam-policy-binding "$ANTHROPIC_SECRET_NAME" --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+  fi
 fi
 
 echo "-- Deploying to Cloud Run --"
@@ -146,6 +170,11 @@ echo "-- Deploying to Cloud Run --"
 # alone. Verify this after a deploy rather than assuming it, though:
 # visit the service's IAP-gated domain and confirm it still prompts a
 # Google sign-in.
+SET_SECRETS="GOOGLE_MAPS_API_KEY=$SECRET_NAME:latest"
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  SET_SECRETS="$SET_SECRETS,ANTHROPIC_API_KEY=$ANTHROPIC_SECRET_NAME:latest"
+fi
+
 gcloud run deploy "$SERVICE_NAME" \
   --source "$SCRIPT_DIR" \
   --region "$REGION" \
@@ -154,7 +183,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --max-instances=1 \
   --memory=1Gi \
   --set-env-vars="GCS_CACHE_BUCKET=$BUCKET_NAME" \
-  --set-secrets="GOOGLE_MAPS_API_KEY=$SECRET_NAME:latest"
+  --set-secrets="$SET_SECRETS"
 
 if [ -n "${SKIP_IAM_GRANTS:-}" ]; then
   echo "-- Granting invoker access to $INVOKER_EMAIL -- skipped (SKIP_IAM_GRANTS set)"

@@ -121,6 +121,15 @@ class BatchConfig:
     criteria: dict = dataclasses.field(default_factory=dict)
     zip_codes: tuple = ()  # see find_bad_speed_limit.build_geo_filter_sql
     counties: tuple = ()
+    # The "Custom test" box's original free text (kept for display/
+    # comparison - see the "record the full config" note below) and the
+    # already-validated SQL app.py derived from it via
+    # custom_metrics.resolve_custom_criterion(). run_batch must use
+    # custom_criterion_sql as-is and must NEVER re-derive it from
+    # custom_criterion_text itself - that validation already happened
+    # once, synchronously, in the route that built this config.
+    custom_criterion_text: str = ""
+    custom_criterion_sql: Optional[str] = None
     walk_segment: bool = True
     walk_segment_spacing_m: float = 15.0
     side_mode: str = "center"
@@ -544,6 +553,7 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
         candidates = fetch_candidates(
             config.project, config.dataset, table, config.criteria, config.segment_count,
             state=config.state, zip_codes=config.zip_codes, counties=config.counties,
+            custom_criterion_sql=config.custom_criterion_sql,
         )
         n = len(candidates)
         status["total_count"] = n

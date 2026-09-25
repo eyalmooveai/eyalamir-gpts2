@@ -109,6 +109,33 @@
   <div id="issue-map" style="height:440px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
 </div>
 
+<div class="card">
+  <h3 style="margin-top:0;">Custom test</h3>
+  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Write your own comparison - either a direct expression (e.g. <code>speed_AVG_mph > speed_limit_infer_mph_corrected + 10</code>) or plain English (e.g. "segments where the inferred limit and HERE disagree by more than 15 mph") and it's translated for you. Runs against the table/filters selected above. Only a fixed set of numeric/boolean columns can be referenced; everything is validated before it ever reaches BigQuery.</p>
+  <label for="custom-test-text">Test</label>
+  <textarea id="custom-test-text" rows="3" placeholder="e.g. speed_AVG_mph > 60 AND functional_class < 4" style="width:100%; resize:vertical; font-family:inherit;"></textarea>
+  <button type="button" class="btn-secondary" id="custom-test-btn" onclick="runCustomTest()" style="margin-top:10px;">Run custom test</button>
+  <div id="custom-test-result" style="display:none; margin-top:14px;">
+    <p id="custom-test-summary" style="margin:0 0 6px;"></p>
+    <p id="custom-test-explanation" style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;"></p>
+    <pre id="custom-test-sql" class="log" style="font-size:0.78rem;"></pre>
+    <div class="row-2" style="align-items:flex-end;">
+      <div style="display:flex; align-items:flex-end;">
+        <button type="button" class="btn-secondary" id="custom-test-map-btn" onclick="showCustomTestMap()" style="margin-bottom:0;">Show worst offenders on map</button>
+      </div>
+      <div>
+        <label for="custom-test-state">State to verify with Street View</label>
+        <input type="text" id="custom-test-state" placeholder="e.g. NC" list="state-list" style="text-transform:uppercase;">
+      </div>
+    </div>
+    <p style="margin:10px 0 0;">
+      <a href="#" id="custom-test-evaluator-link" onclick="return goVerifyCustomTest();" class="btn-secondary" style="text-decoration:none; display:inline-block;">Verify these with Street View &rarr;</a>
+    </p>
+    <p id="custom-test-map-message" style="color:var(--muted); font-size:0.82rem; margin:10px 0 0; display:none;"></p>
+    <div id="custom-test-map" style="height:440px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
+  </div>
+</div>
+
 {% if job_id %}
 <script>
 (function () {
@@ -219,6 +246,143 @@
         btn.disabled = false;
         msgEl.textContent = 'Could not load map: ' + err.message;
       });
+  };
+
+  let lastCustomTestSql = null;
+  let lastCustomTestText = '';
+  let customMap = null;
+  let customLayer = null;
+
+  function customTestFormData() {
+    const form = document.getElementById('quality-filters-form');
+    const fd = new FormData(form);
+    fd.set('text', document.getElementById('custom-test-text').value);
+    return fd;
+  }
+
+  window.runCustomTest = function () {
+    const btn = document.getElementById('custom-test-btn');
+    const text = document.getElementById('custom-test-text').value.trim();
+    if (!text) return;
+    lastCustomTestText = text;
+    btn.disabled = true;
+    const resultEl = document.getElementById('custom-test-result');
+    const summaryEl = document.getElementById('custom-test-summary');
+    const explEl = document.getElementById('custom-test-explanation');
+    const sqlEl = document.getElementById('custom-test-sql');
+    const mapEl = document.getElementById('custom-test-map');
+    const mapMsgEl = document.getElementById('custom-test-map-message');
+    resultEl.style.display = 'block';
+    mapEl.style.display = 'none';
+    mapMsgEl.style.display = 'none';
+    summaryEl.textContent = 'Running...';
+    explEl.textContent = '';
+    sqlEl.textContent = '';
+    lastCustomTestSql = null;
+
+    fetch('/speed-limits/custom-test', { method: 'POST', body: customTestFormData() })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        btn.disabled = false;
+        if (!ok || data.error) {
+          summaryEl.textContent = 'Error: ' + (data.error || 'unknown error');
+          return;
+        }
+        lastCustomTestSql = data.sql;
+        summaryEl.textContent = `${data.matching_count.toLocaleString()} of ${data.total_segments.toLocaleString()} segments match (${data.pct_matching.toFixed(2)}%).`;
+        explEl.textContent = data.source === 'llm' ? ('Translated from your text: ' + (data.explanation || '')) : '';
+        sqlEl.textContent = data.sql;
+      })
+      .catch(err => {
+        btn.disabled = false;
+        summaryEl.textContent = 'Error: ' + err.message;
+      });
+  };
+
+  window.showCustomTestMap = function () {
+    if (!lastCustomTestText) return;
+    const btn = document.getElementById('custom-test-map-btn');
+    const msgEl = document.getElementById('custom-test-map-message');
+    const mapEl = document.getElementById('custom-test-map');
+    btn.disabled = true;
+    msgEl.style.display = 'block';
+    msgEl.textContent = 'Loading...';
+    mapEl.style.display = 'none';
+
+    fetch('/speed-limits/custom-test/sample', { method: 'POST', body: customTestFormData() })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        btn.disabled = false;
+        if (!ok || data.error) {
+          msgEl.textContent = 'Could not load map: ' + (data.error || 'unknown error');
+          return;
+        }
+        const points = data.points || [];
+        msgEl.textContent = points.length
+          ? `Showing ${data.shown} matching segment(s)${data.shown >= data.cap ? ` (capped at ${data.cap})` : ''}.`
+          : 'No segments currently match this test under these filters.';
+        if (!points.length) return;
+
+        mapEl.style.display = 'block';
+        if (typeof L === 'undefined') {
+          msgEl.textContent += ' (Map library failed to load - list only.)';
+          return;
+        }
+        if (!customMap) {
+          customMap = L.map('custom-test-map', { scrollWheelZoom: false });
+          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(customMap);
+          customLayer = L.layerGroup().addTo(customMap);
+        }
+        customLayer.clearLayers();
+        const errColor = getComputedStyle(document.documentElement).getPropertyValue('--err').trim() || '#c62828';
+        const magnitudes = points.map(p => p.magnitude).filter(m => typeof m === 'number');
+        const minMag = magnitudes.length ? Math.min(...magnitudes) : 0;
+        const maxMag = magnitudes.length ? Math.max(...magnitudes) : 1;
+        const coords = [];
+        points.forEach(p => {
+          const lat = parseFloat(p.lat), lon = parseFloat(p.lon);
+          if (Number.isNaN(lat) || Number.isNaN(lon)) return;
+          coords.push([lat, lon]);
+          const hasMag = typeof p.magnitude === 'number';
+          const frac = hasMag && maxMag > minMag ? (p.magnitude - minMag) / (maxMag - minMag) : 0.5;
+          const radius = 5 + frac * 10;
+          const marker = L.circleMarker([lat, lon], { radius, color: '#fff', weight: 1, fillColor: errColor, fillOpacity: 0.7 });
+          const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`];
+          if (p.street_name) bits.push(escapeHtml(p.street_name));
+          if (hasMag) bits.push(`off by ${Number(p.magnitude).toFixed(1)} mph`);
+          if (typeof p.functional_class !== 'undefined' && p.functional_class !== null) bits.push(`functional class ${p.functional_class}`);
+          bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
+          marker.bindPopup(bits.join('<br>'));
+          marker.addTo(customLayer);
+        });
+        setTimeout(() => customMap.invalidateSize(), 0);
+        if (coords.length) customMap.fitBounds(coords, { padding: [24, 24], maxZoom: 15 });
+      })
+      .catch(err => {
+        btn.disabled = false;
+        msgEl.textContent = 'Could not load map: ' + err.message;
+      });
+  };
+
+  window.goVerifyCustomTest = function () {
+    if (!lastCustomTestText) return false;
+    const stateInput = document.getElementById('custom-test-state');
+    const state = (stateInput.value || '').trim().toUpperCase();
+    if (!state) {
+      stateInput.focus();
+      stateInput.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--err').trim() || '#c62828';
+      return false;
+    }
+    const form = document.getElementById('quality-filters-form');
+    const tableVal = form.querySelector('#table').value;
+    const parts = tableVal.split('.');
+    const dataset = parts.length > 1 ? parts[0] : '';
+    const params = new URLSearchParams();
+    params.set('state', state);
+    if (dataset) params.set('dataset', dataset);
+    params.set('custom_test', lastCustomTestText);
+    window.location.href = '/speed-limits-evaluator?' + params.toString();
+    return false;
   };
 })();
 </script>

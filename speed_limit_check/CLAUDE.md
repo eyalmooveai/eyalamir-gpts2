@@ -378,6 +378,59 @@
   a new module `Dockerfile`'s `COPY` line must include - don't forget it
   the way `quality_metrics.py` itself was once nearly forgotten there.
 
+- **Custom test** (the Speed-Limits Quality page's "Custom test" card,
+  plus the same textbox on the Evaluator's and Sign Checker's launch
+  forms) - lets a user write their own comparison instead of picking
+  from the six built-in `QUALITY_METRICS`, either a direct expression or
+  plain English translated by Claude, and actually run Street View
+  verification against whatever it selects. All of it lives in the new
+  `custom_metrics.py`, built around one non-negotiable invariant:
+  **never let user-controlled text reach a BigQuery query string
+  directly, LLM-translated or not.** `validate_custom_expression()` is a
+  hand-rolled tokenizer + recursive-descent parser (not regex, not an
+  external SQL parser) over a narrow grammar (comparisons/AND/OR/NOT;
+  +-*/ and `ABS()`/`ROUND()`) against a fixed allowlist of columns
+  (`COLUMN_TYPES` - deliberately excludes string/metadata columns). The
+  final SQL is re-serialized from the validated parse tree, never a
+  slice of the original input - that re-serialization, not the grammar
+  restriction alone, is what actually prevents injection (a grammar
+  check on the input text with the input text itself then used as the
+  query would still be exploitable). `resolve_custom_criterion()` is the
+  entry point every caller should use: it tries `validate_custom_expression()`
+  on the raw text first, and only if that fails - and an `ANTHROPIC_API_KEY`
+  is configured - calls `translate_to_expression()` (Claude, structured
+  output) and then runs *its* output back through the exact same
+  `validate_custom_expression()` before using it. Claude's output is
+  never trusted directly; it's just another candidate string for the
+  same validator raw user text goes through. Every endpoint
+  (`app.py`'s `/speed-limits/custom-test(/sample)`, `evaluator_start()`,
+  `run()`) re-derives the validated SQL from the original free-text
+  input on every request - none of them accept an already-validated SQL
+  string from the client, since that would let a client skip validation
+  entirely by just claiming its SQL is already safe.
+  `speed_limit_here_mph` gets the same `ROUND()` special-case here as
+  everywhere else in this app (see above) - `_parse_column` rewrites any
+  reference to it into `ROUND(speed_limit_here_mph)` automatically, so a
+  custom test can't reintroduce the km/h-conversion noise the rest of
+  the app already fixed. The parser has an explicit `_MAX_NESTING_DEPTH`
+  guard (40) at every self-recursion point, not just BigQuery's own
+  length/complexity limits - confirmed a deeply-nested-parens input
+  (`'(' * 200 + '1=1' + ')' * 200`, well under the 500-char length cap)
+  raises Python's own `RecursionError` without it. `find_bad_speed_limit.py`
+  (`build_candidates_query`/`fetch_candidates`/`run_pipeline`),
+  `batch_evaluator.BatchConfig`, and `quality_metrics.py` (new
+  `build_custom_metric_query`/`build_custom_sample_query` and their
+  `fetch_*` wrappers) all take an already-validated `custom_criterion_sql`
+  parameter, documented at each call site as "must already be the output
+  of `custom_metrics.validate_custom_expression()`" - never re-derive it
+  from raw text partway down the call stack, and never widen any of
+  these to accept a caller-supplied SQL string that skipped validation.
+  `requirements.txt` needs `pydantic` and `anthropic` for this (a hard
+  top-level import in `custom_metrics.py`, so the whole app fails to
+  start without them) and `Dockerfile`'s `COPY` line needs
+  `custom_metrics.py` - same "don't forget the new module" mistake this
+  file already warns about twice above.
+
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo
   is checked out at `~/Claude/MooveAI/eyalamir-gpts2/`, with

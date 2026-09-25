@@ -10,7 +10,7 @@
     <div class="row">
       <div>
         <label for="state">State</label>
-        <input type="text" id="state" name="state" placeholder="NC" maxlength="2" required>
+        <input type="text" id="state" name="state" value="{{ default_state }}" placeholder="NC" maxlength="2" required>
       </div>
       <div>
         <label for="year">Year</label>
@@ -64,6 +64,10 @@
     </div>
   </div>
   <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Narrows candidates to this state via a real spatial join, so no ambiguity between same-named counties elsewhere. Ignored when checking one specific segment above.</p>
+
+  <label for="custom_test">Custom test (optional)</label>
+  <textarea id="custom_test" name="custom_test" form="run-form" rows="2" placeholder="e.g. speed_AVG_mph > 60 AND functional_class < 4" style="width:100%; resize:vertical; font-family:inherit;">{{ default_custom_test }}</textarea>
+  <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">A direct expression or plain-English test (built on the Speed-Limits Quality page) - if set, candidates must also satisfy this. Ignored when checking one specific segment above.</p>
 
   <label for="candidates">Candidates to try</label>
   <input type="number" id="candidates" name="candidates" form="run-form" value="{{ default_candidates }}" min="1" max="50">

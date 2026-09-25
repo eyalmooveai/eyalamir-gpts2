@@ -105,6 +105,22 @@ mismatch everywhere it's compared or displayed.
    want to be careful anyway, add an HTTP referrer restriction on the key
    in the Cloud Console for `http://127.0.0.1:5050/*` and `http://localhost:5050/*`.
 
+4. **Anthropic API key (optional)**
+
+   Only needed for the Speed-Limits Quality page's "Custom test" box to
+   translate a plain-English comparison (e.g. "segments where the models
+   disagree by more than 15 mph") into a query - a directly-typed
+   expression (e.g. `speed_AVG_mph > speed_limit_infer_mph_corrected + 10`)
+   works without this. Add it to the same keys file:
+
+   ```bash
+   # in ~/Claude/MooveAI/keys.env
+   ANTHROPIC_API_KEY=sk-ant-...your real key...
+   ```
+
+   Without it, the Custom test box still accepts direct expressions; a
+   plain-English one is rejected with a message naming this key.
+
 ## Usage
 
 ### Web app
@@ -436,6 +452,33 @@ of the page, and not cached - it's meant to be a quick "show me" click),
 since the main metrics query is a pure nationwide aggregate with no
 individual segments to plot; this runs a real row-level query instead.
 
+### Custom test
+
+Below the map card, "Custom test" lets you write your own comparison
+instead of picking from the six built-in metrics - either a direct
+expression (`speed_AVG_mph > speed_limit_infer_mph_corrected + 10`,
+`ABS(speed_limit_osm_mph - speed_limit_here_mph) > 15 AND functional_class <= 3`)
+or plain English ("segments where the inferred limit and HERE disagree by
+more than 15 mph"), which Claude translates into an expression for you.
+"Run custom test" shows how many segments (of the current filters) match;
+"Show worst offenders on map" plots up to 300 of them the same way the
+built-in metrics do.
+
+Only a fixed set of numeric/boolean columns can be referenced (not every
+column on the table - see `custom_metrics.COLUMN_TYPES`), and whatever you
+type - typed directly or translated by Claude - is parsed into a small
+grammar (comparisons/AND/OR/NOT, +-*/, ABS()/ROUND()) and re-emitted as
+SQL from that parsed structure, never spliced from your text directly.
+This is what makes it safe to run against BigQuery: there's no way to
+express anything outside that grammar, regardless of what's typed.
+
+Once you have a test you like, pick a state and click "Verify these with
+Street View" to jump to the Evaluator with that state and test pre-filled
+- it runs the same Street View sign-checking pipeline as any other
+Evaluator run, just selecting candidates with your test instead of (or in
+addition to) the built-in criteria. The same box is also available
+directly on the Evaluator's and Sign Checker's own launch forms.
+
 ## Speed-Limits Evaluator
 
 `/speed-limits-evaluator` runs the sign checker's own per-segment logic
@@ -722,10 +765,14 @@ PROJECT_ID=your-deploy-project-id REGION=us-central1 BUCKET_NAME=your-bucket-nam
 
 `BQ_PROJECT_ID` is also settable if the `speed_limits_..._details` table
 lives in a different project than `PROJECT_ID` (defaults to
-`moove-platform-testing-data`). See the top of `deploy.sh` for the full
-list of variables. The manual step-by-step version below is exactly what
-it runs, useful if you want to understand or customize any individual
-piece.
+`moove-platform-testing-data`). Setting `ANTHROPIC_API_KEY` additionally
+creates/updates an `ANTHROPIC_API_KEY` secret and attaches it - needed for
+the Speed-Limits Quality page's "Custom test" box to translate
+plain-English comparisons; the box's direct-expression mode works without
+it, and skipping it is fine, just less capable. See the top of `deploy.sh`
+for the full list of variables. The manual step-by-step version below is
+exactly what it runs, useful if you want to understand or customize any
+individual piece.
 
 Granting IAM policy on the project is a different permission from
 creating the bucket/secret/service account - your own account can lack
@@ -764,6 +811,13 @@ gcloud storage buckets create gs://YOUR_BUCKET_NAME --location=YOUR_REGION
 printf '%s' 'AIza...your real key...' | gcloud secrets create speed-limit-check-maps-key --data-file=-
 ```
 
+Optional - the Anthropic key for the Custom test box's plain-English
+translation (direct expressions work without it):
+
+```bash
+printf '%s' 'sk-ant-...your real key...' | gcloud secrets create speed-limit-check-anthropic-key --data-file=-
+```
+
 ### 4. Create a runtime service account and grant it access
 
 ```bash
@@ -782,6 +836,8 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:
 gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET_NAME --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
 # Read the Maps API key secret
 gcloud secrets add-iam-policy-binding speed-limit-check-maps-key --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+# Optional - only if you created the Anthropic key secret above
+gcloud secrets add-iam-policy-binding speed-limit-check-anthropic-key --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
 ```
 
 ### 5. Deploy
@@ -798,8 +854,10 @@ gcloud run deploy speed-limit-check \
   --max-instances=1 \
   --memory=1Gi \
   --set-env-vars="GCS_CACHE_BUCKET=YOUR_BUCKET_NAME" \
-  --set-secrets="GOOGLE_MAPS_API_KEY=speed-limit-check-maps-key:latest"
+  --set-secrets="GOOGLE_MAPS_API_KEY=speed-limit-check-maps-key:latest,ANTHROPIC_API_KEY=speed-limit-check-anthropic-key:latest"
 ```
+
+(Drop the `ANTHROPIC_API_KEY=...` part of `--set-secrets` if you skipped the optional Anthropic key secret above.)
 
 Deliberately no `--iap` here: Cloud Run's native IAP integration is
 alpha-track only as of this writing (`gcloud run deploy --iap` errors

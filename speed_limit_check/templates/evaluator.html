@@ -70,7 +70,7 @@
     <div class="row-2">
       <div>
         <label for="state">State</label>
-        <input type="text" id="state" name="state" placeholder="e.g. NC" list="state-list" maxlength="2" required>
+        <input type="text" id="state" name="state" value="{{ default_state }}" placeholder="e.g. NC" list="state-list" maxlength="2" required>
         <datalist id="state-list">
           {% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}
         </datalist>
@@ -127,6 +127,9 @@
         <input type="number" step="0.5" name="crit_{{ c.key }}_value" value="{{ c.default_value }}">
       </div>
     {% endfor %}
+    <label for="custom_test">Custom test (optional)</label>
+    <textarea id="custom_test" name="custom_test" rows="2" placeholder="e.g. speed_AVG_mph > 60 AND functional_class < 4" style="width:100%; resize:vertical; font-family:inherit;">{{ default_custom_test }}</textarea>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">A direct expression or plain-English test (built on the Speed-Limits Quality page) - if set, candidates must also satisfy this, in addition to any selection criteria checked above.</p>
 
     <h3 style="margin:18px 0 4px;">Per-segment walk settings</h3>
     <div class="criterion-row">

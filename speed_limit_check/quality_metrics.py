@@ -418,6 +418,84 @@ def fetch_sample_mismatches(f: QualityFilters, metric_key: str, limit: int, log=
     return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
 
 
+def build_custom_metric_query(f: QualityFilters, custom_sql: str) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+    """Aggregate (COUNT/SUM, like build_quality_query) for the "Custom
+    test" box's result card: how many segments match `custom_sql` under
+    the current state/functional_class/zip/county filters. `custom_sql`
+    MUST already be the output of custom_metrics.validate_custom_expression()
+    - see that module's docstring and find_bad_speed_limit.build_candidates_query's
+    matching note; this function does not itself validate it and must
+    never be handed raw end-user text."""
+    _validate_identifier(f.project, PROJECT_RE, "project")
+    _validate_identifier(f.dataset, DATASET_RE, "dataset")
+    _validate_identifier(f.table, TABLE_RE, "table")
+    where_parts, params = _common_filter_where_parts(f)
+    query = f"""
+        SELECT
+          COUNT(*) AS total_segments,
+          SUM(CASE WHEN {custom_sql} THEN 1 ELSE 0 END) AS matching_count
+        FROM `{f.project}.{f.dataset}.{f.table}`
+        {f"WHERE {' AND '.join(where_parts)}" if where_parts else ""}
+    """
+    return query, params
+
+
+def fetch_custom_metric(f: QualityFilters, custom_sql: str, log=lambda msg: None) -> dict:
+    """Runs build_custom_metric_query - not cached, same reasoning as
+    fetch_sample_mismatches (an on-demand "show me" click, not something
+    polled or reloaded repeatedly, and caching arbitrary user-typed
+    expressions keyed by their SQL isn't worth the complexity)."""
+    client = bigquery.Client(project=f.project)
+    query, params = build_custom_metric_query(f, custom_sql)
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    rows = list(client.query(query, job_config=job_config).result())
+    return dict(rows[0].items()) if rows else {"total_segments": 0, "matching_count": 0}
+
+
+def build_custom_sample_query(
+    f: QualityFilters, custom_sql: str, magnitude_sql: Optional[str], limit: int,
+) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+    """Row-level sample for the Custom test box's "show worst offenders
+    on map" - the same shape as build_sample_mismatches_query, but for an
+    arbitrary user-defined `custom_sql` condition instead of one of the
+    six built-in QUALITY_METRICS. `magnitude_sql` (from
+    custom_metrics.ValidatedExpression.magnitude_sql - only set when the
+    expression is a single "lhs OP rhs" comparison) drives worst-first
+    ordering when available; a compound AND/OR expression has no single
+    natural "how far off" number, so those are returned in whatever order
+    BigQuery happens to produce them, still capped at `limit`. Same
+    validated-SQL-only contract as build_custom_metric_query above."""
+    _validate_identifier(f.project, PROJECT_RE, "project")
+    _validate_identifier(f.dataset, DATASET_RE, "dataset")
+    _validate_identifier(f.table, TABLE_RE, "table")
+    where_parts = [custom_sql]
+    common_where_parts, params = _common_filter_where_parts(f)
+    where_parts.extend(common_where_parts)
+    select_cols = [
+        "here_segment_id", "street_name", "functional_class", "state",
+        "ST_Y(ST_CENTROID(geom)) AS lat", "ST_X(ST_CENTROID(geom)) AS lon",
+    ]
+    if magnitude_sql:
+        select_cols.append(f"{magnitude_sql} AS magnitude")
+    order_clause = "ORDER BY magnitude DESC" if magnitude_sql else ""
+    query = f"""
+        SELECT
+          {', '.join(select_cols)}
+        FROM `{f.project}.{f.dataset}.{f.table}`
+        WHERE {' AND '.join(where_parts)}
+        {order_clause}
+        LIMIT {int(limit)}
+    """
+    return query, params
+
+
+def fetch_custom_sample(f: QualityFilters, custom_sql: str, magnitude_sql: Optional[str], limit: int, log=lambda msg: None) -> list[dict]:
+    client = bigquery.Client(project=f.project)
+    query, params = build_custom_sample_query(f, custom_sql, magnitude_sql, limit)
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
+
+
 def fetch_quality_metrics(f: QualityFilters, log=lambda msg: None) -> list[dict]:
     """Runs (or serves from cache) the aggregate query build_quality_query
     builds for `f`. Cached on the selected table's own last-modified time

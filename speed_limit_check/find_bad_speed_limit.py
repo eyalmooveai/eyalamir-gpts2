@@ -696,7 +696,17 @@ def build_geo_filter_sql(
 def build_candidates_query(
     project: str, dataset: str, table: str, criteria: dict[str, tuple[bool, float]], limit: int,
     *, state: str = "", zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (),
+    custom_criterion_sql: Optional[str] = None,
 ) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
+    """`custom_criterion_sql`, when given, MUST already be the output of
+    custom_metrics.validate_custom_expression() (the "Custom test" box on
+    the Quality/Evaluator/Sign Checker pages) - a plain string spliced
+    directly into the WHERE clause, no query parameter, because it's
+    already a fully re-serialized, grammar-validated boolean expression
+    over a fixed column allowlist by the time it reaches here. This
+    function does not itself validate it and must never be handed raw
+    end-user text - that validation is custom_metrics.py's job, done once
+    per request before this is called."""
     where_parts = []
     params = []
     order_expr = None
@@ -711,6 +721,8 @@ def build_candidates_query(
     geo_where_parts, geo_params = build_geo_filter_sql(zip_codes, counties, (state,) if state else ())
     where_parts.extend(geo_where_parts)
     params.extend(geo_params)
+    if custom_criterion_sql:
+        where_parts.append(custom_criterion_sql)
     where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
     order_sql = f"ORDER BY {order_expr} DESC" if order_expr else "ORDER BY here_segment_id"
     query = f"""
@@ -730,9 +742,13 @@ def build_candidates_query(
 def fetch_candidates(
     project: str, dataset: str, table: str, criteria: dict[str, tuple[bool, float]], limit: int,
     *, state: str = "", zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (),
+    custom_criterion_sql: Optional[str] = None,
 ) -> list[bigquery.table.Row]:
     client = bigquery.Client(project=project)
-    query, params = build_candidates_query(project, dataset, table, criteria, limit, state=state, zip_codes=zip_codes, counties=counties)
+    query, params = build_candidates_query(
+        project, dataset, table, criteria, limit, state=state, zip_codes=zip_codes, counties=counties,
+        custom_criterion_sql=custom_criterion_sql,
+    )
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     return list(client.query(query, job_config=job_config).result())
 
@@ -756,7 +772,7 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
 
 def _candidates_cache_key(
     *, segment_id: Optional[str] = None, criteria=None, max_candidates: Optional[int] = None,
-    zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (),
+    zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (), custom_criterion_sql: Optional[str] = None,
 ) -> str:
     """A stable key identifying a candidates query's exact inputs, for
     caching its result to disk (see _load_candidates_cache/
@@ -764,13 +780,17 @@ def _candidates_cache_key(
     table is a dated, published monthly snapshot, so the same query
     against it always returns the same rows, exactly the same assumption
     the Street View/OCR caching elsewhere in this file already relies on
-    for its own inputs never changing. zip_codes/counties must be part of
-    this key (not just criteria/max_candidates) - otherwise a query with
-    a geo filter could wrongly reuse a cached result from one without it,
-    or vice versa."""
+    for its own inputs never changing. zip_codes/counties/custom_criterion_sql
+    must be part of this key (not just criteria/max_candidates) -
+    otherwise a query with a geo/custom filter could wrongly reuse a
+    cached result from one without it, or with a different one."""
     payload = (
         {"segment_id": segment_id} if segment_id is not None
-        else {"criteria": criteria, "max_candidates": max_candidates, "zip_codes": sorted(zip_codes), "counties": sorted(counties)}
+        else {
+            "criteria": criteria, "max_candidates": max_candidates,
+            "zip_codes": sorted(zip_codes), "counties": sorted(counties),
+            "custom_criterion_sql": custom_criterion_sql,
+        }
     )
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -1135,6 +1155,7 @@ def run_pipeline(
     criteria: Optional[dict[str, tuple[bool, float]]] = None,
     zip_codes: tuple[str, ...] = (),
     counties: tuple[str, ...] = (),
+    custom_criterion_sql: Optional[str] = None,
     segment_id: Optional[str] = None,
     walk_all: bool = False,
     walk_segment: bool = False,
@@ -1290,7 +1311,10 @@ def run_pipeline(
             candidates = fetch_candidate_by_id(project, dataset, table, segment_id)
             _save_candidates_cache(cache_path, candidates, log=log)
     else:
-        cache_key = _candidates_cache_key(criteria=criteria, max_candidates=max_candidates, zip_codes=zip_codes, counties=counties)
+        cache_key = _candidates_cache_key(
+            criteria=criteria, max_candidates=max_candidates, zip_codes=zip_codes, counties=counties,
+            custom_criterion_sql=custom_criterion_sql,
+        )
         cache_path = _candidates_cache_path(out_root, cache_key)
         candidates = _load_candidates_cache(cache_path, log=log)
         if candidates is not None:
@@ -1299,7 +1323,10 @@ def run_pipeline(
         else:
             log(f"Querying `{project}.{dataset}.{table}` ...")
             progress(0.0, f"Querying `{project}.{dataset}.{table}` ...")
-            candidates = fetch_candidates(project, dataset, table, criteria, max_candidates, state=state, zip_codes=zip_codes, counties=counties)
+            candidates = fetch_candidates(
+                project, dataset, table, criteria, max_candidates, state=state, zip_codes=zip_codes, counties=counties,
+                custom_criterion_sql=custom_criterion_sql,
+            )
             _save_candidates_cache(cache_path, candidates, log=log)
 
     result = PipelineResult(table=table, project=project, dataset=dataset, attempts=[])
