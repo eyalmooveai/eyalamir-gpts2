@@ -94,7 +94,7 @@
       <tr>
         <th>Segment</th><th>Functional class</th><th>Status</th><th>Matched (mph)</th>
         <th>OSM (mph)</th><th>HERE (mph)</th><th>Inferred (mph)</th><th>Avg observed (mph)</th><th>Freeflow (mph)</th>
-        <th>Image captured</th>
+        <th>Image captured</th><th></th>
       </tr>
       <tbody id="ev-results-body">
         {% for r in status.results %}
@@ -109,6 +109,7 @@
             <td>{{ r.speed_AVG_mph if r.speed_AVG_mph is defined else '' }}</td>
             <td>{{ r.freeflow_mph if r.freeflow_mph is defined else '' }}</td>
             <td>{{ r.streetview_capture_date if r.streetview_capture_date else '' }}</td>
+            <td>{% if r.lat is defined and r.lon is defined and r.lat is not none and r.lon is not none %}<a href="https://www.google.com/maps?q=&layer=c&cbll={{ r.lat }},{{ r.lon }}" target="_blank" rel="noopener">Street View</a>{% endif %}</td>
           </tr>
         {% endfor %}
       </tbody>
@@ -159,6 +160,7 @@
       if (typeof r.functional_class !== 'undefined' && r.functional_class !== null) bits.push(`functional class ${r.functional_class}`);
       if (r.streetview_capture_date) bits.push(`captured ${escapeHtml(r.streetview_capture_date)}`);
       if (r.error) bits.push(escapeHtml(r.error));
+      bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
       marker.bindPopup(bits.join('<br>'));
       marker.addTo(evMarkersLayer);
     });
@@ -193,13 +195,15 @@
     }
 
     const cell = v => (typeof v !== 'undefined' && v !== null) ? v : '';
+    const streetViewLink = (lat, lon) => (typeof lat === 'number' && typeof lon === 'number')
+      ? `<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>` : '';
     const tbody = document.getElementById('ev-results-body');
     tbody.innerHTML = (data.results || []).map(r => {
       const statusText = r.status + (r.error ? ': ' + escapeHtml(r.error) : '');
       return `<tr><td><code>${escapeHtml(r.segment_id)}</code></td><td>${cell(r.functional_class)}</td><td>${statusText}</td>` +
         `<td>${cell(r.matched_speed_mph)}</td><td>${cell(r.speed_limit_osm_mph)}</td><td>${cell(r.speed_limit_here_mph)}</td>` +
         `<td>${cell(r.speed_limit_infer_mph)}</td><td>${cell(r.speed_AVG_mph)}</td><td>${cell(r.freeflow_mph)}</td>` +
-        `<td>${cell(r.streetview_capture_date)}</td></tr>`;
+        `<td>${cell(r.streetview_capture_date)}</td><td>${streetViewLink(r.lat, r.lon)}</td></tr>`;
     }).join('');
 
     // Breakdown by functional class - mirrors batch_evaluator.breakdown_by_functional_class

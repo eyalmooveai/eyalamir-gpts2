@@ -56,6 +56,7 @@
       <div class="candidate-gallery" data-images='{{ entry.images_js | tojson }}' data-lat="{{ entry.explore_lat }}" data-lon="{{ entry.explore_lon }}" data-heading="{{ entry.explore_heading }}" style="padding:14px 0; {% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
         <p style="margin:0 0 6px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           <strong>#{{ a.index }}</strong> <code>{{ a.segment_id }}</code>
+          <a href="https://www.google.com/maps?q=&layer=c&cbll={{ a.lat }},{{ a.lon }}" target="_blank" rel="noopener">Street View</a>
           {% if a.status == "match" %}<span class="badge ok">sign read</span>
           {% elif a.status == "no_coverage" %}<span class="badge warn">no Street View coverage</span>
           {% else %}<span class="badge warn">no sign read</span>{% endif %}
@@ -384,6 +385,7 @@
       const marker = L.circleMarker([lat, lon], { radius: 6, color: '#fff', weight: 1, fillColor: color, fillOpacity: 0.9 }).addTo(map);
       const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`, escapeHtml(p.status)];
       if (p.street_name) bits.push(escapeHtml(p.street_name));
+      bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
       marker.bindPopup(bits.join('<br>'));
     });
     if (coords.length) {

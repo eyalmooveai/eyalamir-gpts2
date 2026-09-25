@@ -97,7 +97,7 @@ MAX_SEGMENT_COUNT = 1000
 
 CSV_FIELDNAMES = [
     "segment_id", "state", "functional_class", "status", "matched_speed_mph",
-    "lat", "lon", "speed_limit_osm_mph", "speed_limit_here_mph",
+    "lat", "lon", "streetview_url", "speed_limit_osm_mph", "speed_limit_here_mph",
     "speed_limit_infer_mph", "speed_limit_infer_mph_corrected",
     "speed_AVG_mph", "freeflow_mph", "note", "image_count",
     "streetview_capture_date", "annotated_image_path", "error", "row_json",
@@ -376,16 +376,28 @@ def _row_context(row_dict: dict) -> dict:
     }
 
 
+def _streetview_url(lat, lon) -> str:
+    """A plain, no-API-key Google Maps link that opens directly into
+    Street View at (lat, lon) - same URL shape used by every Street View
+    link in the web UI (see result.html/evaluator_status.html), so the
+    CSV a user downloads and opens elsewhere still gets a working link
+    per segment, not just its bare lat/lon to look up by hand."""
+    return f"https://www.google.com/maps?q=&layer=c&cbll={lat},{lon}" if lat is not None and lon is not None else ""
+
+
 def _build_csv_row(candidate_row, attempt, match, error: Optional[str]) -> dict:
     row_dict = dict(attempt.row) if attempt is not None else {}
+    lat = attempt.lat if attempt is not None else candidate_row.get("centroid_lat")
+    lon = attempt.lon if attempt is not None else candidate_row.get("centroid_lon")
     return {
         "segment_id": attempt.segment_id if attempt is not None else candidate_row.get("here_segment_id"),
         "state": row_dict.get("state", ""),
         "functional_class": row_dict.get("functional_class", ""),
         "status": attempt.status if attempt is not None else "error",
         "matched_speed_mph": match.reading.speed_mph if match is not None else "",
-        "lat": attempt.lat if attempt is not None else candidate_row.get("centroid_lat"),
-        "lon": attempt.lon if attempt is not None else candidate_row.get("centroid_lon"),
+        "lat": lat,
+        "lon": lon,
+        "streetview_url": _streetview_url(lat, lon),
         "speed_limit_osm_mph": row_dict.get("speed_limit_osm_mph", ""),
         "speed_limit_here_mph": row_dict.get("speed_limit_here_mph", ""),
         "speed_limit_infer_mph": row_dict.get("speed_limit_infer_mph", ""),

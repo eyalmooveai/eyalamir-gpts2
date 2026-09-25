@@ -208,6 +208,7 @@
           if (p.street_name) bits.push(escapeHtml(p.street_name));
           bits.push(`${escapeHtml(data.metric_name)}: off by ${Number(p.magnitude).toFixed(1)} mph`);
           if (typeof p.functional_class !== 'undefined' && p.functional_class !== null) bits.push(`functional class ${p.functional_class}`);
+          bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
           marker.bindPopup(bits.join('<br>'));
           marker.addTo(issueLayer);
         });

@@ -9,6 +9,45 @@
   split into separate apps/deployments unless explicitly asked to (this
   was tried and explicitly reverted: "stop -- i want them all in one
   app, one deployment").
+- **`speed_limit_here_mph` is always wrapped in `ROUND()`, everywhere it's
+  referenced.** It's stored as a precise km/h->mph conversion (e.g.
+  `24.860161591050343`, confirmed live - not `25`), unlike every other
+  speed column here (OSM's, the inferred ones, observed avg, freeflow),
+  which are clean values. Left unrounded, that conversion noise reads as
+  spurious mismatch magnitude anywhere it's compared, and shows up as an
+  ugly non-round number anywhere it's displayed. Fixed at the SQL level,
+  not just for display, since the noise was real error in the actual
+  selection/mismatch math, not just cosmetic: `find_bad_speed_limit.CRITERIA_DEFS`'s
+  `here_osm_agree`/`infer_vs_here`/`infer_corrected_vs_here` entries (sql
+  and, where present, order_expr) and `quality_metrics.QUALITY_METRICS`'s
+  `diff_here` entry (sql and magnitude_expr) all wrap it in `ROUND(...)`.
+  `find_bad_speed_limit.build_candidates_query`/`fetch_candidate_by_id`
+  additionally do `SELECT * EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph)
+  AS speed_limit_here_mph), ...` so the *returned* row already carries
+  the rounded value too - everything downstream (CSV, templates,
+  `attempt.row`) gets it rounded for free, no separate display-side
+  rounding needed. If a new query references `speed_limit_here_mph`
+  directly (rather than through these existing helpers), wrap it in
+  `ROUND()` there too - confirmed this matters with real numbers (a raw
+  33.8% "vs. HERE" mismatch rate in the Quality page's aggregate for NC,
+  vs. a much lower rate once rounded).
+- **Every `here_segment_id` shown anywhere in the app links to Street
+  View** - a plain, no-API-key
+  `https://www.google.com/maps?q=&layer=c&cbll=<lat>,<lon>` link (same
+  URL shape everywhere, no shared helper needed - each template is
+  standalone, like `escapeHtml` is already duplicated per template).
+  Covers: the Evaluator's Results table (`evaluator_status.html`, both
+  the Jinja-rendered version and the JS `render()` mirror - a fourth
+  Jinja/JS pair to keep in sync, alongside the results table, FC
+  breakdown, and map already documented above) and its CSV export
+  (`batch_evaluator._build_csv_row`'s new `streetview_url` column, via
+  `_streetview_url(lat, lon)`); the sign checker's "Candidates tried"
+  list (`result.html`, alongside the existing "Explore in Google Maps"
+  button, not instead of it); and every marker popup on every map this
+  app has (Evaluator status/preview, sign checker result/preview,
+  Quality's issue map) - five separate popup-building call sites, each
+  needing its own added `bits.push(...)` line since none of them share
+  a common renderer.
 - **Zip code / county filtering, in all three tools** (sign checker,
   Evaluator, Quality) - `find_bad_speed_limit.build_geo_filter_sql(
   zip_codes, counties, states, geom_column="geom")` is the single shared

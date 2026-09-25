@@ -84,11 +84,15 @@ QUALITY_METRICS = [
         "required_columns": ["speed_limit_osm_mph"],
     },
     {
+        # speed_limit_here_mph is stored as a precise km/h->mph conversion
+        # (e.g. 24.860161591050343, not 25), not a clean posted-sign value
+        # like the others - always ROUND() it before comparing/displaying,
+        # or the noise reads as spurious mismatch magnitude.
         "key": "diff_here",
         "name": "vs. HERE",
         "label_template": "Disagrees with HERE by {param1}+ mph",
-        "sql": "ABS({infer_field} - speed_limit_here_mph) >= @param1",
-        "magnitude_expr": "ABS({infer_field} - speed_limit_here_mph)",
+        "sql": "ABS({infer_field} - ROUND(speed_limit_here_mph)) >= @param1",
+        "magnitude_expr": "ABS({infer_field} - ROUND(speed_limit_here_mph))",
         "required_columns": ["speed_limit_here_mph"],
     },
     {

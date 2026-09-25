@@ -3,16 +3,22 @@
 to verify the real-world speed limit by reading a sign in Street View imagery.
 
 Query logic (against `<project>.calc_out.speed_limits_<STATE>_<YEAR>_<MONTH>_details`):
-    abs(speed_limit_infer_mph - speed_limit_here_mph) >= 10
+    abs(speed_limit_infer_mph - ROUND(speed_limit_here_mph)) >= 10
     AND abs(speed_limit_infer_mph - speed_limit_osm_mph) >= 10
     AND functional_class < 6
-    AND abs(speed_limit_here_mph - speed_limit_osm_mph) <= 1
+    AND abs(ROUND(speed_limit_here_mph) - speed_limit_osm_mph) <= 1
 
 i.e. HERE and OSM agree with each other but both disagree with the inferred
 value by a lot, on a "real" road (functional_class < 6). Candidates are
 ranked by the size of that disagreement; the script walks down the ranked
 list until it finds a segment with Street View coverage and a sign it can
 read, since not every location has Street View imagery.
+
+speed_limit_here_mph is stored as a precise km/h->mph conversion (e.g.
+24.860161591050343, not 25), not a clean posted-sign value like OSM's or
+the inferred one - every reference to it, in a query or on screen, goes
+through ROUND() first so it's compared/shown as the real mph a sign would
+read, not conversion noise a few tenths of an mph off.
 
 Usage:
     python find_bad_speed_limit.py --state NC --year 2026 --month 08
@@ -254,18 +260,18 @@ CRITERIA_DEFS = [
     {
         "key": "here_osm_agree",
         "label": "|HERE − OSM| ≤ N mph (HERE and OSM agree with each other)",
-        "sql": "ABS(speed_limit_here_mph - speed_limit_osm_mph) <= @here_osm_agree",
+        "sql": "ABS(ROUND(speed_limit_here_mph) - speed_limit_osm_mph) <= @here_osm_agree",
         "default_enabled": True,
         "default_value": 1,
     },
     {
         "key": "infer_vs_here",
         "label": "|infer − HERE| ≥ N mph",
-        "sql": "ABS(speed_limit_infer_mph - speed_limit_here_mph) >= @infer_vs_here",
+        "sql": "ABS(speed_limit_infer_mph - ROUND(speed_limit_here_mph)) >= @infer_vs_here",
         "default_enabled": True,
         "default_value": 10,
         "magnitude": True,
-        "order_expr": "ABS(speed_limit_infer_mph - speed_limit_here_mph)",
+        "order_expr": "ABS(speed_limit_infer_mph - ROUND(speed_limit_here_mph))",
     },
     {
         "key": "infer_vs_osm",
@@ -279,11 +285,11 @@ CRITERIA_DEFS = [
     {
         "key": "infer_corrected_vs_here",
         "label": "|infer_corrected − HERE| ≥ N mph",
-        "sql": "ABS(speed_limit_infer_mph_corrected - speed_limit_here_mph) >= @infer_corrected_vs_here",
+        "sql": "ABS(speed_limit_infer_mph_corrected - ROUND(speed_limit_here_mph)) >= @infer_corrected_vs_here",
         "default_enabled": False,
         "default_value": 5,
         "magnitude": True,
-        "order_expr": "ABS(speed_limit_infer_mph_corrected - speed_limit_here_mph)",
+        "order_expr": "ABS(speed_limit_infer_mph_corrected - ROUND(speed_limit_here_mph))",
     },
     {
         "key": "infer_corrected_vs_osm",
@@ -709,7 +715,7 @@ def build_candidates_query(
     order_sql = f"ORDER BY {order_expr} DESC" if order_expr else "ORDER BY here_segment_id"
     query = f"""
         SELECT
-          * EXCEPT (geom),
+          * EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph) AS speed_limit_here_mph),
           ST_Y(ST_CENTROID(geom)) AS centroid_lat,
           ST_X(ST_CENTROID(geom)) AS centroid_lon,
           ST_ASGEOJSON(geom) AS geom_geojson
@@ -736,7 +742,7 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
     client = bigquery.Client(project=project)
     query = f"""
         SELECT
-          * EXCEPT (geom),
+          * EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph) AS speed_limit_here_mph),
           ST_Y(ST_CENTROID(geom)) AS centroid_lat,
           ST_X(ST_CENTROID(geom)) AS centroid_lon,
           ST_ASGEOJSON(geom) AS geom_geojson

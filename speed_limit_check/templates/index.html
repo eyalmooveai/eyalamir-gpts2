@@ -293,6 +293,7 @@
           const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`];
           if (p.street_name) bits.push(escapeHtml(p.street_name));
           if (p.functional_class !== null && typeof p.functional_class !== 'undefined') bits.push(`functional class ${p.functional_class}`);
+          bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
           marker.bindPopup(bits.join('<br>'));
           marker.addTo(previewLayer);
         });

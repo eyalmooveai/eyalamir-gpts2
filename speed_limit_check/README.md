@@ -24,6 +24,10 @@ app, one deployment - see `app.py`):
   check on later, CSV export, and a history of past runs to compare
   against. See "Speed-Limits Evaluator" below.
 
+Every `here_segment_id` shown anywhere in the app - results tables, map
+popups, the CSV export - is a link straight to Google Street View at that
+segment's location, no API key or extra click required.
+
 ## Query
 
 The default selection criteria (all editable in the web UI - see below):
@@ -32,22 +36,28 @@ The default selection criteria (all editable in the web UI - see below):
 SELECT * FROM `<project>.calc_out.speed_limits_<STATE>_<YEAR>_<MONTH>_details`
 WHERE
   functional_class < 6
-  AND abs(speed_limit_here_mph - speed_limit_osm_mph) <= 1
-  AND abs(speed_limit_infer_mph - speed_limit_here_mph) >= 10
+  AND abs(ROUND(speed_limit_here_mph) - speed_limit_osm_mph) <= 1
+  AND abs(speed_limit_infer_mph - ROUND(speed_limit_here_mph)) >= 10
   AND abs(speed_limit_infer_mph - speed_limit_osm_mph) >= 10
-ORDER BY abs(speed_limit_infer_mph - speed_limit_here_mph) DESC
+ORDER BY abs(speed_limit_infer_mph - ROUND(speed_limit_here_mph)) DESC
 ```
 
 i.e. HERE and OSM agree with each other but both disagree with the inferred
 value by a lot, on a "real" road. Two more criteria are available but
 disabled by default, using `speed_limit_infer_mph_corrected` instead of the
-raw inferred value: `abs(infer_corrected - HERE) >= 5` and
+raw inferred value: `abs(infer_corrected - ROUND(HERE)) >= 5` and
 `abs(infer_corrected - OSM) >= 5`. Any combination of criteria can be
 checked/unchecked with its own threshold in the web UI; candidates are
 ranked by the first checked "≥ N mph" criterion, largest mismatch first.
 Not every road segment has Street View coverage or a legible sign in frame,
 so the pipeline walks down the ranked list until one works (or, with "walk
 through all candidates" checked, tries every one and reports every match).
+
+`speed_limit_here_mph` is always rounded before use - it's stored as a
+precise km/h-to-mph conversion (e.g. `24.860161591050343`, not `25`),
+unlike the other speed columns here, which are already clean values. Left
+unrounded, that conversion noise reads as a spurious few-tenths-of-an-mph
+mismatch everywhere it's compared or displayed.
 
 ## Setup
 
@@ -360,7 +370,7 @@ Six metrics, each the percent of segments meeting a condition:
 | Metric | Condition |
 |---|---|
 | vs. OSM | `abs(<inferred field> - speed_limit_osm_mph) >= param1` |
-| vs. HERE | `abs(<inferred field> - speed_limit_here_mph) >= param1` |
+| vs. HERE | `abs(<inferred field> - ROUND(speed_limit_here_mph)) >= param1` |
 | vs. observed avg speed | `abs(<inferred field> - speed_AVG_mph) >= param1` |
 | vs. freeflow speed | `abs(<inferred field> - freeflow_mph) >= param1` |
 | Observed avg speed implausible | `speed_AVG_mph > param2` |
