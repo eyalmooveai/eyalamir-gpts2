@@ -197,6 +197,7 @@
   // enforced against server-side) - read from here rather than a second
   // hardcoded copy, so this estimate can't quietly drift from what's
   // actually charged.
+  const MAX_SEGMENT_COUNT = {{ max_segment_count }};
   const STREETVIEW_RATE_PER_1000 = {{ streetview_rate_per_1000 }};
   const VISION_RATE_PER_1000 = {{ vision_rate_per_1000 }};
   const DAILY_COST_CAP = {{ daily_cost_cap }};
@@ -226,7 +227,17 @@
   }
 
   function updateEstimate() {
-    const segmentCount = Math.max(0, parseInt(document.getElementById('segment_count').value) || 0);
+    const segmentCountEl = document.getElementById('segment_count');
+    // The HTML max="{{ max_segment_count }}" attribute alone doesn't stop
+    // someone from typing a bigger number - it only affects the spinner
+    // arrows and native form-submit validation. Clamp it live here too,
+    // so the estimate (and the field itself) can never show a value the
+    // server would refuse anyway (see MAX_SEGMENT_COUNT's server-side
+    // clamp in evaluator_start()).
+    if (segmentCountEl.value !== '' && parseInt(segmentCountEl.value) > MAX_SEGMENT_COUNT) {
+      segmentCountEl.value = MAX_SEGMENT_COUNT;
+    }
+    const segmentCount = Math.max(0, parseInt(segmentCountEl.value) || 0);
     const concurrency = Math.max(1, parseInt(document.getElementById('concurrency').value) || 1);
     const walkSegment = document.getElementById('walk_segment').checked;
     const sideMode = document.getElementById('side_mode').value;
