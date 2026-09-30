@@ -184,27 +184,47 @@
     default `header` block - if hub.html's hero ever needs to change,
     edit its own `header` block, not `layout.html`'s default (which every
     other page still uses as-is).
-  - **`/explore`'s top card is a live sample map**, not a screenshot or a
-    static illustration - "put an initial OSM-comparison sample map at
-    the top of the [Explore] page" was explicit (and, when a first
-    version put this on the hub page instead, explicitly corrected - see
-    the Top nav bullet above). `app.py`'s `explore_page()` computes a
-    real default table/infer_field (via the same
-    `_table_options_and_default()` + `list_infer_fields()` calls the
-    Quality page itself uses) and `explore.html`'s own inline script
-    auto-fetches `/speed-limits/sample-mismatches?...&metric=diff_osm`
-    on page load (no button click - it's meant to be already there when
-    you arrive) - the exact same endpoint and Leaflet-marker-drawing
-    logic as the Quality page's own "Map: where the worst mismatches
-    are" issue map, just triggered automatically with fixed nationwide
-    defaults instead of from a live filters form. If that lookup fails
-    (e.g. no BigQuery credentials in local dev), `explore_page()` catches
-    it and passes `sample_map_error` through - the card shows that
-    message instead of attempting a doomed fetch, never a raw 500.
-    Verified with a stubbed-Leaflet Node/Playwright test (this sandbox
-    has no network access to the real Leaflet CDN) confirming markers
-    actually get drawn and popups are populated correctly, not just that
-    the card renders.
+  - **`/explore`'s top card is a live sample map with its own filters**,
+    not a screenshot, a static illustration, or a map fixed to "vs. OSM,
+    nationwide". It started as the latter ("put an initial
+    OSM-comparison sample map at the top of the [Explore] page", and
+    when a first version put this on the hub page instead, explicitly
+    corrected - see the Top nav bullet above) and was then explicitly
+    generalized: "Explore should let me change what to present/explore
+    with the same map visualization." `#explore-filters-form`
+    (table/metric/states/mismatch-threshold, same `method="get" action=
+    "/explore"` full-page-reload pattern as the Quality page's own main
+    filters form, not a client-side-only control) submits back to
+    `explore_page()` in `app.py`, which validates each param
+    (`metric` against `QUALITY_METRIC_KEYS`, falling back to `diff_osm`
+    on anything unrecognized rather than 500ing; `param1` parsed as a
+    float then coerced back to a bare int like `10` instead of `10.0`
+    when it has no fractional part, for a clean number-input display)
+    and re-derives `sample_map_infer_field` for *whichever* table is
+    selected via the same `list_infer_fields()` call the Quality page
+    uses - don't let this get stuck reusing the previous table's infer
+    field after a table switch. `table_options`/`selected_table_option`
+    still come from the same `_table_options_and_default()` helper the
+    Quality page and `/agent` also use. `explore.html`'s inline script
+    auto-fetches `/speed-limits/sample-mismatches` on page load using
+    whatever table/infer_field/metric/states/param1 the form just
+    submitted (no separate button - it's meant to already be there when
+    you arrive, same as before) - the exact same endpoint and
+    Leaflet-marker-drawing logic as the Quality page's own "Map: where
+    the worst mismatches are" issue map, just reading its query params
+    from the page's own filters instead of hardcoded nationwide/`diff_osm`
+    defaults. The status message and every marker popup pull the
+    metric's display name from the `<select>`'s own selected `<option>`
+    text (not a second hardcoded metric-name lookup) and show the
+    selected states or "nationwide" when left blank, so "vs. OSM" isn't
+    baked into the copy anymore either. If the table/infer_field lookup
+    fails (e.g. no BigQuery credentials in local dev), `explore_page()`
+    still catches it and passes `sample_map_error` through - the card
+    shows that message instead of attempting a doomed fetch, never a raw
+    500. Verified with a stubbed-Leaflet Node/Playwright test (this
+    sandbox has no network access to the real Leaflet CDN) confirming
+    markers actually get drawn and popups are populated correctly with
+    the dynamic metric/states text, not just that the card renders.
 - **`speed_limit_here_mph` is always wrapped in `ROUND()`, everywhere it's
   referenced.** It's stored as a precise km/h->mph conversion (e.g.
   `24.860161591050343`, confirmed live - not `25`), unlike every other

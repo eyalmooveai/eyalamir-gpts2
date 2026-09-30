@@ -566,13 +566,18 @@ def hub():
 
 @app.route("/explore", methods=["GET"])
 def explore_page():
-    """The Explore page: a live sample map - a real "vs. OSM" query
-    against the default table, not a canned screenshot, so a visitor
-    sees actual model output immediately. Uses the same default-table
-    logic as the Quality page (_table_options_and_default) and the same
-    /speed-limits/sample-mismatches endpoint the Quality page's own issue
-    map calls - no separate query path to keep in sync."""
-    table_options, selected_table_option, sample_map_error = _table_options_and_default()
+    """The Explore page: a live sample map, not a canned screenshot - and
+    the table/metric/states/threshold it's exploring are all changeable
+    from the page itself (a plain GET form, same "submit -> page reloads
+    with these query params baked into the map's own auto-fetch" pattern
+    as the Quality page's main filters form), not fixed to "vs. OSM"
+    nationwide. Uses the same default-table logic as the Quality page
+    (_table_options_and_default) and the same /speed-limits/sample-mismatches
+    endpoint the Quality page's own issue map calls - no separate query
+    path to keep in sync."""
+    table_options, selected_table_option, sample_map_error = _table_options_and_default(
+        request.args.get("table", "").strip()
+    )
     sample_map_infer_field = DEFAULT_INFER_FIELD
     if not sample_map_error:
         try:
@@ -584,11 +589,28 @@ def explore_page():
             )
         except Exception as e:
             sample_map_error = f"{type(e).__name__}: {e}"
+
+    requested_metric = request.args.get("metric", "").strip()
+    selected_metric = requested_metric if requested_metric in QUALITY_METRIC_KEYS else "diff_osm"
+    try:
+        selected_param1 = float(request.args.get("param1", "10") or 10)
+    except ValueError:
+        selected_param1 = 10.0
+    if selected_param1 == int(selected_param1):
+        selected_param1 = int(selected_param1)  # "10" in the form, not "10.0"
+    selected_states = request.args.get("states", "").strip()
+
     return render_template(
         "explore.html",
+        table_options=table_options,
         sample_map_table=selected_table_option,
         sample_map_infer_field=sample_map_infer_field,
         sample_map_error=sample_map_error,
+        quality_metric_choices=[{"key": m["key"], "name": m["name"]} for m in QUALITY_METRICS],
+        selected_metric=selected_metric,
+        selected_param1=selected_param1,
+        selected_states=selected_states,
+        us_state_codes=US_STATE_CODES,
     )
 
 

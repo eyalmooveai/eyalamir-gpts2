@@ -10,12 +10,43 @@
 
 <div class="card">
   <span class="eyebrow">Live sample</span>
-  <h3 style="margin:0 0 4px;">Where the inferred limit disagrees with OSM</h3>
+  <h3 style="margin:0 0 4px;">Pick what to explore</h3>
   <p class="section-intro">
-    Nationwide, {{ sample_map_table }}, worst offenders first.
-    <a href="/speed-limits">Refine this on the Quality page &rarr;</a>
+    Same map, any metric/table/state combination - worst offenders first.
+    <a href="/speed-limits">Full filters (functional class, zip/county, breakdowns) on the Quality page &rarr;</a>
   </p>
-  <p id="explore-map-message" style="color:var(--muted); font-size:0.82rem; margin:0;">Loading a live sample&hellip;</p>
+  <form id="explore-filters-form" method="get" action="/explore">
+    <div class="row-2">
+      <div>
+        <label for="table">Table</label>
+        <select id="table" name="table">
+          {% for t in table_options %}<option value="{{ t }}" {% if t == sample_map_table %}selected{% endif %}>{{ t }}</option>{% endfor %}
+          {% if sample_map_table not in table_options %}<option value="{{ sample_map_table }}" selected>{{ sample_map_table }}</option>{% endif %}
+        </select>
+      </div>
+      <div>
+        <label for="metric">Metric</label>
+        <select id="metric" name="metric">
+          {% for m in quality_metric_choices %}<option value="{{ m.key }}" {% if m.key == selected_metric %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="states">States (comma-separated, blank = all 50)</label>
+        <input type="text" id="states" name="states" value="{{ selected_states }}" placeholder="e.g. NC,SC,VA" list="state-list">
+        <datalist id="state-list">
+          {% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}
+        </datalist>
+      </div>
+      <div>
+        <label for="param1">Mismatch threshold (mph)</label>
+        <input type="number" id="param1" name="param1" value="{{ selected_param1 }}" step="1" min="0">
+      </div>
+    </div>
+    <button type="submit">Show</button>
+  </form>
+  <p id="explore-map-message" style="color:var(--muted); font-size:0.82rem; margin:14px 0 0;">Loading a live sample&hellip;</p>
   <div id="explore-map" style="height:460px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
 </div>
 
@@ -49,11 +80,16 @@
     return;
   }
 
+  const metricSelect = document.getElementById('metric');
+  const metricName = metricSelect.options[metricSelect.selectedIndex].textContent;
+  const statesLabel = {{ selected_states|tojson }} ? {{ selected_states|tojson }} : 'nationwide';
+
   const params = new URLSearchParams({
     table: {{ sample_map_table|tojson }},
     infer_field: {{ sample_map_infer_field|tojson }},
-    metric: 'diff_osm',
-    param1: '10',
+    metric: {{ selected_metric|tojson }},
+    param1: {{ selected_param1|tojson }},
+    states: {{ selected_states|tojson }},
   });
 
   fetch('/speed-limits/sample-mismatches?' + params.toString())
@@ -65,8 +101,8 @@
       }
       const points = data.points || [];
       msgEl.textContent = points.length
-        ? `Showing ${data.shown} of the worst "vs. OSM" mismatches nationwide${data.shown >= data.cap ? ` (capped at ${data.cap})` : ''}, largest first.`
-        : 'No segments currently disagree with OSM under the default settings.';
+        ? `Showing ${data.shown} of the worst "${metricName}" mismatches (${statesLabel})${data.shown >= data.cap ? ` (capped at ${data.cap})` : ''}, largest first.`
+        : `No segments currently fail the "${metricName}" condition under these settings.`;
       if (!points.length) return;
 
       mapEl.style.display = 'block';
@@ -91,7 +127,7 @@
         const marker = L.circleMarker([lat, lon], { radius, color: '#fff', weight: 1, fillColor: errColor, fillOpacity: 0.7 });
         const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`];
         if (p.street_name) bits.push(escapeHtml(p.street_name));
-        bits.push(`vs. OSM: off by ${Number(p.magnitude).toFixed(1)} mph`);
+        bits.push(`${escapeHtml(metricName)}: off by ${Number(p.magnitude).toFixed(1)} mph`);
         if (p.state) bits.push(escapeHtml(p.state));
         bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
         marker.bindPopup(bits.join('<br>'));
