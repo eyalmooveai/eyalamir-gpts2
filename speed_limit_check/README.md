@@ -454,15 +454,21 @@ individual segments to plot; this runs a real row-level query instead.
 
 ### Custom test
 
-Below the map card, "Custom test" lets you write your own comparison
-instead of picking from the six built-in metrics - either a direct
-expression (`speed_AVG_mph > speed_limit_infer_mph_corrected + 10`,
+Below the map card, "Custom test, or ask a question" lets you write your
+own comparison instead of picking from the six built-in metrics - either a
+direct expression (`speed_AVG_mph > speed_limit_infer_mph_corrected + 10`,
 `ABS(speed_limit_osm_mph - speed_limit_here_mph) > 15 AND functional_class <= 3`)
 or plain English ("segments where the inferred limit and HERE disagree by
 more than 15 mph"), which Claude translates into an expression for you.
-"Run custom test" shows how many segments (of the current filters) match;
-"Show worst offenders on map" plots up to 300 of them the same way the
-built-in metrics do.
+"Run" shows how many segments (of the current filters) match; "Show worst
+offenders on map" plots up to 300 of them the same way the built-in
+metrics do.
+
+The same box also answers general questions about Moove or about
+Archimedes itself - e.g. "what is Moove?" or "what does the Evaluator's
+cost cap mean?" - instead of running a query. Claude decides whether your
+text is a comparison to translate or a question to answer; a question is
+answered directly as plain text and never touches BigQuery at all.
 
 Only a fixed set of numeric/boolean columns can be referenced (not every
 column on the table - see `custom_metrics.COLUMN_TYPES`), and whatever you

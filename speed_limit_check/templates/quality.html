@@ -5,8 +5,74 @@
 {% endblock %}
 {% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / Speed-Limits Quality</p>{% endblock %}
 {% block heading %}Speed-Limits Quality{% endblock %}
-{% block subtitle %}Nationwide inferred speed-limit quality vs. OSM/HERE/observed speeds{% endblock %}
+{% block subtitle %}How much can we trust the inferred speed limit? Nationwide metrics vs. OSM, HERE, and observed speeds.{% endblock %}
 {% block content %}
+
+<div class="card">
+  <span class="eyebrow">Get started</span>
+  <h3 style="margin:0 0 4px;">Filters</h3>
+  <p class="section-intro">Pick a table and an inferred field, narrow it down if you like, then run the metrics below. Only Table and Inferred field usually need changing - everything else has a sensible default.</p>
+  <form id="quality-filters-form" method="get" action="/speed-limits">
+    <label for="table">Table</label>
+    <select id="table" name="table">
+      {% for t in table_options %}<option value="{{ t }}" {% if t == filters.table %}selected{% endif %}>{{ t }}</option>{% endfor %}
+      {% if filters.table not in table_options %}<option value="{{ filters.table }}" selected>{{ filters.table }}</option>{% endif %}
+    </select>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;"><code>calc_out.speed_limits_US*</code> or <code>archimedes_api.speed_limits_infer*</code> - not every table has every metric's columns; you'll get a clear warning instead of a raw error if one's missing.</p>
+
+    <label for="infer_field">Inferred field being evaluated</label>
+    <select id="infer_field" name="infer_field">
+      {% for f in infer_field_options %}<option value="{{ f }}" {% if f == filters.infer_field %}selected{% endif %}>{{ f }}</option>{% endfor %}
+      {% if filters.infer_field not in infer_field_options %}<option value="{{ filters.infer_field }}" selected>{{ filters.infer_field }}</option>{% endif %}
+    </select>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Which inferred-speed-limit column every metric below compares against OSM/HERE/observed/freeflow speeds - options reflect whatever columns the selected table actually has.</p>
+
+    <label for="states">States (comma-separated, blank = all 50)</label>
+    <input type="text" id="states" name="states" value="{{ filters.states }}" placeholder="e.g. NC,SC,VA" list="state-list">
+    <datalist id="state-list">
+      {% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}
+    </datalist>
+
+    <label for="param1" style="margin-top:14px;">Mismatch threshold (mph)</label>
+    <input type="number" id="param1" name="param1" value="{{ filters.param1 }}" step="1" min="0">
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">How many mph off from OSM/HERE/observed/freeflow counts as a disagreement.</p>
+
+    <details class="disclosure">
+      <summary>More filters (implausible-speed threshold, functional class, zip/county, breakdown)</summary>
+      <div class="disclosure-body">
+        <label for="param2">Implausible-speed threshold (mph)</label>
+        <input type="number" id="param2" name="param2" value="{{ filters.param2 }}" step="1" min="0">
+        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">How fast an observed/freeflow speed has to be to count as implausible.</p>
+
+        <label for="fc">Functional class(es) (comma-separated, blank = all)</label>
+        <input type="text" id="fc" name="fc" value="{{ filters.functional_classes }}" placeholder="e.g. 1,2,3">
+
+        <div class="row-2">
+          <div>
+            <label for="zip_codes">Zip code(s) (comma-separated, blank = no zip filter)</label>
+            <input type="text" id="zip_codes" name="zip_codes" value="{{ filters.zip_codes }}" placeholder="e.g. 27601,27603">
+          </div>
+          <div>
+            <label for="counties">Count(y/ies) (comma-separated, blank = no county filter)</label>
+            <input type="text" id="counties" name="counties" value="{{ filters.counties }}" placeholder="e.g. Wake,Durham">
+          </div>
+        </div>
+        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Zip/county narrow to segments whose geometry falls inside those boundaries (a real spatial join, not a plain column filter - slower than the filters above). County names are matched within the states selected above, or nationwide if none are selected.</p>
+
+        <label for="group_by">Break down by</label>
+        <select id="group_by" name="group_by">
+          <option value="none" {% if filters.group_by == 'none' %}selected{% endif %}>Nothing - one nationwide (or filtered) number</option>
+          <option value="state" {% if filters.group_by == 'state' %}selected{% endif %}>State</option>
+          <option value="functional_class" {% if filters.group_by == 'functional_class' %}selected{% endif %}>Functional class</option>
+          <option value="state,functional_class" {% if filters.group_by == 'state,functional_class' %}selected{% endif %}>State and functional class</option>
+        </select>
+      </div>
+    </details>
+
+    <button type="submit">Run metrics</button>
+  </form>
+</div>
+
 <div id="quality-results">
   {% if error %}
     <div class="card">
@@ -23,77 +89,17 @@
       <p id="quality-loading-message" style="margin-top:0;">Running BigQuery query&hellip;</p>
       <div class="progress-indeterminate"></div>
     </div>
+  {% else %}
+    <div class="card">
+      <p style="color:var(--muted); font-size:0.88rem; margin:0;">Set your filters above and click "Run metrics" to see results here.</p>
+    </div>
   {% endif %}
 </div>
 
 <div class="card">
-  <a href="/sign-checker" class="btn-secondary" style="text-decoration:none; display:inline-block;">Open the Street View Sign Checker &rarr;</a>
-  <p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Checks one segment's real-world sign by reading it in Street View imagery. The metrics above are a nationwide, table-only view - no imagery involved.</p>
-</div>
-
-<div class="card">
-  <a href="/speed-limits-evaluator" class="btn-secondary" style="text-decoration:none; display:inline-block;">Open the Speed-Limits Evaluator &rarr;</a>
-  <p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Runs the same per-segment sign check as above across up to 1000 segments for a state at once, concurrently - for evaluating a model across many streets rather than one.</p>
-</div>
-
-<div class="card">
-  <h3 style="margin-top:0;">Filters</h3>
-  <form id="quality-filters-form" method="get" action="/speed-limits">
-    <label for="table">Table (calc_out.speed_limits_US* or archimedes_api.speed_limits_infer*)</label>
-    <select id="table" name="table">
-      {% for t in table_options %}<option value="{{ t }}" {% if t == filters.table %}selected{% endif %}>{{ t }}</option>{% endfor %}
-      {% if filters.table not in table_options %}<option value="{{ filters.table }}" selected>{{ filters.table }}</option>{% endif %}
-    </select>
-    <label for="infer_field">Inferred field being evaluated</label>
-    <select id="infer_field" name="infer_field">
-      {% for f in infer_field_options %}<option value="{{ f }}" {% if f == filters.infer_field %}selected{% endif %}>{{ f }}</option>{% endfor %}
-      {% if filters.infer_field not in infer_field_options %}<option value="{{ filters.infer_field }}" selected>{{ filters.infer_field }}</option>{% endif %}
-    </select>
-    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Which inferred-speed-limit column every metric below compares against OSM/HERE/observed/freeflow speeds - the options above are whatever columns the selected table actually has (varies by table).</p>
-    <div class="row-2">
-      <div>
-        <label for="param1">Mismatch threshold (mph)</label>
-        <input type="number" id="param1" name="param1" value="{{ filters.param1 }}" step="1" min="0">
-        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">How many mph off from OSM/HERE/observed/freeflow counts as a disagreement.</p>
-      </div>
-      <div>
-        <label for="param2">Implausible-speed threshold (mph)</label>
-        <input type="number" id="param2" name="param2" value="{{ filters.param2 }}" step="1" min="0">
-        <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;">How fast an observed/freeflow speed has to be to count as implausible.</p>
-      </div>
-    </div>
-    <label for="states">States (comma-separated, blank = all 50)</label>
-    <input type="text" id="states" name="states" value="{{ filters.states }}" placeholder="e.g. NC,SC,VA" list="state-list">
-    <datalist id="state-list">
-      {% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}
-    </datalist>
-    <label for="fc">Functional class(es) (comma-separated, blank = all)</label>
-    <input type="text" id="fc" name="fc" value="{{ filters.functional_classes }}" placeholder="e.g. 1,2,3">
-    <div class="row-2">
-      <div>
-        <label for="zip_codes">Zip code(s) (comma-separated, blank = no zip filter)</label>
-        <input type="text" id="zip_codes" name="zip_codes" value="{{ filters.zip_codes }}" placeholder="e.g. 27601,27603">
-      </div>
-      <div>
-        <label for="counties">Count(y/ies) (comma-separated, blank = no county filter)</label>
-        <input type="text" id="counties" name="counties" value="{{ filters.counties }}" placeholder="e.g. Wake,Durham">
-      </div>
-    </div>
-    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 14px;">Zip/county narrow to segments whose geometry falls inside those boundaries (a real spatial join, not a plain column filter - slower than the filters above). County names are matched within the states selected above, or nationwide if none are selected - a name like "Washington" exists in many states, so pick states too if you mean one specific county.</p>
-    <label for="group_by">Break down by</label>
-    <select id="group_by" name="group_by">
-      <option value="none" {% if filters.group_by == 'none' %}selected{% endif %}>Nothing - one nationwide (or filtered) number</option>
-      <option value="state" {% if filters.group_by == 'state' %}selected{% endif %}>State</option>
-      <option value="functional_class" {% if filters.group_by == 'functional_class' %}selected{% endif %}>Functional class</option>
-      <option value="state,functional_class" {% if filters.group_by == 'state,functional_class' %}selected{% endif %}>State and functional class</option>
-    </select>
-    <button type="submit">Run metrics</button>
-  </form>
-</div>
-
-<div class="card">
-  <h3 style="margin-top:0;">Map: where the worst mismatches are</h3>
-  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Pick a metric and see the real segments failing it worst, plotted on a map - not just how many, but where. Uses the filters above (as currently filled in, whether or not you've clicked "Run metrics" yet). Capped at {{ preview_max_segments }} segments, worst offenders first.</p>
+  <span class="eyebrow">Explore</span>
+  <h3 style="margin:0 0 4px;">Map: where the worst mismatches are</h3>
+  <p class="section-intro">Pick a metric and see the real segments failing it worst, plotted on a map - not just how many, but where. Uses the filters above (as currently filled in, whether or not you've clicked "Run metrics" yet). Capped at {{ preview_max_segments }} segments, worst offenders first.</p>
   <div class="row-2">
     <div>
       <label for="map-metric">Metric</label>
@@ -110,29 +116,64 @@
 </div>
 
 <div class="card">
-  <h3 style="margin-top:0;">Custom test</h3>
-  <p style="color:var(--muted); font-size:0.82rem; margin-top:0;">Write your own comparison - either a direct expression (e.g. <code>speed_AVG_mph > speed_limit_infer_mph_corrected + 10</code>) or plain English (e.g. "segments where the inferred limit and HERE disagree by more than 15 mph") and it's translated for you. Runs against the table/filters selected above. Only a fixed set of numeric/boolean columns can be referenced; everything is validated before it ever reaches BigQuery.</p>
-  <label for="custom-test-text">Test</label>
-  <textarea id="custom-test-text" rows="3" placeholder="e.g. speed_AVG_mph > 60 AND functional_class < 4" style="width:100%; resize:vertical; font-family:inherit;"></textarea>
-  <button type="button" class="btn-secondary" id="custom-test-btn" onclick="runCustomTest()" style="margin-top:10px;">Run custom test</button>
+  <span class="eyebrow">Ask Archimedes</span>
+  <h3 style="margin:0 0 4px;">Custom test, or ask a question</h3>
+  <p class="section-intro">
+    Type your own comparison - directly (e.g. <code>speed_AVG_mph &gt; speed_limit_infer_mph_corrected + 10</code>)
+    or in plain English (e.g. "segments where the inferred limit and HERE disagree by more than 15 mph") - and
+    it's translated and run against the table/filters above. Or just ask a question, like
+    <em>"what is Moove?"</em> or <em>"what does the Evaluator's cost cap mean?"</em> and Claude answers directly -
+    no query is run for a question. Comparisons are checked against a strict, safe grammar before they ever
+    reach BigQuery; a question never touches BigQuery at all.
+  </p>
+  <label for="custom-test-text">Test or question</label>
+  <textarea id="custom-test-text" rows="3" placeholder="e.g. speed_AVG_mph > 60 AND functional_class < 4  -or-  what is Archimedes?" style="width:100%; resize:vertical; font-family:inherit;"></textarea>
+  <button type="button" class="btn-secondary" id="custom-test-btn" onclick="runCustomTest()" style="margin-top:10px;">Run</button>
+
   <div id="custom-test-result" style="display:none; margin-top:14px;">
-    <p id="custom-test-summary" style="margin:0 0 6px;"></p>
-    <p id="custom-test-explanation" style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;"></p>
-    <pre id="custom-test-sql" class="log" style="font-size:0.78rem;"></pre>
-    <div class="row-2" style="align-items:flex-end;">
-      <div style="display:flex; align-items:flex-end;">
-        <button type="button" class="btn-secondary" id="custom-test-map-btn" onclick="showCustomTestMap()" style="margin-bottom:0;">Show worst offenders on map</button>
-      </div>
-      <div>
-        <label for="custom-test-state">State to verify with Street View</label>
-        <input type="text" id="custom-test-state" placeholder="e.g. NC" list="state-list" style="text-transform:uppercase;">
-      </div>
+    <p id="custom-test-loading" style="color:var(--muted); margin:0;"></p>
+
+    <div id="custom-test-answer-block" style="display:none;">
+      <div class="answer-block" id="custom-test-answer-text"></div>
     </div>
-    <p style="margin:10px 0 0;">
-      <a href="#" id="custom-test-evaluator-link" onclick="return goVerifyCustomTest();" class="btn-secondary" style="text-decoration:none; display:inline-block;">Verify these with Street View &rarr;</a>
-    </p>
-    <p id="custom-test-map-message" style="color:var(--muted); font-size:0.82rem; margin:10px 0 0; display:none;"></p>
-    <div id="custom-test-map" style="height:440px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
+
+    <div id="custom-test-comparison-block" style="display:none;">
+      <p id="custom-test-summary" style="margin:0 0 6px;"></p>
+      <p id="custom-test-explanation" style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;"></p>
+      <pre id="custom-test-sql" class="log" style="font-size:0.78rem;"></pre>
+      <div class="row-2" style="align-items:flex-end;">
+        <div style="display:flex; align-items:flex-end;">
+          <button type="button" class="btn-secondary" id="custom-test-map-btn" onclick="showCustomTestMap()" style="margin-bottom:0;">Show worst offenders on map</button>
+        </div>
+        <div>
+          <label for="custom-test-state">State to verify with Street View</label>
+          <input type="text" id="custom-test-state" placeholder="e.g. NC" list="state-list" style="text-transform:uppercase;">
+        </div>
+      </div>
+      <p style="margin:10px 0 0;">
+        <a href="#" id="custom-test-evaluator-link" onclick="return goVerifyCustomTest();" class="btn-secondary" style="text-decoration:none; display:inline-block;">Verify these with Street View &rarr;</a>
+      </p>
+      <p id="custom-test-map-message" style="color:var(--muted); font-size:0.82rem; margin:10px 0 0; display:none;"></p>
+      <div id="custom-test-map" style="height:440px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
+    </div>
+
+    <p id="custom-test-error" class="badge err" style="display:none;"></p>
+  </div>
+</div>
+
+<div class="card">
+  <span class="eyebrow">More tools</span>
+  <h3 style="margin:0 0 4px;">Per-segment Street View verification</h3>
+  <p class="section-intro" style="margin-bottom:12px;">The metrics above compare table values only, no imagery involved. These two actually look at the real-world sign.</p>
+  <div class="row-2">
+    <div>
+      <a href="/sign-checker" class="btn-secondary" style="text-decoration:none; display:inline-block;">Sign Checker &rarr;</a>
+      <p style="color:var(--muted); font-size:0.82rem; margin:8px 0 0;">Checks one segment by reading its sign in Street View imagery.</p>
+    </div>
+    <div>
+      <a href="/speed-limits-evaluator" class="btn-secondary" style="text-decoration:none; display:inline-block;">Evaluator &rarr;</a>
+      <p style="color:var(--muted); font-size:0.82rem; margin:8px 0 0;">The same check across up to 1000 segments for a state at once, concurrently.</p>
+    </div>
   </div>
 </div>
 
@@ -260,6 +301,14 @@
     return fd;
   }
 
+  function resetCustomTestBlocks() {
+    document.getElementById('custom-test-answer-block').style.display = 'none';
+    document.getElementById('custom-test-comparison-block').style.display = 'none';
+    document.getElementById('custom-test-error').style.display = 'none';
+    document.getElementById('custom-test-map').style.display = 'none';
+    document.getElementById('custom-test-map-message').style.display = 'none';
+  }
+
   window.runCustomTest = function () {
     const btn = document.getElementById('custom-test-btn');
     const text = document.getElementById('custom-test-text').value.trim();
@@ -267,35 +316,42 @@
     lastCustomTestText = text;
     btn.disabled = true;
     const resultEl = document.getElementById('custom-test-result');
-    const summaryEl = document.getElementById('custom-test-summary');
-    const explEl = document.getElementById('custom-test-explanation');
-    const sqlEl = document.getElementById('custom-test-sql');
-    const mapEl = document.getElementById('custom-test-map');
-    const mapMsgEl = document.getElementById('custom-test-map-message');
+    const loadingEl = document.getElementById('custom-test-loading');
     resultEl.style.display = 'block';
-    mapEl.style.display = 'none';
-    mapMsgEl.style.display = 'none';
-    summaryEl.textContent = 'Running...';
-    explEl.textContent = '';
-    sqlEl.textContent = '';
+    resetCustomTestBlocks();
+    loadingEl.textContent = 'Thinking...';
     lastCustomTestSql = null;
 
     fetch('/speed-limits/custom-test', { method: 'POST', body: customTestFormData() })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         btn.disabled = false;
+        loadingEl.textContent = '';
         if (!ok || data.error) {
-          summaryEl.textContent = 'Error: ' + (data.error || 'unknown error');
+          const errEl = document.getElementById('custom-test-error');
+          errEl.textContent = data.error || 'unknown error';
+          errEl.style.display = 'inline-block';
+          return;
+        }
+        if (data.kind === 'answer') {
+          document.getElementById('custom-test-answer-text').textContent = data.answer;
+          document.getElementById('custom-test-answer-block').style.display = 'block';
           return;
         }
         lastCustomTestSql = data.sql;
-        summaryEl.textContent = `${data.matching_count.toLocaleString()} of ${data.total_segments.toLocaleString()} segments match (${data.pct_matching.toFixed(2)}%).`;
-        explEl.textContent = data.source === 'llm' ? ('Translated from your text: ' + (data.explanation || '')) : '';
-        sqlEl.textContent = data.sql;
+        document.getElementById('custom-test-summary').textContent =
+          `${data.matching_count.toLocaleString()} of ${data.total_segments.toLocaleString()} segments match (${data.pct_matching.toFixed(2)}%).`;
+        document.getElementById('custom-test-explanation').textContent =
+          data.source === 'llm' ? ('Translated from your text: ' + (data.explanation || '')) : '';
+        document.getElementById('custom-test-sql').textContent = data.sql;
+        document.getElementById('custom-test-comparison-block').style.display = 'block';
       })
       .catch(err => {
         btn.disabled = false;
-        summaryEl.textContent = 'Error: ' + err.message;
+        loadingEl.textContent = '';
+        const errEl = document.getElementById('custom-test-error');
+        errEl.textContent = err.message;
+        errEl.style.display = 'inline-block';
       });
   };
 
@@ -315,6 +371,10 @@
         btn.disabled = false;
         if (!ok || data.error) {
           msgEl.textContent = 'Could not load map: ' + (data.error || 'unknown error');
+          return;
+        }
+        if (data.kind === 'answer') {
+          msgEl.textContent = 'That was a question, not a comparison - nothing to show on a map.';
           return;
         }
         const points = data.points || [];

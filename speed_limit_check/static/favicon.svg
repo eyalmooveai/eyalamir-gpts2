@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 -2 48.22 26.85">
+  <!-- Moove's own ring mark, extracted verbatim (path data) from the
+       company's official logo asset (Drive: "MooveAI LOGO SVG.svg"),
+       just the icon-only mark without the wordmark text, in Moove's
+       own brand teal. Used as this app's favicon so every Archimedes
+       tab in Chrome carries the real Moove mark, not an approximation. -->
+  <path fill="#00B5AD" d="M22.587 18.203c-1.13-.02-1.338.282-2.279 1.226a11.291 11.291 0 0 1-8.024 3.334h-.954C5.073 22.763 0 17.687 0 11.426S5.073.089 11.33.089h.954c3.164 0 6.025 1.298 8.08 3.39.916.932 1.097 1.177 2.223 1.17 1.126-.007 1.324-.26 2.252-1.2A11.291 11.291 0 0 1 32.89.09h.955c6.257 0 11.33 5.076 11.33 11.337s-5.073 11.337-11.33 11.337h-.955a11.29 11.29 0 0 1-7.943-3.253c-.977-.962-1.23-1.287-2.36-1.307zm-10.838 1.85c4.788 0 8.669-3.835 8.669-8.565 0-4.73-3.881-8.565-8.669-8.565S3.08 6.758 3.08 11.488c0 4.73 3.881 8.564 8.669 8.564zm21.442.13c4.722 0 8.55-3.864 8.55-8.63 0-4.766-3.828-8.63-8.55-8.63-4.722 0-8.55 3.864-8.55 8.63 0 4.766 3.828 8.63 8.55 8.63z"/>
+</svg>

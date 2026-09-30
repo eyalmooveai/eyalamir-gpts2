@@ -77,7 +77,7 @@ from quality_metrics import (
     metric_labels,
     missing_columns_report,
 )
-from custom_metrics import ExpressionError, resolve_custom_criterion
+from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_custom_criterion_as_expression
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -288,7 +288,7 @@ def _preview_candidates_response(
         custom_criterion_sql = None
         if custom_criterion_text.strip():
             available_columns = list_table_columns(project, dataset, table)
-            validated, _source, _explanation = resolve_custom_criterion(
+            validated, _source, _explanation = resolve_custom_criterion_as_expression(
                 custom_criterion_text, available_columns, _anthropic_api_key(),
             )
             custom_criterion_sql = validated.sql
@@ -680,55 +680,65 @@ def quality_sample_mismatches():
 
 
 def _validate_quality_custom_text(text: str, base: QualityFilters):
-    """Returns (validated_expression, source, explanation, None) on
-    success or (None, None, None, (response, status)) on failure -
-    shared by both "Custom test" endpoints below, which must each
-    independently re-validate the raw text against the live current
-    table's columns. Never accept an already-validated SQL string from
-    the client for reuse here - see custom_metrics.py's module docstring
-    for why that would defeat the whole point of validating in the first
-    place."""
+    """Returns (CustomTestResult, None) on success or (None, (response,
+    status)) on failure - shared by both "Custom test" endpoints below,
+    which must each independently re-validate the raw text against the
+    live current table's columns. Never accept an already-validated SQL
+    string (or a cached answer) from the client for reuse here - see
+    custom_metrics.py's module docstring for why that would defeat the
+    whole point of validating in the first place. The result's `kind` is
+    either "expression" (a validated comparison, safe to run against
+    BigQuery) or "answer" (a plain-text response to a general question
+    about Moove/Archimedes - never touches SQL; the caller should just
+    display it)."""
     if not text:
-        return None, None, None, (jsonify({"error": "Enter a comparison, or describe one in plain English."}), 400)
+        return None, (jsonify({"error": "Enter a comparison, describe one in plain English, or ask a question about Moove or Archimedes."}), 400)
     try:
         available_columns = list_table_columns(DEFAULT_PROJECT, base.dataset, base.table)
     except Exception as e:
-        return None, None, None, (
+        return None, (
             jsonify({"error": f"Could not check {base.dataset}.{base.table}'s columns: {type(e).__name__}: {e}"}), 500,
         )
     try:
-        validated, source, explanation = resolve_custom_criterion(text, available_columns, _anthropic_api_key())
+        result = resolve_custom_criterion(text, available_columns, _anthropic_api_key())
     except ExpressionError as e:
-        return None, None, None, (jsonify({"error": str(e)}), 400)
-    return validated, source, explanation, None
+        return None, (jsonify({"error": str(e)}), 400)
+    return result, None
 
 
 @app.route("/speed-limits/custom-test", methods=["POST"])
 def quality_custom_test():
-    """The "Custom test" box's result: how many segments (of the current
-    state/functional_class/zip/county filters) match a user-defined
-    comparison - either typed directly or translated from plain English
-    by Claude (see custom_metrics.py). Synchronous, not a background job
-    - it's one cheap COUNT/SUM aggregate, not the nationwide six-metric
-    query the rest of this page runs."""
+    """The "Custom test" box's result: either how many segments (of the
+    current state/functional_class/zip/county filters) match a
+    user-defined comparison - typed directly, or translated from plain
+    English by Claude - or, if the text was a general question about
+    Moove/Archimedes instead, Claude's plain-text answer to it (no
+    BigQuery query is run in that case). See custom_metrics.py. The
+    comparison path is synchronous, not a background job - it's one cheap
+    COUNT/SUM aggregate, not the nationwide six-metric query the rest of
+    this page runs."""
     text = request.form.get("text", "").strip()
     base, err = _quality_filters_from_args(request.form, require_infer_field=False)
     if err:
         return err
-    validated, source, explanation, err = _validate_quality_custom_text(text, base)
+    result, err = _validate_quality_custom_text(text, base)
     if err:
         return err
+    if result.kind == "answer":
+        return jsonify({"kind": "answer", "answer": result.answer, "source": result.source})
+    validated = result.expression
     try:
-        result = fetch_custom_metric(base, validated.sql)
+        metric = fetch_custom_metric(base, validated.sql)
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
-    total = result.get("total_segments") or 0
-    matching = result.get("matching_count") or 0
+    total = metric.get("total_segments") or 0
+    matching = metric.get("matching_count") or 0
     return jsonify({
+        "kind": "expression",
         "sql": validated.sql,
         "has_magnitude": validated.magnitude_sql is not None,
-        "source": source,
-        "explanation": explanation,
+        "source": result.source,
+        "explanation": result.explanation,
         "total_segments": total,
         "matching_count": matching,
         "pct_matching": (100.0 * matching / total) if total else 0.0,
@@ -740,19 +750,25 @@ def quality_custom_test_sample():
     """The Custom test box's "show these on a map" - up to
     PREVIEW_MAX_SEGMENTS real matching segments, worst-first when the
     expression has a natural magnitude (see
-    custom_metrics.ValidatedExpression.magnitude_sql)."""
+    custom_metrics.ValidatedExpression.magnitude_sql). If the text turned
+    out to be a general question (kind == "answer"), there's no map to
+    show - just returns the same answer as the aggregate endpoint."""
     text = request.form.get("text", "").strip()
     base, err = _quality_filters_from_args(request.form, require_infer_field=False)
     if err:
         return err
-    validated, source, explanation, err = _validate_quality_custom_text(text, base)
+    result, err = _validate_quality_custom_text(text, base)
     if err:
         return err
+    if result.kind == "answer":
+        return jsonify({"kind": "answer", "answer": result.answer, "source": result.source})
+    validated = result.expression
     try:
         rows = fetch_custom_sample(base, validated.sql, validated.magnitude_sql, PREVIEW_MAX_SEGMENTS)
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
     return jsonify({
+        "kind": "expression",
         "points": [
             {
                 "segment_id": r.get("here_segment_id"), "lat": r.get("lat"), "lon": r.get("lon"),
@@ -764,7 +780,7 @@ def quality_custom_test_sample():
         "shown": len(rows),
         "cap": PREVIEW_MAX_SEGMENTS,
         "sql": validated.sql,
-        "source": source,
+        "source": result.source,
     })
 
 
@@ -861,7 +877,7 @@ def run():
             _validate_identifier(state, STATE_RE, "state (expected 2 letters, e.g. NC)")
             table = table_name(state, year, month)
             available_columns = list_table_columns(project, dataset, table)
-            validated, _source, _explanation = resolve_custom_criterion(
+            validated, _source, _explanation = resolve_custom_criterion_as_expression(
                 custom_criterion_text, available_columns, _anthropic_api_key(),
             )
             custom_criterion_sql = validated.sql
@@ -1105,7 +1121,7 @@ def evaluator_start():
             _validate_identifier(state, STATE_RE, "state (expected 2 letters, e.g. NC)")
             table = table_name(state, year, month)
             available_columns = list_table_columns(project, dataset, table)
-            validated, _source, _explanation = resolve_custom_criterion(
+            validated, _source, _explanation = resolve_custom_criterion_as_expression(
                 custom_criterion_text, available_columns, _anthropic_api_key(),
             )
             custom_criterion_sql = validated.sql

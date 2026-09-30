@@ -9,6 +9,46 @@
   split into separate apps/deployments unless explicitly asked to (this
   was tried and explicitly reverted: "stop -- i want them all in one
   app, one deployment").
+- **Branding: a `static/` folder (Flask's default static route, no extra
+  route code needed) holds two real brand assets, both committed to git
+  as regular files, not generated at request time.**
+  - `static/favicon.svg` (+ `favicon-32.png`/`apple-touch-icon.png`
+    fallbacks) is Moove's own ring/infinity mark - the path data was
+    extracted verbatim from the company's official logo file
+    (`MooveAI LOGO SVG.svg`, pulled from Drive), just the icon without
+    the wordmark text, in Moove's brand teal `#00b5ad`. Wired into every
+    page via `templates/layout.html`'s `<head>` (`<link rel="icon">`
+    etc.) - don't invent a different mark or guess at Moove's colors;
+    if this ever needs regenerating, re-extract from the official Drive
+    asset rather than approximating by eye.
+  - `static/archimedes-mark.svg` is this tool's own mark - an
+    Archimedean spiral (r = a + b*theta) on a teal disc, generated
+    parametrically (see the module's inline comment for the formula),
+    deliberately in the same teal as Moove's own mark to read as "part
+    of the same family" without literally reusing Moove's logo for a
+    different product. Used in the hub page's hero and nowhere else
+    yet.
+  - Both PNG fallbacks were rasterized once via headless Chromium
+    (Playwright, `executablePath: '/opt/pw-browsers/chromium'`) and
+    committed as static files - there's no server-side SVG-to-PNG
+    rendering at runtime, so regenerating them (if the SVGs ever change)
+    is a one-off manual step, not something `app.py` does.
+  - `layout.html` also carries a small shared footer ("Archimedes is
+    built and run by Moove", linking to moove.ai) on every page, and a
+    `--moove-teal` CSS variable kept deliberately separate from
+    `--accent` (this app's own long-established UI blue, used for every
+    button/link) - brand touches use teal, the functional UI didn't get
+    re-themed.
+  - `Dockerfile`'s `COPY` line needs `static/` - same "don't forget the
+    new thing" mistake this file already warns about for new Python
+    modules.
+  - The hub page (`hub.html`) is the one page with a custom
+    `{% block header %}` override (a hero: mark + title + tagline +
+    one-paragraph description) instead of the plain
+    breadcrumb/h1/subtitle every other page gets from `layout.html`'s
+    default `header` block - if hub.html's hero ever needs to change,
+    edit its own `header` block, not `layout.html`'s default (which every
+    other page still uses as-is).
 - **`speed_limit_here_mph` is always wrapped in `ROUND()`, everywhere it's
   referenced.** It's stored as a precise km/h->mph conversion (e.g.
   `24.860161591050343`, confirmed live - not `25`), unlike every other
@@ -430,6 +470,34 @@
   start without them) and `Dockerfile`'s `COPY` line needs
   `custom_metrics.py` - same "don't forget the new module" mistake this
   file already warns about twice above.
+  - **The box also answers general questions about Moove/Archimedes**
+    ("what is Moove?", "what does the Evaluator's cost cap mean?") -
+    a third response kind alongside "ran a comparison". This is a
+    genuinely different code path from expression translation, not a
+    relaxation of the SQL-safety grammar: `custom_metrics.classify_custom_test_text()`
+    asks Claude to pick one of `kind="expression"` (translate, same as
+    before), `kind="answer"` (answer directly from the fixed
+    `_MOOVE_BACKGROUND`/`_ARCHIMEDES_BACKGROUND` text in that module -
+    sourced from Moove's own "Turing Technical Overview" doc and this
+    repo's own README/CLAUDE.md, not invented), or `kind="unsupported"`.
+    `resolve_custom_criterion()` (the one entry point) returns a
+    `CustomTestResult` with that `kind` - an `"answer"` is plain text and
+    **is never passed through `validate_custom_expression()` or spliced
+    into any query**; only a `kind="expression"` result's SQL is (and
+    still goes through the exact same validator raw text does, same as
+    always). `resolve_custom_criterion_as_expression()` wraps this for
+    the Evaluator/Sign Checker's own Custom test box, which has no
+    "answer" concept (nothing to select Street View candidates with for
+    a plain question) - it raises a clear `ExpressionError` pointing the
+    user at the Quality page's box instead if `text` classifies as a
+    question there. The two Quality-page routes
+    (`/speed-limits/custom-test(/sample)`) both return `{"kind": "answer",
+    "answer": ...}` (no BigQuery call at all) or `{"kind": "expression",
+    ...}` (the pre-existing shape, unchanged) - `quality.html`'s JS
+    branches on `data.kind` to show a distinct teal `.answer-block` for a
+    question vs. the match-count/SQL/map controls for a comparison.
+    Keep the background text factual and short if it's ever updated - it
+    goes verbatim into the system prompt Claude answers from.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo

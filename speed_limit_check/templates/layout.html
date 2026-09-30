@@ -3,7 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Speed Limit Sign Checker{% endblock %}</title>
+  <title>{% block title %}Archimedes - MooveAI{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='apple-touch-icon.png') }}">
   <style>
     :root {
       color-scheme: light dark;
@@ -16,6 +19,11 @@
       --ok: #1d8a4a;
       --warn: #b25a00;
       --err: #c62828;
+      /* Moove's own brand teal (from the company's logo mark) - used for
+         brand touches (hero, footer icon, "live" accents), kept separate
+         from --accent (this app's own long-established UI blue) rather
+         than re-theming every button/link in the app to match it. */
+      --moove-teal: #00b5ad;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -216,6 +224,7 @@
     .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
     .model-card {
       display: block;
+      position: relative;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -223,11 +232,60 @@
       text-decoration: none;
       color: var(--text);
     }
-    .model-card.active { border-color: var(--accent); cursor: pointer; }
+    .model-card.active { border-color: var(--moove-teal); cursor: pointer; }
     .model-card.active:hover { border-width: 2px; padding: 15px; }
     .model-card.placeholder { opacity: 0.55; cursor: default; }
     .model-card h3 { margin: 0 0 4px; font-size: 1rem; }
     .model-card p { margin: 0; font-size: 0.8rem; color: var(--muted); }
+    .model-card .model-badge {
+      display: inline-block;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-bottom: 8px;
+    }
+    .model-card.active .model-badge { background: rgba(0,181,173,0.15); color: var(--moove-teal); }
+    .model-card.placeholder .model-badge { background: var(--border); color: var(--muted); }
+
+    /* Hub landing page hero */
+    .hero { display: flex; align-items: center; gap: 22px; margin-bottom: 6px; }
+    .hero-mark { width: 60px; height: 60px; flex: 0 0 auto; }
+    .hero-title { font-size: 2rem; margin: 0; line-height: 1.1; }
+    .hero-tagline { color: var(--muted); margin: 6px 0 0; font-size: 1.02rem; }
+    .hero-desc { color: var(--muted); margin: 16px 0 0; max-width: 680px; font-size: 0.92rem; }
+
+    /* Collapsed "More filters"-style disclosure, used to keep a form to
+       its essential fields by default without hiding the rest. */
+    details.disclosure { margin-top: 16px; }
+    details.disclosure > summary {
+      cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--accent);
+      list-style: none; user-select: none;
+    }
+    details.disclosure > summary::-webkit-details-marker { display: none; }
+    details.disclosure > summary::before { content: "\25b8  "; }
+    details.disclosure[open] > summary::before { content: "\25be  "; }
+    details.disclosure > .disclosure-body { margin-top: 12px; }
+
+    .eyebrow {
+      display: block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+      text-transform: uppercase; color: var(--moove-teal); margin-bottom: 4px;
+    }
+    .section-intro { color: var(--muted); font-size: 0.85rem; margin: -6px 0 16px; }
+
+    /* A plain-text Q&A answer inside the Custom test card - visually
+       distinct from a comparison's match-count result so it's obvious
+       at a glance which kind of response came back. */
+    .answer-block {
+      background: rgba(0,181,173,0.08);
+      border: 1px solid rgba(0,181,173,0.35);
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-size: 0.92rem;
+      line-height: 1.55;
+    }
 
     .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
     .stat-tile { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
@@ -250,10 +308,16 @@
 </head>
 <body>
   <div class="wrap">
+    {% block header %}
     {% block breadcrumb %}{% endblock %}
     <h1>{% block heading %}Speed Limit Sign Checker{% endblock %}</h1>
     <p class="subtitle">{% block subtitle %}calc_out.speed_limits_&lt;STATE&gt;_&lt;YEAR&gt;_&lt;MONTH&gt;_details vs. Street View{% endblock %}</p>
+    {% endblock %}
     {% block content %}{% endblock %}
+    <footer style="margin-top:40px; padding-top:16px; border-top:1px solid var(--border); display:flex; align-items:center; gap:8px; color:var(--muted); font-size:0.78rem;">
+      <img src="{{ url_for('static', filename='favicon.svg') }}" alt="" width="16" height="16" style="opacity:0.85;">
+      <span>Archimedes is built and run by <a href="https://moove.ai" target="_blank" rel="noopener" style="color:var(--muted); text-decoration:underline;">Moove</a></span>
+    </footer>
   </div>
 </body>
 </html>

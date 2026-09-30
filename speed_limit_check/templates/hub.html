@@ -1,6 +1,21 @@
 {% extends "layout.html" %}
-{% block heading %}Archimedes{% endblock %}
-{% block subtitle %}MooveAI's hub for data quality tools and models{% endblock %}
+{% block title %}Archimedes - MooveAI{% endblock %}
+{% block header %}
+<div class="hero">
+  <img class="hero-mark" src="{{ url_for('static', filename='archimedes-mark.svg') }}" alt="Archimedes">
+  <div>
+    <h1 class="hero-title">Archimedes</h1>
+    <p class="hero-tagline">MooveAI's data quality hub</p>
+  </div>
+</div>
+<p class="hero-desc">
+  Archimedes checks how much MooveAI's inferred road data can be trusted -
+  starting with speed limits: comparing the inferred values against
+  OSM/HERE/observed speeds at scale, and verifying individual segments
+  against what a real Street View sign actually says. One tool per data
+  product, all in one place.
+</p>
+{% endblock %}
 {% block content %}
 <div class="card">
   <h3 style="margin-top:0;">Models</h3>
@@ -9,11 +24,13 @@
     {% for m in models %}
       {% if m.href %}
         <a class="model-card active" href="{{ m.href }}">
+          <span class="model-badge">Live</span>
           <h3>{{ m.name }}</h3>
           <p>{{ m.description }}</p>
         </a>
       {% else %}
         <div class="model-card placeholder">
+          <span class="model-badge">Coming soon</span>
           <h3>{{ m.name }}</h3>
           <p>{{ m.description }}</p>
         </div>
