@@ -5,14 +5,16 @@
   work, their results, and their performance (not just a "quality
   checker" - "checking quality vs. ground truth" is one specific lens
   this platform gives you into a model, not the whole point of it).
-  One Flask app (`app.py`), one deployment, four pages: `/` (hub, model catalog),
-  `/speed-limits` (Speed-Limits Quality - nationwide BigQuery metrics),
-  `/sign-checker` (the original per-segment Street View sign checker),
-  `/speed-limits-evaluator` (Speed-Limits Evaluator - batch/concurrent
-  version of the sign checker, see below). Keep it this way - do not
-  split into separate apps/deployments unless explicitly asked to (this
-  was tried and explicitly reverted: "stop -- i want them all in one
-  app, one deployment").
+  One Flask app (`app.py`), one deployment, six pages: `/` (hub/Explore,
+  model catalog + a live sample map), `/speed-limits` (Speed-Limits
+  Quality - nationwide BigQuery metrics), `/sign-checker` (the original
+  per-segment Street View sign checker), `/speed-limits-evaluator`
+  (Speed-Limits Evaluator - batch/concurrent version of the sign
+  checker, see below), `/agent` (the standalone "Ask Archimedes" AI
+  agent page), `/deploy` (a static deployment-info reference page). Keep
+  it this way - do not split into separate apps/deployments unless
+  explicitly asked to (this was tried and explicitly reverted: "stop --
+  i want them all in one app, one deployment").
 - **Branding: a `static/` folder (Flask's default static route, no extra
   route code needed) holds two real brand assets, both committed to git
   as regular files, not generated at request time.**
@@ -73,20 +75,38 @@
     Quality (`/speed-limits`) and Run (`/speed-limits-evaluator`) are
     literal 1:1 page names; the other three are deliberate editorial
     choices, not obvious defaults, so don't "fix" them without
-    reconsidering why: **Explore** goes to `/` (the hub/model catalog -
-    "explore MooveAI's models"), **Agent** goes to
-    `/speed-limits#ask-archimedes` (an anchor into the Custom
-    test/"Ask Archimedes" card on the Quality page, not a separate
-    route - there's exactly one AI-agent capability in this app today
-    and it didn't need a duplicate standalone page), **Deploy** goes to
-    the new `/deploy` route (see below). Active-state highlighting for
-    Quality/Explore/Deploy/Run is server-side (`request.path ==
-    '/...'` in `layout.html`); Agent can't be, since URL fragments never
-    reach the server - a small inline script in `layout.html` checks
-    `window.location.hash === '#ask-archimedes'` client-side instead and
-    adds `.active` itself. If Sign Checker (`/sign-checker`) ever needs
-    its own top-level nav slot, that's a 6th item, not a repurposing of
-    one of these five - the user asked for exactly these five.
+    reconsidering why: **Explore** goes to `/` (the hub/model catalog),
+    **Agent** goes to its own standalone `/agent` page (see below),
+    **Deploy** goes to the `/deploy` route (see below). Active-state
+    highlighting for all five is server-side (`request.path == '/...'`
+    in `layout.html`) - a plain per-page match, no client-side hash
+    detection needed since none of the five nav targets are anchors
+    anymore. If Sign Checker (`/sign-checker`) ever needs its own
+    top-level nav slot, that's a 6th item, not a repurposing of one of
+    these five - the user asked for exactly these five.
+  - **`/agent`** (`app.py`'s `agent_page()`, `templates/agent.html`) is a
+    standalone home for the Custom test/"Ask Archimedes" AI-agent box
+    (see custom_metrics.py) - NOT a duplicate implementation. The box's
+    markup+JS live once, in `templates/_ask_archimedes.html`, and both
+    `quality.html` and `agent.html` `{% include %}` it - the user
+    explicitly asked to keep the box on the Quality page too when adding
+    the standalone page, so both stay, sharing one implementation rather
+    than forking into two copies that could drift. The include is
+    self-contained (its own `escapeHtml`, its own `#ask-archimedes-state-list`
+    datalist so it doesn't collide with `quality.html`'s own `#state-list`)
+    and needs only a `form#quality-filters-form` containing a
+    `select#table` somewhere on the including page - `agent.html`'s own
+    "Data source" card supplies a minimal one (just a table picker; the
+    fuller Quality page's states/fc/zip/county filters aren't required
+    for a comparison to validate, they only narrow which segments count).
+    A table is required even for a pure Q&A question, since
+    `/speed-limits/custom-test(/sample)` needs one to fetch
+    `available_columns` to validate any comparison against - there's no
+    page-independent default. `app.py`'s `_table_options_and_default()`
+    (used by the Quality page, `/agent`, and the hub's sample map alike)
+    factors out that "pick the live default table, live-list every option"
+    logic - don't re-duplicate it a fourth time if another page ever
+    needs a table picker.
   - **`/deploy`** (`app.py`'s `deploy_info()`, `templates/deploy_info.html`)
     is a deliberately static reference page - real, already-documented
     facts (service name/project/region/bucket, the IAP access model, the
@@ -122,12 +142,12 @@
     Privacy/Terms/social-links rows) - this is an internal tool without
     public-facing policy pages, so a marketing-site-style footer would
     just be inventing links to pages that don't exist.
-  - `layout.html` also carries a small shared footer ("Archimedes is
-    built and run by Moove", linking to moove.ai) on every page, and a
-    `--moove-teal` CSS variable kept deliberately separate from
-    `--accent` (this app's own long-established UI blue, used for every
-    button/link) - brand touches use teal, the functional UI didn't get
-    re-themed.
+  - `layout.html` also carries a `--moove-teal` CSS variable kept
+    deliberately separate from `--accent` (this app's own
+    long-established UI blue, used for every button/link) - brand
+    touches use teal, the functional UI didn't get re-themed. (The
+    footer itself is documented under "Standard site chrome" above - it
+    grew from this one-liner into a fuller brand+links+copyright row.)
   - `Dockerfile`'s `COPY` line needs `static/` - same "don't forget the
     new thing" mistake this file already warns about for new Python
     modules.
@@ -138,6 +158,25 @@
     default `header` block - if hub.html's hero ever needs to change,
     edit its own `header` block, not `layout.html`'s default (which every
     other page still uses as-is).
+  - **The hub page's top card is a live sample map**, not a screenshot or
+    a static illustration - "put an initial OSM-comparison sample map at
+    the top of the [Explore] page" was explicit. `app.py`'s `hub()`
+    computes a real default table/infer_field (via the same
+    `_table_options_and_default()` + `list_infer_fields()` calls the
+    Quality page itself uses) and `hub.html`'s own inline script
+    auto-fetches `/speed-limits/sample-mismatches?...&metric=diff_osm`
+    on page load (no button click - it's meant to be already there when
+    you arrive) - the exact same endpoint and Leaflet-marker-drawing
+    logic as the Quality page's own "Map: where the worst mismatches
+    are" issue map, just triggered automatically with fixed nationwide
+    defaults instead of from a live filters form. If that lookup fails
+    (e.g. no BigQuery credentials in local dev), `hub()` catches it and
+    passes `sample_map_error` through - the card shows that message
+    instead of attempting a doomed fetch, never a raw 500. Verified with
+    a stubbed-Leaflet Node/Playwright test (this sandbox has no network
+    access to the real Leaflet CDN) confirming markers actually get
+    drawn and popups are populated correctly, not just that the card
+    renders.
 - **`speed_limit_here_mph` is always wrapped in `ROUND()`, everywhere it's
   referenced.** It's stored as a precise km/h->mph conversion (e.g.
   `24.860161591050343`, confirmed live - not `25`), unlike every other

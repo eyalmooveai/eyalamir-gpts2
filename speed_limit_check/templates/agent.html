@@ -1,0 +1,45 @@
+{% extends "layout.html" %}
+{% block extra_head %}
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+{% endblock %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / Agent</p>{% endblock %}
+{% block heading %}Agent{% endblock %}
+{% block subtitle %}Ask Archimedes anything about Moove or this platform, or hand it a comparison to run{% endblock %}
+{% block content %}
+
+<div class="card">
+  <span class="eyebrow">Data source</span>
+  <h3 style="margin:0 0 4px;">Which table a comparison runs against</h3>
+  <p class="section-intro">Only matters for a comparison (e.g. <code>speed_AVG_mph &gt; 60</code>) - a plain question doesn't need this, but the table is still used to check that any column names you reference actually exist.</p>
+  <form id="quality-filters-form">
+    <label for="table">Table</label>
+    <select id="table" name="table">
+      {% for t in table_options %}<option value="{{ t }}" {% if t == selected_table %}selected{% endif %}>{{ t }}</option>{% endfor %}
+      {% if selected_table not in table_options %}<option value="{{ selected_table }}" selected>{{ selected_table }}</option>{% endif %}
+    </select>
+    <p style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;"><code>calc_out.speed_limits_US*</code> or <code>archimedes_api.speed_limits_infer*</code>.</p>
+  </form>
+  {% if error %}
+    <p style="color:var(--err); font-size:0.82rem; margin:10px 0 0;">{{ error }}</p>
+  {% endif %}
+</div>
+
+{% include "_ask_archimedes.html" %}
+
+<div class="card">
+  <span class="eyebrow">More tools</span>
+  <h3 style="margin:0 0 4px;">Everything else in Archimedes</h3>
+  <p class="section-intro" style="margin-bottom:12px;">The Agent is one piece of a larger platform - here's the rest.</p>
+  <div class="row-2">
+    <div>
+      <a href="/speed-limits" class="btn-secondary" style="text-decoration:none; display:inline-block;">Quality &rarr;</a>
+      <p style="color:var(--muted); font-size:0.82rem; margin:8px 0 0;">Nationwide model-performance metrics, filters, and this same box - see "Ask Archimedes" there too.</p>
+    </div>
+    <div>
+      <a href="/speed-limits-evaluator" class="btn-secondary" style="text-decoration:none; display:inline-block;">Run &rarr;</a>
+      <p style="color:var(--muted); font-size:0.82rem; margin:8px 0 0;">Batch Street View verification across up to 1000 segments at once.</p>
+    </div>
+  </div>
+</div>
+{% endblock %}

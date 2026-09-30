@@ -360,7 +360,7 @@
       <nav class="topnav-links">
         <a href="/speed-limits" {% if request.path == '/speed-limits' %}class="active"{% endif %}>Quality</a>
         <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Explore</a>
-        <a href="/speed-limits#ask-archimedes" id="nav-agent-link">Agent</a>
+        <a href="/agent" {% if request.path == '/agent' %}class="active"{% endif %}>Agent</a>
         <a href="/deploy" {% if request.path == '/deploy' %}class="active"{% endif %}>Deploy</a>
         <a href="/speed-limits-evaluator" {% if request.path == '/speed-limits-evaluator' %}class="active"{% endif %}>Run</a>
       </nav>
@@ -389,10 +389,6 @@
       const btn = document.getElementById('user-menu-btn');
       if (menu && !menu.hidden && !menu.contains(e.target) && !btn.contains(e.target)) menu.hidden = true;
     });
-    if (window.location.hash === '#ask-archimedes') {
-      const agentLink = document.getElementById('nav-agent-link');
-      if (agentLink) agentLink.classList.add('active');
-    }
   </script>
   <div class="wrap">
     {% block header %}

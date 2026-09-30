@@ -556,7 +556,31 @@ def _run_quality_job(job_id: str, base: QualityFilters, group_by: str, param1: f
 
 @app.route("/", methods=["GET"])
 def hub():
-    return render_template("hub.html", models=HUB_MODELS)
+    """The hub/Explore page: the model catalog, plus a live sample map at
+    the top - a real "vs. OSM" query against the default table, not a
+    canned screenshot, so a first-time visitor sees actual model output
+    immediately rather than an empty page. Uses the same default-table
+    logic as the Quality page (_table_options_and_default) and the same
+    /speed-limits/sample-mismatches endpoint the Quality page's own issue
+    map calls - no separate query path to keep in sync."""
+    table_options, selected_table_option, sample_map_error = _table_options_and_default()
+    sample_map_infer_field = DEFAULT_INFER_FIELD
+    if not sample_map_error:
+        try:
+            dataset, _, table = selected_table_option.partition(".")
+            infer_field_options = list_infer_fields(DEFAULT_PROJECT, dataset, table)
+            sample_map_infer_field = (
+                DEFAULT_INFER_FIELD if DEFAULT_INFER_FIELD in infer_field_options
+                else (infer_field_options[0] if infer_field_options else DEFAULT_INFER_FIELD)
+            )
+        except Exception as e:
+            sample_map_error = f"{type(e).__name__}: {e}"
+    return render_template(
+        "hub.html", models=HUB_MODELS,
+        sample_map_table=selected_table_option,
+        sample_map_infer_field=sample_map_infer_field,
+        sample_map_error=sample_map_error,
+    )
 
 
 @app.route("/deploy", methods=["GET"])
@@ -578,27 +602,52 @@ def deploy_info():
     )
 
 
-@app.route("/speed-limits", methods=["GET"])
-def speed_limits_quality():
-    error = None
-
-    # Live, not hardcoded - so the selector always matches whatever tables
-    # (calc_out's speed_limits_US* family, and archimedes_api's
-    # speed_limits_infer* views) actually exist, without this app needing
-    # to know about a new one in advance. Each option's dropdown value is
-    # "dataset.table" since the two sources live in different datasets.
-    # Both this and the infer-field lookup below are fast, cached
-    # metadata-only queries (see quality_metrics.py) - only the actual
-    # aggregate metrics query is slow enough to need the async job below.
+def _table_options_and_default(requested_table: str = ""):
+    """Live, not hardcoded - so the selector always matches whatever tables
+    (calc_out's speed_limits_US* family, and archimedes_api's
+    speed_limits_infer* views) actually exist, without this app needing
+    to know about a new one in advance. Each option's dropdown value is
+    "dataset.table" since the two sources live in different datasets.
+    This is a fast, cached metadata-only query (see quality_metrics.py) -
+    only the actual aggregate metrics query is slow. Shared by every page
+    that needs a table selector defaulted sensibly: the Quality page, the
+    standalone Agent page, and the hub/Explore page's sample map.
+    Returns (table_options, selected_option, error)."""
     try:
         table_options = [f"{t['dataset']}.{t['table']}" for t in list_evaluable_tables(DEFAULT_PROJECT)]
+        error = None
     except Exception as e:
         table_options = []
         error = f"Could not list evaluable tables: {type(e).__name__}: {e}"
 
     default_table = f"{DEFAULT_DATASET}.{default_table_name(DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)}"
-    requested_table = request.args.get("table", "").strip()
     selected_option = requested_table or (default_table if default_table in table_options else (table_options[0] if table_options else default_table))
+    return table_options, selected_option, error
+
+
+@app.route("/agent", methods=["GET"])
+def agent_page():
+    """A standalone home for the Custom test/"Ask Archimedes" AI agent
+    capability (see custom_metrics.py) - the same box also lives on the
+    Speed-Limits Quality page (see _ask_archimedes.html, included by
+    both). Needs its own minimal table selector since the underlying
+    /speed-limits/custom-test(/sample) endpoints require a specific
+    table to validate a comparison's column names against, even for a
+    pure Q&A question - there's no page-independent "default table" a
+    comparison could run against otherwise."""
+    table_options, selected_option, error = _table_options_and_default(request.args.get("table", "").strip())
+    return render_template(
+        "agent.html",
+        table_options=table_options,
+        selected_table=selected_option,
+        error=error,
+        us_state_codes=US_STATE_CODES,
+    )
+
+
+@app.route("/speed-limits", methods=["GET"])
+def speed_limits_quality():
+    table_options, selected_option, error = _table_options_and_default(request.args.get("table", "").strip())
     selected_dataset, _, selected_table = selected_option.partition(".")
 
     # Which inferred-speed-limit column to evaluate - discovered live per
