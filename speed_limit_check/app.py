@@ -606,7 +606,7 @@ def explore_page():
         sample_map_table=selected_table_option,
         sample_map_infer_field=sample_map_infer_field,
         sample_map_error=sample_map_error,
-        quality_metric_choices=[{"key": m["key"], "name": m["name"]} for m in QUALITY_METRICS],
+        quality_metric_choices=[{"key": m["key"], "name": m["name"], "description": m["description"]} for m in QUALITY_METRICS],
         selected_metric=selected_metric,
         selected_param1=selected_param1,
         selected_states=selected_states,
@@ -769,7 +769,7 @@ def speed_limits_quality():
         us_state_codes=US_STATE_CODES,
         error=error,
         warning=warning,
-        quality_metric_choices=[{"key": m["key"], "name": m["name"]} for m in QUALITY_METRICS],
+        quality_metric_choices=[{"key": m["key"], "name": m["name"], "description": m["description"]} for m in QUALITY_METRICS],
         preview_max_segments=PREVIEW_MAX_SEGMENTS,
     )
 

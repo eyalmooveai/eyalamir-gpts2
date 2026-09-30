@@ -104,8 +104,9 @@
     <div>
       <label for="map-metric">Metric</label>
       <select id="map-metric">
-        {% for m in quality_metric_choices %}<option value="{{ m.key }}">{{ m.name }}</option>{% endfor %}
+        {% for m in quality_metric_choices %}<option value="{{ m.key }}" data-description="{{ m.description }}">{{ m.name }}</option>{% endfor %}
       </select>
+      <p id="map-metric-description" style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;"></p>
     </div>
     <div style="display:flex; align-items:flex-end;">
       <button type="button" class="btn-secondary" id="issue-map-btn" onclick="showIssueMap()" style="margin-bottom:12px;">Show worst offenders on map</button>
@@ -173,6 +174,14 @@
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+
+  const mapMetricDescEl = document.getElementById('map-metric-description');
+  const mapMetricSelectEl = document.getElementById('map-metric');
+  function updateMapMetricDescription() {
+    mapMetricDescEl.textContent = mapMetricSelectEl.options[mapMetricSelectEl.selectedIndex].dataset.description || '';
+  }
+  updateMapMetricDescription();
+  mapMetricSelectEl.addEventListener('change', updateMapMetricDescription);
 
   window.showIssueMap = function () {
     const btn = document.getElementById('issue-map-btn');

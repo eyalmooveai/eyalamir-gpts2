@@ -343,6 +343,29 @@
   min/max (not a fixed scale) - "how bad" varies a lot by metric (a
   15mph freeflow overshoot isn't the same severity as a 60mph one), so a
   fixed radius scale would either be too flat or clip on every request.
+  - **Every metric explains what selecting it means, right in the
+    picker** ("for each of the comparable [metrics] ... explain what
+    they mean upon selection" was explicit) - `QUALITY_METRICS` entries
+    in `quality_metrics.py` each got a one-sentence `"description"` (e.g.
+    the two "implausible" metrics' descriptions explicitly say "a
+    data-quality check, not a comparison" and name which threshold param
+    they read, since those two use `@param2` while the four "disagrees
+    with X" metrics use `@param1` - easy to miss from the option text
+    alone). Both `app.py` routes that build `quality_metric_choices`
+    (`explore_page()` and `speed_limits_quality()`) now pass `key`/
+    `name`/`description` per metric, not just `key`/`name` - keep both
+    in sync if a third metric-picker page is ever added, rather than
+    letting one drift back to name-only options. Both templates render
+    it the same way: each `<option>` carries a `data-description`
+    attribute (Jinja's default autoescaping handles the apostrophes in
+    the text - e.g. "OpenStreetMap's" - so no manual escaping needed),
+    and a `<p>` right under the `<select>` (`#metric-description` on
+    `explore.html`, `#map-metric-description` on `quality.html`'s own
+    `#map-metric` picker) is populated from the selected option's
+    `dataset.description` on page load and on every `change` - two
+    separate small JS blocks, not a shared helper, matching this app's
+    existing per-template `escapeHtml`-style convention rather than
+    introducing a new shared-JS file for one function.
 - **Speed-Limits Evaluator** (`/speed-limits-evaluator`,
   `batch_evaluator.py`): runs up to `segment_count` (default 1000)
   candidate segments for one state through the *same* per-segment logic

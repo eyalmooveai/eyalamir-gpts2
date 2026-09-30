@@ -74,6 +74,15 @@ GROUP_BY_CHOICES = ("none", "state", "functional_class", "state,functional_class
 # ... DESC" (worst offenders first) for the issue map's sampled-segments
 # query (see build_sample_mismatches_query) without re-deriving it from
 # "sql" or keeping a second copy that could drift out of sync.
+# "description" is a one-sentence, plain-language explanation of what
+# selecting this metric actually flags - shown wherever a user picks a
+# metric from a dropdown (the Quality page's issue-map picker, the
+# Explore page's own picker) so "vs. OSM" or "freeflow speed implausible"
+# isn't left to speak for itself. Says which threshold it reads
+# (param1's mismatch threshold for the four "disagrees with X"
+# comparisons, param2's implausible-speed threshold for the two
+# single-column checks) since those two groups use different params and
+# that's easy to miss from the name alone.
 QUALITY_METRICS = [
     {
         "key": "diff_osm",
@@ -82,6 +91,7 @@ QUALITY_METRICS = [
         "sql": "ABS({infer_field} - speed_limit_osm_mph) >= @param1",
         "magnitude_expr": "ABS({infer_field} - speed_limit_osm_mph)",
         "required_columns": ["speed_limit_osm_mph"],
+        "description": "Flags segments where the inferred speed limit disagrees with OpenStreetMap's posted speed limit by at least the mismatch threshold.",
     },
     {
         # speed_limit_here_mph is stored as a precise km/h->mph conversion
@@ -94,6 +104,7 @@ QUALITY_METRICS = [
         "sql": "ABS({infer_field} - ROUND(speed_limit_here_mph)) >= @param1",
         "magnitude_expr": "ABS({infer_field} - ROUND(speed_limit_here_mph))",
         "required_columns": ["speed_limit_here_mph"],
+        "description": "Flags segments where the inferred speed limit disagrees with HERE's posted speed limit by at least the mismatch threshold.",
     },
     {
         "key": "diff_speed_avg",
@@ -102,6 +113,7 @@ QUALITY_METRICS = [
         "sql": "ABS({infer_field} - speed_AVG_mph) >= @param1",
         "magnitude_expr": "ABS({infer_field} - speed_AVG_mph)",
         "required_columns": ["speed_AVG_mph"],
+        "description": "Flags segments where the inferred speed limit disagrees with the average speed drivers are actually observed doing on that road by at least the mismatch threshold.",
     },
     {
         "key": "diff_freeflow",
@@ -110,6 +122,7 @@ QUALITY_METRICS = [
         "sql": "ABS({infer_field} - freeflow_mph) >= @param1",
         "magnitude_expr": "ABS({infer_field} - freeflow_mph)",
         "required_columns": ["freeflow_mph"],
+        "description": "Flags segments where the inferred speed limit disagrees with the road's freeflow (uncongested) speed by at least the mismatch threshold.",
     },
     {
         "key": "speed_avg_high",
@@ -118,6 +131,7 @@ QUALITY_METRICS = [
         "sql": "speed_AVG_mph > @param2",
         "magnitude_expr": "speed_AVG_mph",
         "required_columns": ["speed_AVG_mph"],
+        "description": "A data-quality check, not a comparison: flags segments where the observed average speed itself is implausibly high (over the implausible-speed threshold), regardless of what the inferred speed limit says.",
     },
     {
         "key": "freeflow_high",
@@ -126,6 +140,7 @@ QUALITY_METRICS = [
         "sql": "freeflow_mph > @param2",
         "magnitude_expr": "freeflow_mph",
         "required_columns": ["freeflow_mph"],
+        "description": "A data-quality check, not a comparison: flags segments where the freeflow speed itself is implausibly high (over the implausible-speed threshold), regardless of what the inferred speed limit says.",
     },
 ]
 

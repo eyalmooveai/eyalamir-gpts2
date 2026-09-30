@@ -34,8 +34,9 @@
       <div>
         <label for="metric">Metric</label>
         <select id="metric" name="metric">
-          {% for m in quality_metric_choices %}<option value="{{ m.key }}" {% if m.key == selected_metric %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+          {% for m in quality_metric_choices %}<option value="{{ m.key }}" data-description="{{ m.description }}" {% if m.key == selected_metric %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
         </select>
+        <p id="metric-description" style="color:var(--muted); font-size:0.78rem; margin:4px 0 0;"></p>
       </div>
     </div>
     <div class="row-2">
@@ -79,6 +80,14 @@
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+
+  const metricDescEl = document.getElementById('metric-description');
+  const metricSelectEl = document.getElementById('metric');
+  function updateMetricDescription() {
+    metricDescEl.textContent = metricSelectEl.options[metricSelectEl.selectedIndex].dataset.description || '';
+  }
+  updateMetricDescription();
+  metricSelectEl.addEventListener('change', updateMetricDescription);
 
   if (sampleMapError) {
     msgEl.textContent = 'Could not load a live sample: ' + sampleMapError;
