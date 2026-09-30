@@ -1,7 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-<circle cx="50" cy="50" r="46" fill="#00B5AD"/>
-<path d="M 50 16 L 66 78 L 34 78 Z" fill="#ffffff"/>
-<path d="M 41.2 46 L 58.8 46 L 61.2 56 L 38.8 56 Z" fill="#00B5AD"/>
-<path d="M 45.6 28 L 54.4 28 L 56.3 36 L 43.7 36 Z" fill="#00B5AD"/>
-<rect x="26" y="78" width="48" height="9" rx="2.5" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">
+  <!-- Hand-authored illustration (not a photo/generated image - no image-generation tool is available in this environment) depicting the construction_zones model. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bfe4f7"/>
+      <stop offset="1" stop-color="#eef8fc"/>
+    </linearGradient>
+  </defs>
+<rect width="320" height="200" fill="#eef8fc"/>
+<rect width="320" height="124" fill="url(#sky)"/>
+<path d="M0,116 Q 80.0,106 160.0,116 T 320,112 V124 H0 Z" fill="#a7d3b6" opacity="0.5"/>
+<rect y="122" width="320" height="78" fill="#bfe3ca"/>
+<polygon points="127.0,122 193.0,122 310.0,200 10.0,200" fill="#4d5866"/>
+<polygon points="127.0,122 129.0,122 16.0,200 10.0,200" fill="#ffffff" opacity="0.85"/>
+<polygon points="191.0,122 193.0,122 310.0,200 304.0,200" fill="#ffffff" opacity="0.85"/>
+<polygon points="159.4,125.0 160.6,125.0 160.9,132.6 159.1,132.6" fill="#ffffff"/>
+<polygon points="158.8,138.8 161.2,138.8 161.5,146.4 158.5,146.4" fill="#ffffff"/>
+<polygon points="158.2,152.6 161.8,152.6 162.1,160.2 157.9,160.2" fill="#ffffff"/>
+<polygon points="157.7,166.4 162.3,166.4 162.7,174.0 157.3,174.0" fill="#ffffff"/>
+<polygon points="157.1,180.2 162.9,180.2 163.2,187.8 156.8,187.8" fill="#ffffff"/>
+<g><ellipse cx="150" cy="188" rx="12.65" ry="3.68" fill="#d9791f"/><polygon points="150,148.9 142.64,183.308 157.36,183.308" fill="#f2994a"/><polygon points="144.94,170.405 155.06,170.405 156.21,176.27 143.79,176.27" fill="#ffffff"/></g>
+<g><ellipse cx="185" cy="182" rx="10.450000000000001" ry="3.04" fill="#d9791f"/><polygon points="185,149.7 178.92,178.124 191.08,178.124" fill="#f2994a"/><polygon points="180.82,167.465 189.18,167.465 190.13,172.31 179.87,172.31" fill="#ffffff"/></g>
+<g><ellipse cx="210" cy="170" rx="8.25" ry="2.4" fill="#d9791f"/><polygon points="210,144.5 205.2,166.94 214.8,166.94" fill="#f2994a"/><polygon points="206.7,158.525 213.3,158.525 214.05,162.35 205.95,162.35" fill="#ffffff"/></g>
+<rect x="130" y="150" width="70" height="12" rx="2" fill="#ffffff" transform="rotate(-4 130 150)"/>
+<rect x="130" y="150" width="7" height="12" fill="#f2994a" transform="rotate(-4 130 150)"/>
+<rect x="144" y="150" width="7" height="12" fill="#f2994a" transform="rotate(-4 130 150)"/>
+<rect x="158" y="150" width="7" height="12" fill="#f2994a" transform="rotate(-4 130 150)"/>
+<rect x="172" y="150" width="7" height="12" fill="#f2994a" transform="rotate(-4 130 150)"/>
+<rect x="186" y="150" width="7" height="12" fill="#f2994a" transform="rotate(-4 130 150)"/>
+<rect x="248" y="90" width="4" height="55" fill="#9aa4ad"/>
+<rect x="234" y="62" width="32" height="32" rx="4" fill="#ffd23f" stroke="#2b2f36" stroke-width="2.5" transform="rotate(45 250 78)"/>
+<line x1="243" y1="70" x2="243" y2="82" stroke="#2b2f36" stroke-width="3" stroke-linecap="round" transform="rotate(45 250 78)"/>
 </svg>

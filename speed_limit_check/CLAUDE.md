@@ -51,23 +51,41 @@
     is a one-off manual step, not something `app.py` does.
   - `static/models/*.svg` (`speed_limits.svg`, `lanes.svg`,
     `construction_zones.svg`, `accident_prediction.svg`,
-    `accident_detection.svg`) - one icon per `HUB_MODELS` entry, shown on
-    its hub card via the new `icon` key. Same visual language as the
-    original (pre-meld) Archimedes mark: a solid teal `#00b5ad` disc with
-    a white glyph, generated with plain SVG shapes/paths (no photos, no
-    external art) so they're crisp at any size and trivially re-themeable.
-    Each glyph is a literal pictogram of the model it represents (a
-    speedometer for Speed Limits, a cone for Construction Zones, a
-    collision starburst for Accident Detection, a dashed path to a
-    warning triangle for Accident Prediction, a road with lane markings
-    for Lanes) - keep that one-glyph-per-model pattern if a new model is
-    added, rather than reusing a generic placeholder icon. If you
-    regenerate one of these, watch out for SVG elliptical-arc sweep-flag
-    direction (`A rx ry 0 large-arc-flag sweep-flag x y`) - the
-    speedometer's gauge arc first came out drawing the wrong (minor) arc
-    through the bottom of the dial because of this, caught by actually
-    rendering it (headless Chromium screenshot) and looking, not by
-    reasoning about the path text.
+    `accident_detection.svg`) - one illustration per `HUB_MODELS` entry,
+    shown as a banner image on its hub card (`.model-banner-img`,
+    `object-fit: cover` at a fixed height) via the `icon` key. **These are
+    hand-authored SVG scenes, not photos or model-generated images** -
+    this environment has no image-generation tool (no DALL-E/Imagen
+    access), and a Drive search for real photography Moove already owned
+    turned up nothing usable (only logos, screenshots, and academic
+    chart exports - see the session that added these for the full
+    search). Asked to make them "real-world images (generated)" and
+    then, once that was confirmed infeasible here, told to "upgrade the
+    icons" instead - so don't mistake these for a placeholder that still
+    needs replacing with something more real; richer illustration is the
+    agreed-on outcome for now. Each one shares one visual language (sky
+    gradient + rolling hill + a perspective road built from a shared
+    `base_scene()`-style helper, receding dashed center line, a small
+    consistent color palette - asphalt gray, grass green, Moove teal,
+    warning orange/yellow) with a literal scene depicting its model: a
+    "SPEED 55" sign on a post for Speed Limits, three cars in distinct
+    lanes for Lanes, cones + a striped barrier + a diamond warning sign
+    for Construction Zones, a car with radar-style forecast arcs and a
+    highlighted risk patch ahead for Accident Prediction, two collided
+    cars with an impact starburst for Accident Detection. Keep both
+    patterns - the shared background language AND the one-scene-per-model
+    literalism - if a new model is ever added, rather than reusing a
+    generic placeholder. `.model-card.placeholder .model-banner-img`
+    desaturates+dims the "coming soon" ones via CSS
+    (`filter: grayscale(45%); opacity: 0.75`) rather than needing a
+    second muted copy of each asset. If you regenerate one of these,
+    watch out for SVG elliptical-arc sweep-flag direction (`A rx ry 0
+    large-arc-flag sweep-flag x y`) - an earlier (now-replaced) version
+    of the Speed Limits glyph's gauge arc first came out drawing the
+    wrong (minor) arc through the bottom of the dial because of this,
+    caught by actually rendering it (headless Chromium screenshot) and
+    looking, not by reasoning about the path text - the same lesson
+    applies to any new arc math in these scenes.
 - **Standard site chrome - top nav, footer, account avatar - all live in
   `layout.html`'s `<body>`, once, so every page gets the same one
   automatically (no per-template copy to keep in sync).**

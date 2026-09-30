@@ -42,21 +42,25 @@
     {% for m in models %}
       {% if m.href %}
         <a class="model-card active" href="{{ m.href }}">
-          <div class="model-card-top">
-            <img class="model-icon" src="{{ url_for('static', filename='models/' + m.icon) }}" alt="">
+          <div class="model-banner">
+            <img class="model-banner-img" src="{{ url_for('static', filename='models/' + m.icon) }}" alt="">
             <span class="model-badge">Live</span>
           </div>
-          <h3>{{ m.name }}</h3>
-          <p>{{ m.description }}</p>
+          <div class="model-card-body">
+            <h3>{{ m.name }}</h3>
+            <p>{{ m.description }}</p>
+          </div>
         </a>
       {% else %}
         <div class="model-card placeholder">
-          <div class="model-card-top">
-            <img class="model-icon" src="{{ url_for('static', filename='models/' + m.icon) }}" alt="">
+          <div class="model-banner">
+            <img class="model-banner-img" src="{{ url_for('static', filename='models/' + m.icon) }}" alt="">
             <span class="model-badge">Coming soon</span>
           </div>
-          <h3>{{ m.name }}</h3>
-          <p>{{ m.description }}</p>
+          <div class="model-card-body">
+            <h3>{{ m.name }}</h3>
+            <p>{{ m.description }}</p>
+          </div>
         </div>
       {% endif %}
     {% endfor %}
