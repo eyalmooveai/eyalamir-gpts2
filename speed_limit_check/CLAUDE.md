@@ -184,14 +184,19 @@
     default `header` block - if hub.html's hero ever needs to change,
     edit its own `header` block, not `layout.html`'s default (which every
     other page still uses as-is).
-  - **`/explore`'s top card is a live sample map with its own filters**,
-    not a screenshot, a static illustration, or a map fixed to "vs. OSM,
+  - **`/explore` is a live sample map (its own top card, "Live sample")
+    with a filters card underneath it ("Pick what to explore")**, not a
+    screenshot, a static illustration, or a map fixed to "vs. OSM,
     nationwide". It started as the latter ("put an initial
     OSM-comparison sample map at the top of the [Explore] page", and
     when a first version put this on the hub page instead, explicitly
-    corrected - see the Top nav bullet above) and was then explicitly
-    generalized: "Explore should let me change what to present/explore
-    with the same map visualization." `#explore-filters-form`
+    corrected - see the Top nav bullet above), was then generalized to
+    take filters ("Explore should let me change what to present/explore
+    with the same map visualization"), and finally had those two split
+    into separate cards with the map first ("reverse order -- map on
+    top, pick what to explore underneath") - keep the map card first in
+    `explore.html`, the filters card second; don't re-merge them into
+    one card or flip the order back. `#explore-filters-form`
     (table/metric/states/mismatch-threshold, same `method="get" action=
     "/explore"` full-page-reload pattern as the Quality page's own main
     filters form, not a client-side-only control) submits back to
