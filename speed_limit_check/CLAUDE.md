@@ -848,3 +848,27 @@
   all) - it's `roles/serviceusage.serviceUsageConsumer` now (Vision API
   calls are gated on `serviceusage.services.use` against the quota
   project).
+  - **`roles/aiplatform.user` (for Gemini/Vertex AI - see the Custom test
+    bullet above) is NOT yet one of the roles Terraform grants** - it's a
+    new requirement this app didn't have before, added after Terraform's
+    config was last set up for this project, so it isn't inherited for
+    free the way the roles above are. Confirmed live: `eyal@moove.ai`
+    (this project's day-to-day deployer) got `does not have permission to
+    access projects instance [moove-platform-testing-data:setIamPolicy]`
+    trying to grant it directly via `gcloud projects
+    add-iam-policy-binding` - the same "can create resources, can't set
+    IAM policy on the project" gap `deploy.sh`'s own comments already
+    describe, not a one-off fluke. This grant needs to come from whoever
+    manages this project's Terraform config (add it alongside the roles
+    already listed above, for the same `speed-limit-check-runner`
+    service account) or from someone who does have IAM-admin rights on
+    the project - don't assume the deploying user's own account can
+    self-serve this one just because it can for bucket/secret/service-
+    account creation. This project's IAM policy also has *conditional*
+    bindings already on it (from an unrelated Databricks integration) -
+    `gcloud` refuses to add a new binding without an explicit
+    `--condition=None`/condition choice once any conditional binding
+    exists on the policy, which is why every project-level
+    `add-iam-policy-binding` call in `deploy.sh` already carries
+    `--condition=None` - don't drop that flag from a new one, `gcloud`
+    will just prompt interactively instead of failing cleanly.
