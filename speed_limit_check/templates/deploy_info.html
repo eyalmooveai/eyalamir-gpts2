@@ -58,7 +58,7 @@
     access. Safe to re-run; existing resources are detected and left alone.
   </p>
   <pre class="log">PROJECT_ID={{ project_id }} REGION={{ region }} BUCKET_NAME={{ bucket_name }} \
-INVOKER_EMAIL=you@example.com MAPS_API_KEY=... ANTHROPIC_API_KEY=... \
+INVOKER_EMAIL=you@example.com MAPS_API_KEY=... \
 SKIP_IAM_GRANTS=1 ./deploy.sh</pre>
   <p style="color:var(--muted); font-size:0.78rem; margin:10px 0 0;">
     <code>SKIP_IAM_GRANTS=1</code> because Terraform owns this project's IAM

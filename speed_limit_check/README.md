@@ -116,21 +116,23 @@ mismatch everywhere it's compared or displayed.
    want to be careful anyway, add an HTTP referrer restriction on the key
    in the Cloud Console for `http://127.0.0.1:5050/*` and `http://localhost:5050/*`.
 
-4. **Anthropic API key (optional)**
+4. **Vertex AI (Gemini) access (optional, no key needed)**
 
    Only needed for the Speed-Limits Quality page's "Custom test" box to
    translate a plain-English comparison (e.g. "segments where the models
-   disagree by more than 15 mph") into a query - a directly-typed
-   expression (e.g. `speed_AVG_mph > speed_limit_infer_mph_corrected + 10`)
-   works without this. Add it to the same keys file:
+   disagree by more than 15 mph") into a query, or to answer a general
+   question about Moove/Archimedes - a directly-typed expression (e.g.
+   `speed_AVG_mph > speed_limit_infer_mph_corrected + 10`) works without
+   this. Unlike the keys above, there's no API key to add to `keys.env` -
+   it authenticates via the same Application Default Credentials this app
+   already uses for BigQuery/GCS/Vision. Locally, run
+   `gcloud auth application-default login` once; when deployed, the
+   Cloud Run service account just needs `roles/aiplatform.user` on the
+   project (see "Deploying to Cloud Run" below).
 
-   ```bash
-   # in ~/Claude/MooveAI/keys.env
-   ANTHROPIC_API_KEY=sk-ant-...your real key...
-   ```
-
-   Without it, the Custom test box still accepts direct expressions; a
-   plain-English one is rejected with a message naming this key.
+   Without it configured, the Custom test box still accepts direct
+   expressions; a plain-English one is rejected with a message explaining
+   Vertex AI credentials aren't available.
 
 ## Usage
 
@@ -470,20 +472,20 @@ own comparison instead of picking from the six built-in metrics - either a
 direct expression (`speed_AVG_mph > speed_limit_infer_mph_corrected + 10`,
 `ABS(speed_limit_osm_mph - speed_limit_here_mph) > 15 AND functional_class <= 3`)
 or plain English ("segments where the inferred limit and HERE disagree by
-more than 15 mph"), which Claude translates into an expression for you.
+more than 15 mph"), which Gemini translates into an expression for you.
 "Run" shows how many segments (of the current filters) match; "Show worst
 offenders on map" plots up to 300 of them the same way the built-in
 metrics do.
 
 The same box also answers general questions about Moove or about
 Archimedes itself - e.g. "what is Moove?" or "what does the Evaluator's
-cost cap mean?" - instead of running a query. Claude decides whether your
+cost cap mean?" - instead of running a query. Gemini decides whether your
 text is a comparison to translate or a question to answer; a question is
 answered directly as plain text and never touches BigQuery at all.
 
 Only a fixed set of numeric/boolean columns can be referenced (not every
 column on the table - see `custom_metrics.COLUMN_TYPES`), and whatever you
-type - typed directly or translated by Claude - is parsed into a small
+type - typed directly or translated by Gemini - is parsed into a small
 grammar (comparisons/AND/OR/NOT, +-*/, ABS()/ROUND()) and re-emitted as
 SQL from that parsed structure, never spliced from your text directly.
 This is what makes it safe to run against BigQuery: there's no way to
@@ -782,14 +784,15 @@ PROJECT_ID=your-deploy-project-id REGION=us-central1 BUCKET_NAME=your-bucket-nam
 
 `BQ_PROJECT_ID` is also settable if the `speed_limits_..._details` table
 lives in a different project than `PROJECT_ID` (defaults to
-`moove-platform-testing-data`). Setting `ANTHROPIC_API_KEY` additionally
-creates/updates an `ANTHROPIC_API_KEY` secret and attaches it - needed for
-the Speed-Limits Quality page's "Custom test" box to translate
-plain-English comparisons; the box's direct-expression mode works without
-it, and skipping it is fine, just less capable. See the top of `deploy.sh`
-for the full list of variables. The manual step-by-step version below is
-exactly what it runs, useful if you want to understand or customize any
-individual piece.
+`moove-platform-testing-data`). The Speed-Limits Quality page's "Custom
+test" box translating plain-English comparisons (and answering general
+questions) uses Gemini via Vertex AI - no key/secret to set for this, the
+script just enables the Vertex AI API and grants the runtime service
+account `roles/aiplatform.user` alongside its other roles; the box's
+direct-expression mode works without that grant too, just less capable.
+See the top of `deploy.sh` for the full list of variables. The manual
+step-by-step version below is exactly what it runs, useful if you want to
+understand or customize any individual piece.
 
 Granting IAM policy on the project is a different permission from
 creating the bucket/secret/service account - your own account can lack
@@ -806,7 +809,7 @@ re-attempt (and fail) grants that are already in place.
 gcloud config set project YOUR_PROJECT_ID
 gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
   cloudbuild.googleapis.com storage.googleapis.com secretmanager.googleapis.com \
-  bigquery.googleapis.com vision.googleapis.com
+  bigquery.googleapis.com vision.googleapis.com aiplatform.googleapis.com
 ```
 
 ### 2. Create a GCS bucket for the persistent cache
@@ -828,12 +831,9 @@ gcloud storage buckets create gs://YOUR_BUCKET_NAME --location=YOUR_REGION
 printf '%s' 'AIza...your real key...' | gcloud secrets create speed-limit-check-maps-key --data-file=-
 ```
 
-Optional - the Anthropic key for the Custom test box's plain-English
-translation (direct expressions work without it):
-
-```bash
-printf '%s' 'sk-ant-...your real key...' | gcloud secrets create speed-limit-check-anthropic-key --data-file=-
-```
+(There's no equivalent secret for the Custom test box's Gemini-powered
+plain-English translation - it authenticates as the runtime service
+account via Application Default Credentials instead; see step 4.)
 
 ### 4. Create a runtime service account and grant it access
 
@@ -853,8 +853,8 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:
 gcloud storage buckets add-iam-policy-binding gs://YOUR_BUCKET_NAME --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
 # Read the Maps API key secret
 gcloud secrets add-iam-policy-binding speed-limit-check-maps-key --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
-# Optional - only if you created the Anthropic key secret above
-gcloud secrets add-iam-policy-binding speed-limit-check-anthropic-key --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+# Gemini via Vertex AI (Custom test's plain-English translation/Q&A) - no secret, just this role
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/aiplatform.user"
 ```
 
 ### 5. Deploy
@@ -871,10 +871,8 @@ gcloud run deploy speed-limit-check \
   --max-instances=1 \
   --memory=1Gi \
   --set-env-vars="GCS_CACHE_BUCKET=YOUR_BUCKET_NAME" \
-  --set-secrets="GOOGLE_MAPS_API_KEY=speed-limit-check-maps-key:latest,ANTHROPIC_API_KEY=speed-limit-check-anthropic-key:latest"
+  --set-secrets="GOOGLE_MAPS_API_KEY=speed-limit-check-maps-key:latest"
 ```
-
-(Drop the `ANTHROPIC_API_KEY=...` part of `--set-secrets` if you skipped the optional Anthropic key secret above.)
 
 Deliberately no `--iap` here: Cloud Run's native IAP integration is
 alpha-track only as of this writing (`gcloud run deploy --iap` errors

@@ -1,7 +1,7 @@
 """User-defined comparisons for the Speed-Limits Quality page's "Custom
 test" box - a text box that lets someone tell BigQuery what comparison to
 run, either as a direct expression ("ABS(speed_AVG_mph - speed_limit_infer_mph)
->= 15") or as natural language translated by Claude into one ("segments
+>= 15") or as natural language translated by Gemini into one ("segments
 where the new model and observed speed disagree by a lot").
 
 This module is the one place that turns that text into SQL, and the one
@@ -94,17 +94,34 @@ but not built yet, each will get the same kind of "how it works, results, perfor
 - Speed-Limits Quality (/speed-limits): nationwide BigQuery metrics comparing Moove's inferred speed limit
   for a road segment against OSM's, HERE's, the observed average speed, and freeflow speed - filterable by
   state/functional class/zip/county, with a map of the worst-offending segments and this "Custom test" box.
-- Sign Checker (/sign-checker): checks one specific road segment by having Claude read the actual speed-limit
-  sign in Google Street View imagery near that segment, and comparing it to the inferred value.
+- Sign Checker (/sign-checker): checks one specific road segment by reading the actual speed-limit sign in
+  Google Street View imagery near that segment via Google Cloud Vision OCR, and comparing it to the inferred value.
 - Speed-Limits Evaluator (/speed-limits-evaluator): runs that same Street View sign-check across up to 1000
   segments in a state at once, concurrently, capped at $600/user/day in Street View + Vision API cost.
 This "Custom test" box itself lets you either type a direct BigQuery-style comparison over a fixed set of
-columns, or describe one in plain English for Claude to translate - and, as you're doing right now, ask a
+columns, or describe one in plain English for Gemini to translate - and, as you're doing right now, ask a
 general question about Moove or Archimedes instead of running a comparison at all."""
 
 _FUNCS = ("ABS", "ROUND")
 _COMPARISON_OPS = ("<=", ">=", "==", "!=", "<", ">", "=")
 _MAX_EXPRESSION_LENGTH = 500
+
+# Vertex AI project/location/model for the natural-language translation +
+# Q&A below. _GEMINI_LOCATION must be a region Vertex AI Gemini is
+# actually available in - "us-central1" is, and it also matches this
+# app's own Cloud Run REGION (deploy.sh), which is a coincidence worth
+# preserving rather than a requirement (the two don't have to match, but
+# keeping them the same avoids a second region to reason about). Chose
+# gemini-2.5-flash, not -pro, deliberately: this is a narrow
+# classification/translation task (pick one of 3 kinds, translate into a
+# tiny fixed grammar, or answer from a short fixed background text), not
+# something needing Pro-tier reasoning, and flash is cheaper and lets
+# thinking be fully disabled (thinking_budget=0 below) - Pro can't
+# disable thinking entirely, which risks the visible-JSON-output budget
+# being silently eaten by invisible thinking tokens on a task that here
+# doesn't benefit from thinking at all.
+_GEMINI_LOCATION = "us-central1"
+_GEMINI_MODEL = "gemini-2.5-flash"
 
 _TOKEN_RE = re.compile(
     r"""\s*(?:
@@ -390,7 +407,7 @@ def validate_custom_expression(text: str, available_columns: set[str]) -> Valida
     return ValidatedExpression(sql=node.sql, magnitude_sql=magnitude_sql)
 
 
-# --- Natural-language translation / general Q&A (Claude) ----------------
+# --- Natural-language translation / general Q&A (Gemini, via Vertex AI) -
 #
 # The box has two distinct jobs once a direct-expression parse fails:
 # translate plain English into a comparison (as before), OR - new - answer
@@ -398,10 +415,21 @@ def validate_custom_expression(text: str, available_columns: set[str]) -> Valida
 # strictly separate downstream: an "answer" is free text shown as-is, and
 # NEVER touches SQL/BigQuery in any way; only a "expression" kind ever
 # goes through validate_custom_expression() and gets spliced into a query.
-# Claude decides which job applies for a given input (a `kind` field in
+# Gemini decides which job applies for a given input (a `kind` field in
 # its structured output) but its choice is only ever a classification -
 # it can route to "answer", but it can never hand back something used as
 # SQL without going through the exact same validator raw user text does.
+#
+# Authenticates via Vertex AI + Application Default Credentials - the
+# same mechanism this app already uses for BigQuery/GCS/Vision - not an
+# API key. There is deliberately no separate "is this configured" flag to
+# check upfront (there's no key to be missing): a call is just attempted,
+# and a missing/invalid ADC setup (google.auth.exceptions.DefaultCredentialsError,
+# the same exception list_evaluable_tables() et al. already handle
+# gracefully elsewhere in this app) is caught and turned into
+# _CredentialsNotConfigured, letting resolve_custom_criterion() below lead
+# with that reason instead of a confusing raw grammar-parse error - this
+# was a real reported bug (see resolve_custom_criterion's docstring).
 
 class _ClassifiedResponse(BaseModel):
     kind: str  # "expression" | "answer" | "unsupported"
@@ -433,40 +461,68 @@ About Archimedes:
 Output ONLY the structured fields - nothing else."""
 
 
+class _CredentialsNotConfigured(RuntimeError):
+    """Vertex AI Application Default Credentials aren't available here -
+    distinguished from other RuntimeErrors so resolve_custom_criterion()
+    can lead with this reason instead of trailing it after a confusing
+    grammar-parse error (see that function's docstring)."""
+
+
 def classify_custom_test_text(
-    user_text: str, available_columns: set[str], api_key: str, log=lambda msg: None,
+    user_text: str, available_columns: set[str], project: str, location: str = _GEMINI_LOCATION, log=lambda msg: None,
 ) -> _ClassifiedResponse:
-    """Asks Claude to classify `user_text` as either a comparison to
-    translate, a general question to answer, or neither. The caller MUST
-    still run validate_custom_expression() on any returned `expression`
-    before using it for anything - this function only produces a
-    candidate, it does not itself guarantee safety. An `answer` is plain
-    text and is safe to show as-is (it never reaches SQL). Raises
-    RuntimeError on any API failure (auth, rate limit, network, ...) with
-    a message safe to show the user."""
-    import anthropic
+    """Asks Gemini (via Vertex AI) to classify `user_text` as either a
+    comparison to translate, a general question to answer, or neither.
+    The caller MUST still run validate_custom_expression() on any
+    returned `expression` before using it for anything - this function
+    only produces a candidate, it does not itself guarantee safety. An
+    `answer` is plain text and is safe to show as-is (it never reaches
+    SQL). Raises _CredentialsNotConfigured when Vertex AI ADC isn't set
+    up (e.g. local dev without `gcloud auth application-default login`),
+    or RuntimeError on any other API failure (rate limit, network,
+    malformed output, ...) - both messages are safe to show the user."""
+    from google import genai
+    from google.genai import errors as genai_errors
+    from google.genai import types
+    from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
     columns_desc = ", ".join(sorted(available_columns & set(COLUMN_TYPES)))
-    client = anthropic.Anthropic(api_key=api_key)
     try:
-        response = client.messages.parse(
-            model="claude-opus-5",
-            max_tokens=1024,
-            system=_TRANSLATE_SYSTEM_PROMPT.format(
-                columns=columns_desc, moove_background=_MOOVE_BACKGROUND, archimedes_background=_ARCHIMEDES_BACKGROUND,
+        client = genai.Client(vertexai=True, project=project, location=location)
+        response = client.models.generate_content(
+            model=_GEMINI_MODEL,
+            contents=user_text,
+            config=types.GenerateContentConfig(
+                system_instruction=_TRANSLATE_SYSTEM_PROMPT.format(
+                    columns=columns_desc, moove_background=_MOOVE_BACKGROUND, archimedes_background=_ARCHIMEDES_BACKGROUND,
+                ),
+                response_mime_type="application/json",
+                response_schema=_ClassifiedResponse,
+                max_output_tokens=2048,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
-            messages=[{"role": "user", "content": user_text}],
-            output_format=_ClassifiedResponse,
         )
-    except anthropic.AuthenticationError as e:
-        raise RuntimeError("Claude API key is invalid or missing - can't translate/answer that.") from e
-    except anthropic.RateLimitError as e:
-        raise RuntimeError("Claude API rate limit hit - try again in a moment, or write the comparison directly.") from e
-    except anthropic.APIError as e:
-        raise RuntimeError(f"Claude API error: {e}") from e
+    except (DefaultCredentialsError, RefreshError) as e:
+        raise _CredentialsNotConfigured(
+            "Vertex AI credentials aren't configured here"
+        ) from e
+    except genai_errors.APIError as e:
+        if e.code == 429:
+            raise RuntimeError("Gemini API rate limit hit - try again in a moment, or write the comparison directly.") from e
+        raise RuntimeError(f"Gemini API error: {e}") from e
 
-    parsed = response.parsed_output
-    log(f"Claude classified {user_text!r} -> kind={parsed.kind!r}")
+    parsed = response.parsed
+    if parsed is None:
+        # response_schema validation failed silently (see google-genai's
+        # GenerateContentResponse._from_response) rather than raising -
+        # surfaced here as the one place that actually checks.
+        finish_reason = None
+        if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+        if finish_reason == types.FinishReason.MAX_TOKENS:
+            raise RuntimeError("Gemini's response was cut off before finishing (hit its output-token limit) - try rephrasing more concisely.")
+        raise RuntimeError("Gemini didn't return valid structured output for that - try rephrasing.")
+    log(f"Gemini classified {user_text!r} -> kind={parsed.kind!r}")
     return parsed
 
 
@@ -476,42 +532,44 @@ class CustomTestResult:
     expression: Optional[ValidatedExpression] = None  # set when kind == "expression"
     answer: Optional[str] = None  # set when kind == "answer" - plain text, never touches SQL
     source: str = "direct"  # "direct" | "llm"
-    explanation: Optional[str] = None  # Claude's one-line summary, only set for an "expression" from "llm"
+    explanation: Optional[str] = None  # Gemini's one-line summary, only set for an "expression" from "llm"
 
 
 def resolve_custom_criterion(
-    text: str, available_columns: set[str], api_key: Optional[str], log=lambda msg: None,
+    text: str, available_columns: set[str], project: str, log=lambda msg: None,
 ) -> CustomTestResult:
     """The single entry point the app calls: turns `text` into either a
     validated, safe comparison (kind="expression") or a plain-text answer
     to a general question about Moove/Archimedes (kind="answer") - trying
     a direct expression parse first (no LLM call - works for anyone who
-    already knows the column names) and only falling back to Claude if
-    that fails and `api_key` is set. Raises ExpressionError (safe to show
-    the user) if neither a valid comparison nor a usable answer resulted -
-    if the direct parse fails and there's no LLM to fall back to, callers
-    see the direct parse's own error, which is more actionable for
-    someone who typed a near-valid expression than a generic "couldn't
-    understand that" would be."""
+    already knows the column names) and only falling back to Gemini if
+    that fails. Raises ExpressionError (safe to show the user) if neither
+    a valid comparison nor a usable answer resulted.
+
+    Unlike an API key, `project` isn't something that can be "unset" by
+    the caller - Vertex AI ADC is either configured in the environment or
+    it isn't, discovered only by attempting the call (see
+    classify_custom_test_text's docstring). When it isn't (e.g. local dev
+    without `gcloud auth application-default login`), this leads with
+    that actionable reason rather than the raw grammar-parse error - a
+    real user once typed a plain-English question with no LLM configured
+    and got "Unrecognized character '?' at position 39" as the headline,
+    which reads as a confusing parser bug rather than the simple, fixable
+    config gap it was. The parse detail is still included, just demoted
+    to a trailing parenthetical for the minority case of someone who
+    actually meant a direct expression."""
     try:
         return CustomTestResult(kind="expression", expression=validate_custom_expression(text, available_columns), source="direct")
     except ExpressionError as direct_error:
-        if not api_key:
-            # Lead with the actionable reason, not the raw grammar-parse
-            # error - for anyone who typed a plain-English question (the
-            # common case here), a "Unrecognized character '?'" headline
-            # reads as a confusing parser bug, when the real, fixable
-            # issue is just a missing key. The parse detail is still
-            # included, just demoted to a parenthetical for the minority
-            # case of someone who actually meant a direct expression.
-            raise ExpressionError(
-                "Natural-language translation and general Q&A aren't available here - ANTHROPIC_API_KEY isn't "
-                f"configured. (If you meant a direct comparison: {direct_error})"
-            ) from direct_error
         try:
-            classified = classify_custom_test_text(text, available_columns, api_key, log=log)
+            classified = classify_custom_test_text(text, available_columns, project, log=log)
+        except _CredentialsNotConfigured as cred_error:
+            raise ExpressionError(
+                f"Natural-language translation and general Q&A aren't available here - {cred_error}. "
+                f"(If you meant a direct comparison: {direct_error})"
+            ) from cred_error
         except RuntimeError as llm_error:
-            raise ExpressionError(f"Couldn't parse that as a direct comparison ({direct_error}), and Claude couldn't help: {llm_error}") from llm_error
+            raise ExpressionError(f"Couldn't parse that as a direct comparison ({direct_error}), and Gemini couldn't help: {llm_error}") from llm_error
 
         if classified.kind == "answer":
             return CustomTestResult(kind="answer", answer=classified.answer or "(no answer)", source="llm")
@@ -521,7 +579,7 @@ def resolve_custom_criterion(
                 validated = validate_custom_expression(expression, available_columns)
             except ExpressionError as validated_error:
                 raise ExpressionError(
-                    f"Claude's translation ({expression!r}) wasn't a valid/safe comparison: {validated_error}"
+                    f"Gemini's translation ({expression!r}) wasn't a valid/safe comparison: {validated_error}"
                 ) from validated_error
             return CustomTestResult(kind="expression", expression=validated, source="llm", explanation=classified.explanation)
         # kind == "unsupported", or anything else unexpected
@@ -529,7 +587,7 @@ def resolve_custom_criterion(
 
 
 def resolve_custom_criterion_as_expression(
-    text: str, available_columns: set[str], api_key: Optional[str], log=lambda msg: None,
+    text: str, available_columns: set[str], project: str, log=lambda msg: None,
 ) -> tuple[ValidatedExpression, str, Optional[str]]:
     """Same as resolve_custom_criterion(), for callers that only ever want
     a comparison to select candidates with (the Evaluator and Sign
@@ -540,7 +598,7 @@ def resolve_custom_criterion_as_expression(
     be a general question instead (kind == "answer") - directing the user
     to ask it on the Speed-Limits Quality page instead, where it's
     actually answered."""
-    result = resolve_custom_criterion(text, available_columns, api_key, log=log)
+    result = resolve_custom_criterion(text, available_columns, project, log=log)
     if result.kind == "answer":
         raise ExpressionError(
             "That looks like a question, not a comparison - this box needs an actual test to select segments "

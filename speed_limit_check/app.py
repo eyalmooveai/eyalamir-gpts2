@@ -258,18 +258,6 @@ def _google_maps_js_key() -> str:
     return "" if key == "your-key-here" else key
 
 
-def _anthropic_api_key() -> str | None:
-    """For the Custom test box's natural-language translation (see
-    custom_metrics.resolve_custom_criterion) - same KEY=VALUE loading as
-    GOOGLE_MAPS_API_KEY (see load_keys_file(DEFAULT_KEYS_FILE) above), a
-    separate key from this app's other Google Cloud credentials. None
-    (not "") when unset, so callers can tell "not configured" apart from
-    "configured as empty" - custom_metrics treats either as "no LLM
-    fallback available" but the two have different causes to report."""
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    return key or None
-
-
 def _read_criteria_from_form(form) -> dict[str, tuple[bool, float]]:
     criteria = {}
     for c in CRITERIA_DEFS:
@@ -352,7 +340,7 @@ def _preview_candidates_response(
         if custom_criterion_text.strip():
             available_columns = list_table_columns(project, dataset, table)
             validated, _source, _explanation = resolve_custom_criterion_as_expression(
-                custom_criterion_text, available_columns, _anthropic_api_key(),
+                custom_criterion_text, available_columns, DEFAULT_PROJECT,
             )
             custom_criterion_sql = validated.sql
         candidates = fetch_candidates(
@@ -862,7 +850,7 @@ def _validate_quality_custom_text(text: str, base: QualityFilters):
             jsonify({"error": f"Could not check {base.dataset}.{base.table}'s columns: {type(e).__name__}: {e}"}), 500,
         )
     try:
-        result = resolve_custom_criterion(text, available_columns, _anthropic_api_key())
+        result = resolve_custom_criterion(text, available_columns, DEFAULT_PROJECT)
     except ExpressionError as e:
         return None, (jsonify({"error": str(e)}), 400)
     return result, None
@@ -873,8 +861,8 @@ def quality_custom_test():
     """The "Custom test" box's result: either how many segments (of the
     current state/functional_class/zip/county filters) match a
     user-defined comparison - typed directly, or translated from plain
-    English by Claude - or, if the text was a general question about
-    Moove/Archimedes instead, Claude's plain-text answer to it (no
+    English by Gemini - or, if the text was a general question about
+    Moove/Archimedes instead, Gemini's plain-text answer to it (no
     BigQuery query is run in that case). See custom_metrics.py. The
     comparison path is synchronous, not a background job - it's one cheap
     COUNT/SUM aggregate, not the nationwide six-metric query the rest of
@@ -1040,7 +1028,7 @@ def run():
             table = table_name(state, year, month)
             available_columns = list_table_columns(project, dataset, table)
             validated, _source, _explanation = resolve_custom_criterion_as_expression(
-                custom_criterion_text, available_columns, _anthropic_api_key(),
+                custom_criterion_text, available_columns, DEFAULT_PROJECT,
             )
             custom_criterion_sql = validated.sql
         except (ValueError, ExpressionError) as e:
@@ -1284,7 +1272,7 @@ def evaluator_start():
             table = table_name(state, year, month)
             available_columns = list_table_columns(project, dataset, table)
             validated, _source, _explanation = resolve_custom_criterion_as_expression(
-                custom_criterion_text, available_columns, _anthropic_api_key(),
+                custom_criterion_text, available_columns, DEFAULT_PROJECT,
             )
             custom_criterion_sql = validated.sql
         except (ValueError, ExpressionError) as e:

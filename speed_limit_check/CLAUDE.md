@@ -626,7 +626,7 @@
   plus the same textbox on the Evaluator's and Sign Checker's launch
   forms) - lets a user write their own comparison instead of picking
   from the six built-in `QUALITY_METRICS`, either a direct expression or
-  plain English translated by Claude, and actually run Street View
+  plain English translated by Gemini, and actually run Street View
   verification against whatever it selects. All of it lives in the new
   `custom_metrics.py`, built around one non-negotiable invariant:
   **never let user-controlled text reach a BigQuery query string
@@ -641,22 +641,21 @@
   check on the input text with the input text itself then used as the
   query would still be exploitable). `resolve_custom_criterion()` is the
   entry point every caller should use: it tries `validate_custom_expression()`
-  on the raw text first, and only if that fails - and an `ANTHROPIC_API_KEY`
-  is configured - calls `translate_to_expression()` (Claude, structured
-  output) and then runs *its* output back through the exact same
-  `validate_custom_expression()` before using it. Claude's output is
-  never trusted directly; it's just another candidate string for the
-  same validator raw user text goes through. Every endpoint
-  (`app.py`'s `/speed-limits/custom-test(/sample)`, `evaluator_start()`,
-  `run()`) re-derives the validated SQL from the original free-text
-  input on every request - none of them accept an already-validated SQL
-  string from the client, since that would let a client skip validation
-  entirely by just claiming its SQL is already safe.
-  `speed_limit_here_mph` gets the same `ROUND()` special-case here as
-  everywhere else in this app (see above) - `_parse_column` rewrites any
-  reference to it into `ROUND(speed_limit_here_mph)` automatically, so a
-  custom test can't reintroduce the km/h-conversion noise the rest of
-  the app already fixed. The parser has an explicit `_MAX_NESTING_DEPTH`
+  on the raw text first, and only if that fails calls
+  `classify_custom_test_text()` (Gemini, structured output) and then runs
+  *its* output back through the exact same `validate_custom_expression()`
+  before using it. Gemini's output is never trusted directly; it's just
+  another candidate string for the same validator raw user text goes
+  through. Every endpoint (`app.py`'s `/speed-limits/custom-test(/sample)`,
+  `evaluator_start()`, `run()`) re-derives the validated SQL from the
+  original free-text input on every request - none of them accept an
+  already-validated SQL string from the client, since that would let a
+  client skip validation entirely by just claiming its SQL is already
+  safe. `speed_limit_here_mph` gets the same `ROUND()` special-case here
+  as everywhere else in this app (see above) - `_parse_column` rewrites
+  any reference to it into `ROUND(speed_limit_here_mph)` automatically,
+  so a custom test can't reintroduce the km/h-conversion noise the rest
+  of the app already fixed. The parser has an explicit `_MAX_NESTING_DEPTH`
   guard (40) at every self-recursion point, not just BigQuery's own
   length/complexity limits - confirmed a deeply-nested-parens input
   (`'(' * 200 + '1=1' + ')' * 200`, well under the 500-char length cap)
@@ -669,17 +668,86 @@
   of `custom_metrics.validate_custom_expression()`" - never re-derive it
   from raw text partway down the call stack, and never widen any of
   these to accept a caller-supplied SQL string that skipped validation.
-  `requirements.txt` needs `pydantic` and `anthropic` for this (a hard
-  top-level import in `custom_metrics.py`, so the whole app fails to
-  start without them) and `Dockerfile`'s `COPY` line needs
-  `custom_metrics.py` - same "don't forget the new module" mistake this
-  file already warns about twice above.
+  `requirements.txt` needs `pydantic` and `google-genai` for this - a
+  hard import in `custom_metrics.py`'s `classify_custom_test_text()` -
+  actually a *lazy* import inside that one function, not a module-level
+  one, so a broken/missing `google-genai` install only breaks the LLM
+  fallback path, not the whole app - direct expressions keep working
+  even then. Tested against `google-genai` 2.25.0 (the `Client(vertexai=
+  True, project=, location=)`, `GenerateContentConfig(response_schema=,
+  thinking_config=)`, and `.parsed` mechanics all confirmed by installing
+  it and reading its actual source/introspecting it live, not recalled
+  from training - this SDK is young enough, and this environment's
+  training-cutoff-to-now gap large enough, that guessing its API shape
+  from memory alone would have been a real risk); `requirements.txt`
+  pins only a loose `>=1.0.0` floor like this app's other dependencies,
+  so a future install may resolve a newer release - re-verify the same
+  three mechanics against release notes if `classify_custom_test_text()`
+  ever starts behaving differently after a dependency bump.
+  `Dockerfile`'s `COPY` line needs `custom_metrics.py` - same "don't
+  forget the new module" mistake this file already warns
+  about twice above.
+  - **Authenticates via Vertex AI + Application Default Credentials, not
+    an API key.** This was a deliberate pivot from an earlier Anthropic
+    (Claude) API-key-based implementation: the key had to live in Secret
+    Manager with its own `secretmanager.secretAccessor` grant, and this
+    project's IAM is Terraform-owned with `deploy.sh` always run with
+    `SKIP_IAM_GRANTS=1` (see below) - a *brand-new* secret's accessor
+    grant isn't something Terraform already knows to make, so the first
+    real deploy attempt with it silently kept the old revision (no
+    working key) instead of erroring loudly, which is what actually
+    prompted the switch ("this is too complex"). Vertex AI Gemini needs
+    no secret at all: `custom_metrics.classify_custom_test_text()`
+    constructs `google.genai.Client(vertexai=True, project=project,
+    location=_GEMINI_LOCATION)` and authenticates as whatever identity
+    Application Default Credentials resolves to - the same mechanism
+    this app's BigQuery/GCS/Vision calls already use. Locally that's
+    `gcloud auth application-default login`; on Cloud Run it's the
+    runtime service account, which needs exactly one additional grant,
+    `roles/aiplatform.user` on the project (see `deploy.sh`) - a single
+    project-level IAM role, not a secret-plus-accessor combination to
+    keep in sync. `project` is threaded through from `app.py` as
+    `DEFAULT_PROJECT` (the same constant `list_evaluable_tables()` etc.
+    already use) - not read from an env var, matching how this module
+    always took its GCP config as an explicit parameter rather than
+    reaching into `os.environ` itself. `_GEMINI_LOCATION` ("us-central1")
+    and `_GEMINI_MODEL` ("gemini-2.5-flash") are module constants in
+    `custom_metrics.py`, not configurable via env var - flash, not pro,
+    was chosen deliberately: this is a narrow classification/translation
+    task (pick one of 3 `kind`s, translate into a tiny fixed grammar, or
+    answer from a short fixed background text), not something needing
+    Pro-tier reasoning, and flash is cheaper and supports fully disabling
+    thinking (`thinking_config=types.ThinkingConfig(thinking_budget=0)`) -
+    Pro cannot disable thinking entirely, which risks the visible-JSON
+    output budget being silently eaten by invisible thinking tokens on a
+    task that doesn't benefit from thinking at all. If Gemini's model
+    lineup has moved on by the time this is touched again, check Google's
+    current model-lifecycle docs before bumping `_GEMINI_MODEL` blindly -
+    model IDs churn faster than this comment will stay accurate.
+    Structured output goes through `response_mime_type="application/json"`
+    + `response_schema=_ClassifiedResponse` (the same pydantic model as
+    before) and comes back as `response.parsed` - **but google-genai
+    leaves `.parsed` silently `None` on a validation/JSON-decode failure
+    instead of raising**, unlike the old Anthropic SDK's `.parsed_output`;
+    `classify_custom_test_text()` explicitly checks for `None` and raises
+    a clear `RuntimeError` (distinguishing a `MAX_TOKENS` finish reason
+    from a generic bad-output case) - don't remove that check on the
+    assumption `.parsed` is always populated when a schema is given, it
+    isn't. Errors are `google.genai.errors.APIError` (its `ClientError`/
+    `ServerError` subclasses cover all 4xx/5xx - there's no separate
+    typed auth/rate-limit exception the way the old Anthropic SDK had,
+    so rate-limiting is instead detected by checking `e.code == 429`) and
+    `google.auth.exceptions.DefaultCredentialsError`/`RefreshError` for
+    missing/invalid ADC - confirmed by actually running a Vertex AI call
+    with no ADC configured (this sandbox has none) and observing exactly
+    `DefaultCredentialsError`, the same exception this app's other
+    Google-Cloud call sites already catch for the identical reason.
   - **The box also answers general questions about Moove/Archimedes**
     ("what is Moove?", "what does the Evaluator's cost cap mean?") -
     a third response kind alongside "ran a comparison". This is a
     genuinely different code path from expression translation, not a
     relaxation of the SQL-safety grammar: `custom_metrics.classify_custom_test_text()`
-    asks Claude to pick one of `kind="expression"` (translate, same as
+    asks Gemini to pick one of `kind="expression"` (translate, same as
     before), `kind="answer"` (answer directly from the fixed
     `_MOOVE_BACKGROUND`/`_ARCHIMEDES_BACKGROUND` text in that module -
     sourced from Moove's own "Turing Technical Overview" doc and this
@@ -701,23 +769,29 @@
     branches on `data.kind` to show a distinct teal `.answer-block` for a
     question vs. the match-count/SQL/map controls for a comparison.
     Keep the background text factual and short if it's ever updated - it
-    goes verbatim into the system prompt Claude answers from.
-  - **When `ANTHROPIC_API_KEY` isn't configured, `resolve_custom_criterion()`'s
+    goes verbatim into the system prompt Gemini answers from.
+  - **When Vertex AI credentials aren't configured, `resolve_custom_criterion()`'s
     error message leads with that reason, not the raw grammar-parse
     error.** A real user typed a plain-English question ("what is the
-    current model in production?") with no key configured in that
-    deployment, and got "Unrecognized character '?' at position 39 -
-    only column names, numbers, ..." as the headline, with the actually-
-    useful "ANTHROPIC_API_KEY isn't configured" buried in a trailing
-    parenthetical - read as a confusing parser bug rather than the
-    simple, fixable config gap it was. Fixed by flipping the order: the
-    actionable "translation/Q&A aren't available - ANTHROPIC_API_KEY
-    isn't configured" sentence now leads, with the direct-parse detail
-    demoted to a trailing "(If you meant a direct comparison: ...)" -
-    still there for the minority case of someone who actually typed a
-    near-valid expression, just not the first thing they read. Don't
-    revert this ordering without re-reading the bug report in this
-    file's git history first.
+    current model in production?") with no LLM available in that
+    deployment (originally: no `ANTHROPIC_API_KEY`; the same principle
+    carries over to Vertex AI ADC now), and got "Unrecognized character
+    '?' at position 39 - only column names, numbers, ..." as the
+    headline, with the actually-useful "not configured" reason buried in
+    a trailing parenthetical - read as a confusing parser bug rather than
+    the simple, fixable config gap it was. `classify_custom_test_text()`
+    raises a dedicated `_CredentialsNotConfigured` (a `RuntimeError`
+    subclass) specifically for the ADC-missing case, and
+    `resolve_custom_criterion()` catches that separately from a generic
+    `RuntimeError` so it can lead with the actionable reason - "Natural-
+    language translation and general Q&A aren't available here -
+    Vertex AI credentials aren't configured here. (If you meant a direct
+    comparison: ...)" - with the direct-parse detail demoted to that
+    trailing parenthetical, still there for the minority case of someone
+    who actually typed a near-valid expression, just not the first thing
+    they read. Don't collapse `_CredentialsNotConfigured` back into a
+    plain `RuntimeError` without re-reading the bug report in this file's
+    git history first - that's what the distinction is *for*.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo
