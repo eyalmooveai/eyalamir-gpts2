@@ -21,13 +21,23 @@
     etc.) - don't invent a different mark or guess at Moove's colors;
     if this ever needs regenerating, re-extract from the official Drive
     asset rather than approximating by eye.
-  - `static/archimedes-mark.svg` is this tool's own mark - an
-    Archimedean spiral (r = a + b*theta) on a teal disc, generated
-    parametrically (see the module's inline comment for the formula),
-    deliberately in the same teal as Moove's own mark to read as "part
-    of the same family" without literally reusing Moove's logo for a
-    different product. Used in the hub page's hero and nowhere else
-    yet.
+  - `static/archimedes-mark.svg` is a deliberate MELD of the two marks,
+    not just a matching color: it's Moove's own two-ring path (the same
+    one `favicon.svg` uses, kept whole and unaltered on the left) with
+    its right ring's hole filled in as a disc carrying an Archimedean
+    spiral (r = a + b*theta, generated parametrically - see the file's
+    inline comment) in white - one ring reads as Moove's, the other as
+    Archimedes' own. The two ring centers were measured empirically
+    (pixel-centroid analysis of the rendered favicon, not hand-derived
+    from the path's bezier numbers) before placing the spiral. Its
+    natural aspect ratio is ~1.75:1 (wide), not square - `.hero-mark` in
+    this same file is `height: 60px; width: auto` for that reason; don't
+    force it back to a fixed square box without re-checking it doesn't
+    squish. Used in the hub page's hero and nowhere else yet. The plain
+    Moove ring mark (`favicon.svg`) is used everywhere else branding
+    appears (the tab icon, the footer) - only the hub hero's own logo is
+    the melded one, since that's specifically Archimedes' own mark, not
+    a second favicon.
   - Both PNG fallbacks were rasterized once via headless Chromium
     (Playwright, `executablePath: '/opt/pw-browsers/chromium'`) and
     committed as static files - there's no server-side SVG-to-PNG
