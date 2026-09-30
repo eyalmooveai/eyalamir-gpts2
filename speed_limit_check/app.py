@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Web UI for Archimedes, MooveAI's data quality hub - currently the
-speed limit sign checker plus the nationwide Speed-Limits Quality
-dashboard, both in this one app/deployment.
+"""Web UI for Archimedes, MooveAI's platform for data science on
+movement data - currently the speed limit sign checker plus the
+nationwide Speed-Limits Quality dashboard, both in this one app/deployment.
 
 Local:
     python app.py
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -204,6 +205,52 @@ def _requester_email() -> str:
     "unknown" for local dev, where there's no IAP in front of the app."""
     raw = request.headers.get("X-Goog-Authenticated-User-Email", "")
     return raw.split(":", 1)[-1] if raw else "unknown"
+
+
+# A small fixed, deliberately-chosen palette (not raw random colors, which
+# can land on something illegible against white text) - which one a given
+# user gets is deterministic (hashed from their email), not random per
+# page load, so the same person's avatar looks the same everywhere.
+_AVATAR_COLORS = ["#2f6fed", "#00b5ad", "#b25a00", "#7c3aed", "#c62828", "#1d8a4a", "#0e7490", "#a3168a"]
+
+
+def _user_avatar_color(email: str) -> str:
+    import hashlib
+    digest = hashlib.sha256(email.encode("utf-8")).digest()
+    return _AVATAR_COLORS[digest[0] % len(_AVATAR_COLORS)]
+
+
+def _user_initials(email: str) -> str:
+    """"jane.doe@moove.ai" -> "JD"; a single-token local part -> its first
+    two letters; the "unknown" placeholder (no IAP, local dev) -> "?"."""
+    if not email or email == "unknown":
+        return "?"
+    local_part = email.split("@", 1)[0]
+    tokens = [t for t in re.split(r"[.\-_+]", local_part) if t]
+    if not tokens:
+        return local_part[:2].upper() or "?"
+    if len(tokens) == 1:
+        return tokens[0][:2].upper()
+    return (tokens[0][0] + tokens[1][0]).upper()
+
+
+@app.context_processor
+def _inject_nav_context():
+    """Available in every template (layout.html's header/footer chrome
+    is shared by every page) - who's signed in (per _requester_email(),
+    IAP-backed in production) and a deterministic avatar (initials +
+    color) for them. There's no real profile photo available here - IAP
+    only forwards an email, never a picture - so a generated avatar is
+    the honest choice, not an approximation of a photo we don't have."""
+    from datetime import datetime, timezone
+    email = _requester_email()
+    return {
+        "nav_user_email": email,
+        "nav_user_signed_in": email != "unknown",
+        "nav_user_initials": _user_initials(email),
+        "nav_user_color": _user_avatar_color(email),
+        "current_year": datetime.now(timezone.utc).year,
+    }
 
 
 def _google_maps_js_key() -> str:
@@ -510,6 +557,25 @@ def _run_quality_job(job_id: str, base: QualityFilters, group_by: str, param1: f
 @app.route("/", methods=["GET"])
 def hub():
     return render_template("hub.html", models=HUB_MODELS)
+
+
+@app.route("/deploy", methods=["GET"])
+def deploy_info():
+    """A reference page, not a live dashboard - Archimedes has no wired-up
+    Cloud Run/GCP Admin API calls to report real-time revision/traffic
+    status, so this deliberately only states documented, static facts
+    (see speed_limit_check/CLAUDE.md's deployment notes and README.md's
+    "Deploying to Cloud Run" section, which this mirrors) rather than
+    implying it's monitoring anything live."""
+    return render_template(
+        "deploy_info.html",
+        service_name="speed-limit-check",
+        project_id="moove-platform-testing-data",
+        region="us-central1",
+        bucket_name="archimedes-control",
+        service_url="https://speed-limit-check-233134271134.us-central1.run.app",
+        public_domain="https://archimedes.moove.ai",
+    )
 
 
 @app.route("/speed-limits", methods=["GET"])

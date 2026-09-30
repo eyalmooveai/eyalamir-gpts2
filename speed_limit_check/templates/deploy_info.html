@@ -1,0 +1,69 @@
+{% extends "layout.html" %}
+{% block title %}Deploy - Archimedes{% endblock %}
+{% block breadcrumb %}<p class="breadcrumb"><a href="/">Archimedes</a> / Deploy</p>{% endblock %}
+{% block heading %}Deploy{% endblock %}
+{% block subtitle %}How Archimedes is deployed and who can reach it{% endblock %}
+{% block content %}
+<div class="card">
+  <p style="color:var(--muted); font-size:0.85rem; margin:0;">
+    This is a reference page, not a live dashboard - it states how this service
+    is deployed and configured, not its real-time status. For actual logs or
+    revision history, use the <code>gcloud</code> commands below or the Cloud
+    Run console.
+  </p>
+</div>
+
+<div class="card">
+  <span class="eyebrow">Where it runs</span>
+  <h3 style="margin:0 0 12px;">Service</h3>
+  <table>
+    <tr><td class="key">Cloud Run service</td><td>{{ service_name }}</td></tr>
+    <tr><td class="key">Project</td><td>{{ project_id }}</td></tr>
+    <tr><td class="key">Region</td><td>{{ region }}</td></tr>
+    <tr><td class="key">Cache bucket (GCS)</td><td>{{ bucket_name }}</td></tr>
+    <tr><td class="key">Cloud Run URL</td><td><a href="{{ service_url }}" target="_blank" rel="noopener">{{ service_url }}</a></td></tr>
+    <tr><td class="key">Public domain</td><td><a href="{{ public_domain }}" target="_blank" rel="noopener">{{ public_domain }}</a></td></tr>
+  </table>
+  <p style="color:var(--muted); font-size:0.78rem; margin:10px 0 0;">
+    One Flask app, one Cloud Run service, one deployment - every page and tool
+    in Archimedes lives here (see this repo's <code>CLAUDE.md</code>, "keep it
+    this way" - deliberately not split into separate apps/deployments).
+  </p>
+</div>
+
+<div class="card">
+  <span class="eyebrow">Who can reach it</span>
+  <h3 style="margin:0 0 12px;">Access</h3>
+  <p style="margin:0;">
+    The public domain above is fronted by <strong>Identity-Aware Proxy (IAP)</strong>,
+    open to everyone at <code>moove.ai</code> - visiting it prompts a normal
+    Google sign-in, and a personal (non-moove.ai) account is refused. The
+    Cloud Run URL itself is the pre-IAP path and isn't how this is used day to
+    day; who's actually let in is controlled by IAM's
+    <code>roles/iap.httpsResourceAccessor</code> on the service.
+  </p>
+  <p style="color:var(--muted); font-size:0.78rem; margin:10px 0 0;">
+    Signed in right now as <strong>{{ nav_user_email if nav_user_signed_in else "no one (local dev, no IAP in front)" }}</strong>
+    - see the account menu at the top right of every page.
+  </p>
+</div>
+
+<div class="card">
+  <span class="eyebrow">Shipping a change</span>
+  <h3 style="margin:0 0 12px;">Deploying a new version</h3>
+  <p style="margin:0 0 10px;">
+    Run <code>speed_limit_check/deploy.sh</code> - it enables the required
+    APIs, creates the cache bucket/secrets/service account if they don't
+    already exist, deploys the current source to Cloud Run, and grants
+    access. Safe to re-run; existing resources are detected and left alone.
+  </p>
+  <pre class="log">PROJECT_ID={{ project_id }} REGION={{ region }} BUCKET_NAME={{ bucket_name }} \
+INVOKER_EMAIL=you@example.com MAPS_API_KEY=... ANTHROPIC_API_KEY=... \
+SKIP_IAM_GRANTS=1 ./deploy.sh</pre>
+  <p style="color:var(--muted); font-size:0.78rem; margin:10px 0 0;">
+    <code>SKIP_IAM_GRANTS=1</code> because Terraform owns this project's IAM
+    grants already - see README.md's "Deploying to Cloud Run" section for the
+    full variable reference and the manual step-by-step version.
+  </p>
+</div>
+{% endblock %}

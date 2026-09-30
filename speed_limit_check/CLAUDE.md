@@ -66,6 +66,62 @@
     through the bottom of the dial because of this, caught by actually
     rendering it (headless Chromium screenshot) and looking, not by
     reasoning about the path text.
+- **Standard site chrome - top nav, footer, account avatar - all live in
+  `layout.html`'s `<body>`, once, so every page gets the same one
+  automatically (no per-template copy to keep in sync).**
+  - **Top nav**: 5 links - Quality, Explore, Agent, Deploy, Run. Only
+    Quality (`/speed-limits`) and Run (`/speed-limits-evaluator`) are
+    literal 1:1 page names; the other three are deliberate editorial
+    choices, not obvious defaults, so don't "fix" them without
+    reconsidering why: **Explore** goes to `/` (the hub/model catalog -
+    "explore MooveAI's models"), **Agent** goes to
+    `/speed-limits#ask-archimedes` (an anchor into the Custom
+    test/"Ask Archimedes" card on the Quality page, not a separate
+    route - there's exactly one AI-agent capability in this app today
+    and it didn't need a duplicate standalone page), **Deploy** goes to
+    the new `/deploy` route (see below). Active-state highlighting for
+    Quality/Explore/Deploy/Run is server-side (`request.path ==
+    '/...'` in `layout.html`); Agent can't be, since URL fragments never
+    reach the server - a small inline script in `layout.html` checks
+    `window.location.hash === '#ask-archimedes'` client-side instead and
+    adds `.active` itself. If Sign Checker (`/sign-checker`) ever needs
+    its own top-level nav slot, that's a 6th item, not a repurposing of
+    one of these five - the user asked for exactly these five.
+  - **`/deploy`** (`app.py`'s `deploy_info()`, `templates/deploy_info.html`)
+    is a deliberately static reference page - real, already-documented
+    facts (service name/project/region/bucket, the IAP access model, the
+    `deploy.sh` invocation) restated for in-app visibility, NOT a live
+    status dashboard. This app has no wired-up Cloud Run/GCP Admin API
+    calls to report real revision/traffic/health, and the page says so
+    explicitly ("not a live dashboard") rather than implying it's
+    monitoring anything - don't quietly turn this into something that
+    looks live without actually wiring up real monitoring calls behind
+    it, that would be misleading.
+  - **Account avatar** (top right of the nav, every page): a generated
+    initials-on-a-color-disc avatar, never a real profile photo - IAP
+    (see `_requester_email()`) only ever forwards the signed-in user's
+    *email* via `X-Goog-Authenticated-User-Email`, never a picture, so
+    there is no real photo this app could show even if it tried; showing
+    a generated avatar is the honest choice, not a placeholder for a
+    "real" image to add later. `app.py`'s `_user_initials()`/
+    `_user_avatar_color()` derive both deterministically from the email
+    (a fixed palette, hashed - same person always gets the same color,
+    not a new random one per page load) and are injected into every
+    template via the `_inject_nav_context()` context processor, alongside
+    `current_year` for the footer's copyright line - add any future
+    "every page needs this" value there rather than passing it through
+    every individual `render_template()` call. Local dev (no IAP) shows a
+    plain "?" avatar and a "not signed in" note instead of a broken
+    email/sign-out link - checked via `nav_user_signed_in`. "Sign out"
+    links to IAP's own standard `/_gcp_iap/clear_login_cookie` path (a
+    documented Google convention, not a guessed URL) - there's no
+    app-level session/login of its own to sign out of, IAP owns all of
+    that.
+  - **Footer**: brand + `moove.ai`/Explore/Deploy links + a copyright
+    line, same on every page. Kept deliberately modest (no fabricated
+    Privacy/Terms/social-links rows) - this is an internal tool without
+    public-facing policy pages, so a marketing-site-style footer would
+    just be inventing links to pages that don't exist.
   - `layout.html` also carries a small shared footer ("Archimedes is
     built and run by Moove", linking to moove.ai) on every page, and a
     `--moove-teal` CSS variable kept deliberately separate from

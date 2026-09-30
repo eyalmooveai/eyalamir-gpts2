@@ -25,6 +25,15 @@ deployment - see `app.py`):
   state concurrently instead of one at a time - durable status you can
   check on later, CSV export, and a history of past runs to compare
   against. See "Speed-Limits Evaluator" below.
+- **`/deploy`** - a static reference page (not a live dashboard) stating
+  how this service is deployed: project/region/bucket, the IAP access
+  model, and the `deploy.sh` invocation.
+
+Every page shares the same top nav (Quality / Explore / Agent / Deploy /
+Run - "Agent" jumps to the Custom test/"Ask Archimedes" card on the
+Quality page) and footer, plus an account-avatar menu at the top right
+showing who's signed in (via IAP in production; a generated initials
+avatar, since IAP never forwards a profile photo, only an email).
 
 Every `here_segment_id` shown anywhere in the app - results tables, map
 popups, the CSV export - is a link straight to Google Street View at that
