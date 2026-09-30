@@ -84,11 +84,27 @@ from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_cu
 # to add here, so the hub is truthful about what exists without promising
 # a href that 404s.
 HUB_MODELS = [
-    {"name": "Speed Limits", "description": "Inferred speed limit quality vs. OSM/HERE/observed speeds, a per-segment Street View sign checker, and a batch evaluator across up to 1000 segments at once.", "href": "/speed-limits"},
-    {"name": "Lanes", "description": "Not yet available in Archimedes.", "href": None},
-    {"name": "Construction Zones", "description": "Not yet available in Archimedes.", "href": None},
-    {"name": "Accident Prediction", "description": "Not yet available in Archimedes.", "href": None},
-    {"name": "Accident Detection", "description": "Not yet available in Archimedes.", "href": None},
+    {
+        "name": "Speed Limits", "href": "/speed-limits", "icon": "speed_limits.svg",
+        "description": "How the inferred speed-limit model performs against OSM/HERE/observed speeds nationwide, "
+                       "a per-segment Street View sign check, and a batch evaluator across up to 1000 segments at once.",
+    },
+    {
+        "name": "Lanes", "href": None, "icon": "lanes.svg",
+        "description": "Results and performance for lane-level inference - not yet available in Archimedes.",
+    },
+    {
+        "name": "Construction Zones", "href": None, "icon": "construction_zones.svg",
+        "description": "Results and performance for construction-zone detection - not yet available in Archimedes.",
+    },
+    {
+        "name": "Accident Prediction", "href": None, "icon": "accident_prediction.svg",
+        "description": "Results and performance for predicting where accidents are likely - not yet available in Archimedes.",
+    },
+    {
+        "name": "Accident Detection", "href": None, "icon": "accident_detection.svg",
+        "description": "Results and performance for detecting accidents from movement data - not yet available in Archimedes.",
+    },
 ]
 
 # Preselected table on the Speed-Limits Quality page, if it's still in

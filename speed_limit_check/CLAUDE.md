@@ -1,7 +1,11 @@
 # speed_limit_check - working conventions
 
-- This app is "Archimedes", MooveAI's data quality hub - one Flask app
-  (`app.py`), one deployment, four pages: `/` (hub, model catalog),
+- This app is "Archimedes", MooveAI's platform for data science on
+  movement data - a window into how MooveAI's road-intelligence models
+  work, their results, and their performance (not just a "quality
+  checker" - "checking quality vs. ground truth" is one specific lens
+  this platform gives you into a model, not the whole point of it).
+  One Flask app (`app.py`), one deployment, four pages: `/` (hub, model catalog),
   `/speed-limits` (Speed-Limits Quality - nationwide BigQuery metrics),
   `/sign-checker` (the original per-segment Street View sign checker),
   `/speed-limits-evaluator` (Speed-Limits Evaluator - batch/concurrent
@@ -43,6 +47,25 @@
     committed as static files - there's no server-side SVG-to-PNG
     rendering at runtime, so regenerating them (if the SVGs ever change)
     is a one-off manual step, not something `app.py` does.
+  - `static/models/*.svg` (`speed_limits.svg`, `lanes.svg`,
+    `construction_zones.svg`, `accident_prediction.svg`,
+    `accident_detection.svg`) - one icon per `HUB_MODELS` entry, shown on
+    its hub card via the new `icon` key. Same visual language as the
+    original (pre-meld) Archimedes mark: a solid teal `#00b5ad` disc with
+    a white glyph, generated with plain SVG shapes/paths (no photos, no
+    external art) so they're crisp at any size and trivially re-themeable.
+    Each glyph is a literal pictogram of the model it represents (a
+    speedometer for Speed Limits, a cone for Construction Zones, a
+    collision starburst for Accident Detection, a dashed path to a
+    warning triangle for Accident Prediction, a road with lane markings
+    for Lanes) - keep that one-glyph-per-model pattern if a new model is
+    added, rather than reusing a generic placeholder icon. If you
+    regenerate one of these, watch out for SVG elliptical-arc sweep-flag
+    direction (`A rx ry 0 large-arc-flag sweep-flag x y`) - the
+    speedometer's gauge arc first came out drawing the wrong (minor) arc
+    through the bottom of the dial because of this, caught by actually
+    rendering it (headless Chromium screenshot) and looking, not by
+    reasoning about the path text.
   - `layout.html` also carries a small shared footer ("Archimedes is
     built and run by Moove", linking to moove.ai) on every page, and a
     `--moove-teal` CSS variable kept deliberately separate from

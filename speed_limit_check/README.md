@@ -1,7 +1,9 @@
 # Archimedes
 
-MooveAI's hub for data quality tools, currently covering speed limits (one
-app, one deployment - see `app.py`):
+MooveAI's platform for data science on movement data - a window into how
+MooveAI's road-intelligence models work, their results, and their
+performance, currently covering the Speed Limits model (one app, one
+deployment - see `app.py`):
 
 - **`/`** - the hub itself: a catalog of MooveAI's models, linking to
   whichever ones have tools built here (today, just Speed Limits).

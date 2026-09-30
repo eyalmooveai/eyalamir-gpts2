@@ -86,9 +86,11 @@ insights, risk/safety scores, and real-time coaching for customers including aut
 companies, public-sector agencies, and fleets. Moove's brand color is a teal/turquoise (#00B5AD); its logo
 mark is two interlocking rings."""
 
-_ARCHIMEDES_BACKGROUND = """Archimedes is Moove's internal data-quality hub, a single Flask web app with
-three tools so far, all about speed limits (more MooveAI data products - lanes, construction zones, accident
-prediction/detection - are planned but not built yet):
+_ARCHIMEDES_BACKGROUND = """Archimedes is Moove's platform for data science on movement data - a single Flask
+web app that gives visibility into how Moove's road-intelligence models work, what they produce, and how well
+they perform, not just a pass/fail quality checker. It has three tools so far, all about the Speed Limits
+model (more MooveAI models - Lanes, Construction Zones, Accident Prediction, Accident Detection - are planned
+but not built yet, each will get the same kind of "how it works, results, performance" view):
 - Speed-Limits Quality (/speed-limits): nationwide BigQuery metrics comparing Moove's inferred speed limit
   for a road segment against OSM's, HERE's, the observed average speed, and freeflow speed - filterable by
   state/functional class/zip/county, with a map of the worst-offending segments and this "Custom test" box.

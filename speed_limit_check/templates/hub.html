@@ -5,32 +5,41 @@
   <img class="hero-mark" src="{{ url_for('static', filename='archimedes-mark.svg') }}" alt="Archimedes">
   <div>
     <h1 class="hero-title">Archimedes</h1>
-    <p class="hero-tagline">MooveAI's data quality hub</p>
+    <p class="hero-tagline">MooveAI's platform for data science on movement data</p>
   </div>
 </div>
 <p class="hero-desc">
-  Archimedes checks how much MooveAI's inferred road data can be trusted -
-  starting with speed limits: comparing the inferred values against
-  OSM/HERE/observed speeds at scale, and verifying individual segments
-  against what a real Street View sign actually says. One tool per data
-  product, all in one place.
+  Archimedes is where MooveAI's road-intelligence models get put under the
+  microscope - a live window into how each one works, what it produces,
+  and how well it holds up against ground truth. Speed Limits is fully
+  built out today: nationwide performance metrics against OSM/HERE/observed
+  speeds, a per-segment check against what a real Street View sign actually
+  says, and a batch evaluator across up to 1000 segments at once. More
+  models - lanes, construction zones, accident prediction and detection -
+  are on the way.
 </p>
 {% endblock %}
 {% block content %}
 <div class="card">
   <h3 style="margin-top:0;">Models</h3>
-  <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Click a model to open its quality tools. Greyed-out ones aren't built yet.</p>
+  <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Click a model to see how it works, its results, and its performance. Greyed-out ones aren't built yet.</p>
   <div class="model-grid">
     {% for m in models %}
       {% if m.href %}
         <a class="model-card active" href="{{ m.href }}">
-          <span class="model-badge">Live</span>
+          <div class="model-card-top">
+            <img class="model-icon" src="{{ url_for('static', filename='models/' + m.icon) }}" alt="">
+            <span class="model-badge">Live</span>
+          </div>
           <h3>{{ m.name }}</h3>
           <p>{{ m.description }}</p>
         </a>
       {% else %}
         <div class="model-card placeholder">
-          <span class="model-badge">Coming soon</span>
+          <div class="model-card-top">
+            <img class="model-icon" src="{{ url_for('static', filename='models/' + m.icon) }}" alt="">
+            <span class="model-badge">Coming soon</span>
+          </div>
           <h3>{{ m.name }}</h3>
           <p>{{ m.description }}</p>
         </div>
