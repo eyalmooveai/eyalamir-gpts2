@@ -5,8 +5,10 @@
   work, their results, and their performance (not just a "quality
   checker" - "checking quality vs. ground truth" is one specific lens
   this platform gives you into a model, not the whole point of it).
-  One Flask app (`app.py`), one deployment, six pages: `/` (hub/Explore,
-  model catalog + a live sample map), `/speed-limits` (Speed-Limits
+  One Flask app (`app.py`), one deployment, seven pages: `/` (hub, the
+  model catalog - just that, see the "Standard site chrome" bullet's
+  Explore note below for why it's deliberately NOT also the Explore
+  page), `/explore` (the live sample map), `/speed-limits` (Speed-Limits
   Quality - nationwide BigQuery metrics), `/sign-checker` (the original
   per-segment Street View sign checker), `/speed-limits-evaluator`
   (Speed-Limits Evaluator - batch/concurrent version of the sign
@@ -89,13 +91,19 @@
 - **Standard site chrome - top nav, footer, account avatar - all live in
   `layout.html`'s `<body>`, once, so every page gets the same one
   automatically (no per-template copy to keep in sync).**
-  - **Top nav**: 5 links - Quality, Explore, Agent, Deploy, Run. Only
-    Quality (`/speed-limits`) and Run (`/speed-limits-evaluator`) are
-    literal 1:1 page names; the other three are deliberate editorial
-    choices, not obvious defaults, so don't "fix" them without
-    reconsidering why: **Explore** goes to `/` (the hub/model catalog),
-    **Agent** goes to its own standalone `/agent` page (see below),
-    **Deploy** goes to the `/deploy` route (see below). Active-state
+  - **Top nav**: 5 links - Quality, Explore, Agent, Deploy, Run - each a
+    literal 1:1 page name/route (`/speed-limits`, `/explore`, `/agent`,
+    `/deploy`, `/speed-limits-evaluator`). **`/` (the hub) is
+    deliberately NOT one of the five nav targets and carries no active
+    nav state of its own** - it's reached via the brand mark/wordmark at
+    the far left of the nav, same as any conventional "logo goes home"
+    pattern, not via a tab. This was explicitly corrected once already:
+    Explore's live sample map briefly lived at the top of `/` itself,
+    and got moved out to its own `/explore` page because "the main page
+    should not have explore, it should have the models" - don't
+    re-merge them; `/` (`hub()`, `hub.html`) stays just the model
+    catalog, `/explore` (`explore_page()`, `explore.html`) stays just the
+    sample map (+ a couple of "more ways to explore" links). Active-state
     highlighting for all five is server-side (`request.path == '/...'`
     in `layout.html`) - a plain per-page match, no client-side hash
     detection needed since none of the five nav targets are anchors
@@ -176,25 +184,27 @@
     default `header` block - if hub.html's hero ever needs to change,
     edit its own `header` block, not `layout.html`'s default (which every
     other page still uses as-is).
-  - **The hub page's top card is a live sample map**, not a screenshot or
-    a static illustration - "put an initial OSM-comparison sample map at
-    the top of the [Explore] page" was explicit. `app.py`'s `hub()`
-    computes a real default table/infer_field (via the same
+  - **`/explore`'s top card is a live sample map**, not a screenshot or a
+    static illustration - "put an initial OSM-comparison sample map at
+    the top of the [Explore] page" was explicit (and, when a first
+    version put this on the hub page instead, explicitly corrected - see
+    the Top nav bullet above). `app.py`'s `explore_page()` computes a
+    real default table/infer_field (via the same
     `_table_options_and_default()` + `list_infer_fields()` calls the
-    Quality page itself uses) and `hub.html`'s own inline script
+    Quality page itself uses) and `explore.html`'s own inline script
     auto-fetches `/speed-limits/sample-mismatches?...&metric=diff_osm`
     on page load (no button click - it's meant to be already there when
     you arrive) - the exact same endpoint and Leaflet-marker-drawing
     logic as the Quality page's own "Map: where the worst mismatches
     are" issue map, just triggered automatically with fixed nationwide
     defaults instead of from a live filters form. If that lookup fails
-    (e.g. no BigQuery credentials in local dev), `hub()` catches it and
-    passes `sample_map_error` through - the card shows that message
-    instead of attempting a doomed fetch, never a raw 500. Verified with
-    a stubbed-Leaflet Node/Playwright test (this sandbox has no network
-    access to the real Leaflet CDN) confirming markers actually get
-    drawn and popups are populated correctly, not just that the card
-    renders.
+    (e.g. no BigQuery credentials in local dev), `explore_page()` catches
+    it and passes `sample_map_error` through - the card shows that
+    message instead of attempting a doomed fetch, never a raw 500.
+    Verified with a stubbed-Leaflet Node/Playwright test (this sandbox
+    has no network access to the real Leaflet CDN) confirming markers
+    actually get drawn and popups are populated correctly, not just that
+    the card renders.
 - **`speed_limit_here_mph` is always wrapped in `ROUND()`, everywhere it's
   referenced.** It's stored as a precise km/h->mph conversion (e.g.
   `24.860161591050343`, confirmed live - not `25`), unlike every other
@@ -644,6 +654,22 @@
     question vs. the match-count/SQL/map controls for a comparison.
     Keep the background text factual and short if it's ever updated - it
     goes verbatim into the system prompt Claude answers from.
+  - **When `ANTHROPIC_API_KEY` isn't configured, `resolve_custom_criterion()`'s
+    error message leads with that reason, not the raw grammar-parse
+    error.** A real user typed a plain-English question ("what is the
+    current model in production?") with no key configured in that
+    deployment, and got "Unrecognized character '?' at position 39 -
+    only column names, numbers, ..." as the headline, with the actually-
+    useful "ANTHROPIC_API_KEY isn't configured" buried in a trailing
+    parenthetical - read as a confusing parser bug rather than the
+    simple, fixable config gap it was. Fixed by flipping the order: the
+    actionable "translation/Q&A aren't available - ANTHROPIC_API_KEY
+    isn't configured" sentence now leads, with the direct-parse detail
+    demoted to a trailing "(If you meant a direct comparison: ...)" -
+    still there for the minority case of someone who actually typed a
+    near-valid expression, just not the first thing they read. Don't
+    revert this ordering without re-reading the bug report in this
+    file's git history first.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo

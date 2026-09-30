@@ -556,10 +556,19 @@ def _run_quality_job(job_id: str, base: QualityFilters, group_by: str, param1: f
 
 @app.route("/", methods=["GET"])
 def hub():
-    """The hub/Explore page: the model catalog, plus a live sample map at
-    the top - a real "vs. OSM" query against the default table, not a
-    canned screenshot, so a first-time visitor sees actual model output
-    immediately rather than an empty page. Uses the same default-table
+    """The hub page: MooveAI's model catalog. Kept to just that - the
+    "Explore" nav item and its live sample map live on their own page
+    (see explore_page() below), not here; don't re-merge them, that was
+    tried and explicitly reverted ("the main page should not have
+    explore, it should have the models")."""
+    return render_template("hub.html", models=HUB_MODELS)
+
+
+@app.route("/explore", methods=["GET"])
+def explore_page():
+    """The Explore page: a live sample map - a real "vs. OSM" query
+    against the default table, not a canned screenshot, so a visitor
+    sees actual model output immediately. Uses the same default-table
     logic as the Quality page (_table_options_and_default) and the same
     /speed-limits/sample-mismatches endpoint the Quality page's own issue
     map calls - no separate query path to keep in sync."""
@@ -576,7 +585,7 @@ def hub():
         except Exception as e:
             sample_map_error = f"{type(e).__name__}: {e}"
     return render_template(
-        "hub.html", models=HUB_MODELS,
+        "explore.html",
         sample_map_table=selected_table_option,
         sample_map_infer_field=sample_map_infer_field,
         sample_map_error=sample_map_error,
@@ -611,7 +620,7 @@ def _table_options_and_default(requested_table: str = ""):
     This is a fast, cached metadata-only query (see quality_metrics.py) -
     only the actual aggregate metrics query is slow. Shared by every page
     that needs a table selector defaulted sensibly: the Quality page, the
-    standalone Agent page, and the hub/Explore page's sample map.
+    standalone Agent page, and the Explore page's sample map.
     Returns (table_options, selected_option, error)."""
     try:
         table_options = [f"{t['dataset']}.{t['table']}" for t in list_evaluable_tables(DEFAULT_PROJECT)]

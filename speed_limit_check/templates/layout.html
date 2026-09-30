@@ -365,7 +365,7 @@
       </a>
       <nav class="topnav-links">
         <a href="/speed-limits" {% if request.path == '/speed-limits' %}class="active"{% endif %}>Quality</a>
-        <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Explore</a>
+        <a href="/explore" {% if request.path == '/explore' %}class="active"{% endif %}>Explore</a>
         <a href="/agent" {% if request.path == '/agent' %}class="active"{% endif %}>Agent</a>
         <a href="/deploy" {% if request.path == '/deploy' %}class="active"{% endif %}>Deploy</a>
         <a href="/speed-limits-evaluator" {% if request.path == '/speed-limits-evaluator' %}class="active"{% endif %}>Run</a>
@@ -411,7 +411,7 @@
         </div>
         <div class="site-footer-links">
           <a href="https://moove.ai" target="_blank" rel="noopener">moove.ai</a>
-          <a href="/">Explore</a>
+          <a href="/explore">Explore</a>
           <a href="/deploy">Deploy</a>
         </div>
       </div>

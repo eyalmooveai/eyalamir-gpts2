@@ -497,8 +497,16 @@ def resolve_custom_criterion(
         return CustomTestResult(kind="expression", expression=validate_custom_expression(text, available_columns), source="direct")
     except ExpressionError as direct_error:
         if not api_key:
+            # Lead with the actionable reason, not the raw grammar-parse
+            # error - for anyone who typed a plain-English question (the
+            # common case here), a "Unrecognized character '?'" headline
+            # reads as a confusing parser bug, when the real, fixable
+            # issue is just a missing key. The parse detail is still
+            # included, just demoted to a parenthetical for the minority
+            # case of someone who actually meant a direct expression.
             raise ExpressionError(
-                f"{direct_error} (Natural-language translation and general Q&A aren't available - ANTHROPIC_API_KEY isn't configured.)"
+                "Natural-language translation and general Q&A aren't available here - ANTHROPIC_API_KEY isn't "
+                f"configured. (If you meant a direct comparison: {direct_error})"
             ) from direct_error
         try:
             classified = classify_custom_test_text(text, available_columns, api_key, log=log)

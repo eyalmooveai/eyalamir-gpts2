@@ -1,9 +1,5 @@
 {% extends "layout.html" %}
 {% block title %}Archimedes - MooveAI{% endblock %}
-{% block extra_head %}
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-{% endblock %}
 {% block header %}
 <div class="hero">
   <img class="hero-mark" src="{{ url_for('static', filename='archimedes-mark.svg') }}" alt="Archimedes">
@@ -24,17 +20,6 @@
 </p>
 {% endblock %}
 {% block content %}
-<div class="card">
-  <span class="eyebrow">Explore</span>
-  <h3 style="margin:0 0 4px;">A live sample: where the inferred limit disagrees with OSM</h3>
-  <p class="section-intro">
-    Real segments, right now - not a screenshot. Nationwide, {{ sample_map_table }},
-    worst offenders first. <a href="/speed-limits">Refine this on the Quality page &rarr;</a>
-  </p>
-  <p id="explore-map-message" style="color:var(--muted); font-size:0.82rem; margin:0;">Loading a live sample&hellip;</p>
-  <div id="explore-map" style="height:420px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
-</div>
-
 <div class="card">
   <h3 style="margin-top:0;">Models</h3>
   <p style="color:var(--muted); font-size:0.85rem; margin-top:-8px;">Click a model to see how it works, its results, and its performance. Greyed-out ones aren't built yet.</p>
@@ -66,76 +51,4 @@
     {% endfor %}
   </div>
 </div>
-
-<script>
-(function () {
-  const msgEl = document.getElementById('explore-map-message');
-  const mapEl = document.getElementById('explore-map');
-  const sampleMapError = {{ sample_map_error|tojson }};
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  }
-
-  if (sampleMapError) {
-    msgEl.textContent = 'Could not load a live sample: ' + sampleMapError;
-    return;
-  }
-
-  const params = new URLSearchParams({
-    table: {{ sample_map_table|tojson }},
-    infer_field: {{ sample_map_infer_field|tojson }},
-    metric: 'diff_osm',
-    param1: '10',
-  });
-
-  fetch('/speed-limits/sample-mismatches?' + params.toString())
-    .then(r => r.json().then(data => ({ ok: r.ok, data })))
-    .then(({ ok, data }) => {
-      if (!ok || data.error) {
-        msgEl.textContent = 'Could not load a live sample: ' + (data.error || 'unknown error');
-        return;
-      }
-      const points = data.points || [];
-      msgEl.textContent = points.length
-        ? `Showing ${data.shown} of the worst "vs. OSM" mismatches nationwide${data.shown >= data.cap ? ` (capped at ${data.cap})` : ''}, largest first.`
-        : 'No segments currently disagree with OSM under the default settings.';
-      if (!points.length) return;
-
-      mapEl.style.display = 'block';
-      if (typeof L === 'undefined') {
-        msgEl.textContent += ' (Map library failed to load.)';
-        return;
-      }
-      const map = L.map('explore-map', { scrollWheelZoom: false });
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
-      const layer = L.layerGroup().addTo(map);
-      const errColor = getComputedStyle(document.documentElement).getPropertyValue('--err').trim() || '#c62828';
-      const magnitudes = points.map(p => p.magnitude).filter(m => typeof m === 'number');
-      const minMag = magnitudes.length ? Math.min(...magnitudes) : 0;
-      const maxMag = magnitudes.length ? Math.max(...magnitudes) : 1;
-      const coords = [];
-      points.forEach(p => {
-        const lat = parseFloat(p.lat), lon = parseFloat(p.lon);
-        if (Number.isNaN(lat) || Number.isNaN(lon)) return;
-        coords.push([lat, lon]);
-        const frac = maxMag > minMag ? (p.magnitude - minMag) / (maxMag - minMag) : 0.5;
-        const radius = 5 + frac * 10;
-        const marker = L.circleMarker([lat, lon], { radius, color: '#fff', weight: 1, fillColor: errColor, fillOpacity: 0.7 });
-        const bits = [`<strong>${escapeHtml(p.segment_id)}</strong>`];
-        if (p.street_name) bits.push(escapeHtml(p.street_name));
-        bits.push(`vs. OSM: off by ${Number(p.magnitude).toFixed(1)} mph`);
-        if (p.state) bits.push(escapeHtml(p.state));
-        bits.push(`<a href="https://www.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank" rel="noopener">Street View</a>`);
-        marker.bindPopup(bits.join('<br>'));
-        marker.addTo(layer);
-      });
-      setTimeout(() => map.invalidateSize(), 0);
-      if (coords.length) map.fitBounds(coords, { padding: [24, 24], maxZoom: 12 });
-    })
-    .catch(err => {
-      msgEl.textContent = 'Could not load a live sample: ' + err.message;
-    });
-})();
-</script>
 {% endblock %}
