@@ -837,10 +837,12 @@ def _validate_quality_custom_text(text: str, base: QualityFilters):
     string (or a cached answer) from the client for reuse here - see
     custom_metrics.py's module docstring for why that would defeat the
     whole point of validating in the first place. The result's `kind` is
-    either "expression" (a validated comparison, safe to run against
-    BigQuery) or "answer" (a plain-text response to a general question
-    about Moove/Archimedes - never touches SQL; the caller should just
-    display it)."""
+    "expression" (a validated comparison, safe to run against BigQuery),
+    "answer" (a plain-text response to a general question about
+    Moove/Archimedes - never touches SQL; the caller should just display
+    it), or "example" (a sample comparison for the caller to show as an
+    editable starting point - also never touches SQL/BigQuery; it's shown,
+    not run)."""
     if not text:
         return None, (jsonify({"error": "Enter a comparison, describe one in plain English, or ask a question about Moove or Archimedes."}), 400)
     try:
@@ -876,6 +878,8 @@ def quality_custom_test():
         return err
     if result.kind == "answer":
         return jsonify({"kind": "answer", "answer": result.answer, "source": result.source})
+    if result.kind == "example":
+        return jsonify({"kind": "example", "example": result.example, "explanation": result.explanation, "source": result.source})
     validated = result.expression
     try:
         metric = fetch_custom_metric(base, validated.sql)
@@ -912,6 +916,8 @@ def quality_custom_test_sample():
         return err
     if result.kind == "answer":
         return jsonify({"kind": "answer", "answer": result.answer, "source": result.source})
+    if result.kind == "example":
+        return jsonify({"kind": "example", "example": result.example, "explanation": result.explanation, "source": result.source})
     validated = result.expression
     try:
         rows = fetch_custom_sample(base, validated.sql, validated.magnitude_sql, PREVIEW_MAX_SEGMENTS)

@@ -132,7 +132,16 @@
     (used by the Quality page, `/agent`, and the hub's sample map alike)
     factors out that "pick the live default table, live-list every option"
     logic - don't re-duplicate it a fourth time if another page ever
-    needs a table picker.
+    needs a table picker. **`agent.html`'s card order is Ask Archimedes
+    first, Data source second** ("put 'Ask Archimedes' as the top thing to
+    do in the page" was explicit) - the opposite of the original build
+    order, where Data source came first since the box technically depends
+    on it. That dependency is fine either way: `_ask_archimedes.html`'s
+    own JS only touches `#table`/`#quality-filters-form` from inside
+    functions (`runCustomTest()` etc.), never at script-parse time, so
+    which card the browser lays out first doesn't matter - don't assume
+    the Data source card has to precede the include in the template just
+    because it's referenced by ID.
   - **`/deploy`** (`app.py`'s `deploy_info()`, `templates/deploy_info.html`)
     is a deliberately static reference page - real, already-documented
     facts (service name/project/region/bucket, the IAP access model, the
@@ -770,6 +779,42 @@
     question vs. the match-count/SQL/map controls for a comparison.
     Keep the background text factual and short if it's ever updated - it
     goes verbatim into the system prompt Gemini answers from.
+  - **A fourth `kind="example"` lets someone ask for a sample
+    comparison instead of typing their own** ("give me an example of a
+    query and feed that into the textbox as a template to start with" was
+    explicit) - typing "give me an example"/"show me a sample
+    query"/"I don't know what to type" classifies as `kind="example"`,
+    not `kind="unsupported"`. Gemini puts a realistic example in
+    `_ClassifiedResponse.example` (same column/operator rules as
+    `kind="expression"`, and told to vary which columns it picks across
+    requests rather than defaulting to the same one every time) plus a
+    one-sentence `explanation`. `resolve_custom_criterion()` still runs
+    that example through `validate_custom_expression()` as a sanity check
+    before trusting it - **but, unlike `kind="expression"`, returns the
+    original example text, not the re-serialized SQL** (`CustomTestResult.example`,
+    a new field alongside `.answer`) - the point is to show the user
+    something that reads like what they'd type themselves and can edit,
+    not parenthesized validator output; the validation call is purely a
+    "don't show Gemini's mistake" check, never executed either way. An
+    `"example"` is exactly as inert as an `"answer"`: **never passed
+    through to BigQuery, never auto-run** - `_ask_archimedes.html`'s JS
+    only ever *populates the text box* with it (`textEl.value =
+    data.example`, then focuses the box with the cursor at the end) so
+    the user still has to hit Run/Enter themselves, going through the
+    exact same validation a hand-typed comparison would.
+    `resolve_custom_criterion_as_expression()` (the Evaluator/Sign
+    Checker's box) rejects `kind="example"` the same way it already
+    rejects `kind="answer"` - a clear redirect message, since there's
+    nothing to select Street View candidates with for an example
+    request either.
+  - **The box runs on Enter, not just the "Run" button click** ("make it
+    respond to <CR> (execute)" was explicit) - a `keydown` listener on
+    `#custom-test-text` in `_ask_archimedes.html` calls the same
+    `runCustomTest()` on a plain Enter (`e.preventDefault()` first, so it
+    doesn't also insert a newline), while Shift+Enter still inserts one -
+    the same convention chat-style text boxes use, chosen because a
+    multi-line plain-English question or comparison is plausible here,
+    unlike a typical single-line search box.
   - **When Vertex AI credentials aren't configured, `resolve_custom_criterion()`'s
     error message leads with that reason, not the raw grammar-parse
     error.** A real user typed a plain-English question ("what is the

@@ -85,6 +85,17 @@
     document.getElementById('custom-test-map-message').style.display = 'none';
   }
 
+  // Enter runs the test/question (same as clicking "Run"); Shift+Enter
+  // still inserts a newline, same convention as chat-style text boxes -
+  // useful since a multi-line plain-English question/comparison is
+  // plausible here, unlike a single-line input.
+  document.getElementById('custom-test-text').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      runCustomTest();
+    }
+  });
+
   window.runCustomTest = function () {
     const btn = document.getElementById('custom-test-btn');
     const text = document.getElementById('custom-test-text').value.trim();
@@ -111,6 +122,16 @@
         }
         if (data.kind === 'answer') {
           document.getElementById('custom-test-answer-text').textContent = data.answer;
+          document.getElementById('custom-test-answer-block').style.display = 'block';
+          return;
+        }
+        if (data.kind === 'example') {
+          const textEl = document.getElementById('custom-test-text');
+          textEl.value = data.example || '';
+          textEl.focus();
+          textEl.setSelectionRange(textEl.value.length, textEl.value.length);
+          document.getElementById('custom-test-answer-text').textContent =
+            'Loaded an example below' + (data.explanation ? ' - ' + data.explanation : '') + '. Edit it and hit Run (or Enter) to try it.';
           document.getElementById('custom-test-answer-block').style.display = 'block';
           return;
         }

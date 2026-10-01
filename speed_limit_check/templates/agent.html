@@ -8,6 +8,8 @@
 {% block subtitle %}Ask Archimedes anything about Moove or this platform, or hand it a comparison to run{% endblock %}
 {% block content %}
 
+{% include "_ask_archimedes.html" %}
+
 <div class="card">
   <span class="eyebrow">Data source</span>
   <h3 style="margin:0 0 4px;">Which table a comparison runs against</h3>
@@ -24,8 +26,6 @@
     <p style="color:var(--err); font-size:0.82rem; margin:10px 0 0;">{{ error }}</p>
   {% endif %}
 </div>
-
-{% include "_ask_archimedes.html" %}
 
 <div class="card">
   <span class="eyebrow">More tools</span>

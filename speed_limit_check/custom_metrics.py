@@ -432,13 +432,14 @@ def validate_custom_expression(text: str, available_columns: set[str]) -> Valida
 # was a real reported bug (see resolve_custom_criterion's docstring).
 
 class _ClassifiedResponse(BaseModel):
-    kind: str  # "expression" | "answer" | "unsupported"
+    kind: str  # "expression" | "answer" | "example" | "unsupported"
     expression: Optional[str] = None  # set when kind == "expression"
-    explanation: Optional[str] = None  # set when kind == "expression"
+    explanation: Optional[str] = None  # set when kind == "expression" or "example"
     answer: Optional[str] = None  # set when kind == "answer" or "unsupported" (a reason)
+    example: Optional[str] = None  # set when kind == "example" - a sample Custom-test input, NOT pre-validated or run
 
 
-_TRANSLATE_SYSTEM_PROMPT = """You are the "Custom test" box on Moove's Archimedes data-quality tool. Someone typed the text below into it. Decide which of three things it is, and respond with exactly one of these (set `kind` accordingly):
+_TRANSLATE_SYSTEM_PROMPT = """You are the "Custom test" box on Moove's Archimedes data-quality tool. Someone typed the text below into it. Decide which of four things it is, and respond with exactly one of these (set `kind` accordingly):
 
 1. kind="expression" - if it describes a data-quality comparison/test to run over the speed-limit segment data. Translate it into a single BigQuery boolean comparison expression and put it in `expression`, with a one-sentence summary in `explanation`. Rules for the expression - it MUST follow ALL of these or it will be rejected by a validator that runs after you:
    - Use ONLY these column names, exactly as spelled (case-sensitive): {columns}
@@ -448,7 +449,9 @@ _TRANSLATE_SYSTEM_PROMPT = """You are the "Custom test" box on Moove's Archimede
 
 2. kind="answer" - if it's a general question about Moove (the company) or about Archimedes (this tool) rather than a request to run a comparison - e.g. "what is Moove?", "what does this tool do?", "who can I ask about the Evaluator's cost cap?". Answer it directly and helpfully in 1-4 sentences in `answer`, using only the background info below - don't invent facts about Moove or Archimedes beyond what's given here.
 
-3. kind="unsupported" - if it's neither of the above (gibberish, or a genuine question you can't answer from the background info, or asks for something this box can't do). Put a brief, friendly reason in `answer`.
+3. kind="example" - if it's a request for an example/template comparison to try, rather than a specific comparison to run right now - e.g. "give me an example", "show me a sample query", "what's a good test to run?", "I don't know what to type". Put a realistic, useful example in `example`, following the EXACT SAME rules as kind="expression" above (same column names, same operators, nothing else) - it will be shown to the user as an editable starting point in the text box, not run automatically. Put a one-sentence summary of what it checks in `explanation`. Vary which columns/comparison you pick across requests rather than always the same one.
+
+4. kind="unsupported" - if it's neither of the above (gibberish, or a genuine question you can't answer from the background info, or asks for something this box can't do). Put a brief, friendly reason in `answer`.
 
 Background info to answer from (kind="answer" only):
 
@@ -528,11 +531,12 @@ def classify_custom_test_text(
 
 @dataclasses.dataclass
 class CustomTestResult:
-    kind: str  # "expression" | "answer"
+    kind: str  # "expression" | "answer" | "example"
     expression: Optional[ValidatedExpression] = None  # set when kind == "expression"
     answer: Optional[str] = None  # set when kind == "answer" - plain text, never touches SQL
+    example: Optional[str] = None  # set when kind == "example" - raw text for the box, NOT executed
     source: str = "direct"  # "direct" | "llm"
-    explanation: Optional[str] = None  # Gemini's one-line summary, only set for an "expression" from "llm"
+    explanation: Optional[str] = None  # Gemini's one-line summary, only set for an "expression"/"example" from "llm"
 
 
 def resolve_custom_criterion(
@@ -582,6 +586,20 @@ def resolve_custom_criterion(
                     f"Gemini's translation ({expression!r}) wasn't a valid/safe comparison: {validated_error}"
                 ) from validated_error
             return CustomTestResult(kind="expression", expression=validated, source="llm", explanation=classified.explanation)
+        if classified.kind == "example":
+            example = classified.example or ""
+            try:
+                # Sanity-check the example is actually valid/safe before
+                # showing it, same as a translated "expression" - but
+                # return the original text (not the re-serialized SQL) so
+                # the box shows something that reads like what a person
+                # would type, not parenthesized output. An unusable
+                # example from Gemini is Gemini's mistake, not the user's,
+                # so this doesn't get the "direct_error" framing below.
+                validate_custom_expression(example, available_columns)
+            except ExpressionError as validated_error:
+                raise ExpressionError(f"Gemini's example ({example!r}) wasn't usable: {validated_error}") from validated_error
+            return CustomTestResult(kind="example", example=example, source="llm", explanation=classified.explanation)
         # kind == "unsupported", or anything else unexpected
         raise ExpressionError(classified.answer or f"Couldn't parse that as a comparison ({direct_error}).")
 
@@ -603,6 +621,12 @@ def resolve_custom_criterion_as_expression(
         raise ExpressionError(
             "That looks like a question, not a comparison - this box needs an actual test to select segments "
             "with (e.g. 'speed_AVG_mph > 60'). Ask questions on the Speed-Limits Quality page's Custom test box instead."
+        )
+    if result.kind == "example":
+        raise ExpressionError(
+            "That looks like a request for an example, not a comparison to run here - this box needs an actual "
+            "test to select segments with (e.g. 'speed_AVG_mph > 60'). Ask for an example on the Agent or "
+            "Speed-Limits Quality page's Custom test box instead."
         )
     assert result.expression is not None
     return result.expression, result.source, result.explanation
