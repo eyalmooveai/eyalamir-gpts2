@@ -779,6 +779,84 @@
     question vs. the match-count/SQL/map controls for a comparison.
     Keep the background text factual and short if it's ever updated - it
     goes verbatim into the system prompt Gemini answers from.
+  - **An `"answer"` gets a second, optional enrichment pass grounded in
+    live Google Drive search**, not just the fixed background text above.
+    ("use all the information in my GDrive to answer questions about
+    Archimedes" - and, once a first look showed the relevant Drive
+    folders are large multi-level trees (not a handful of docs) and a
+    narrower "fold a few specific docs into the fixed background text"
+    alternative was offered, explicitly: "I actually want everything -
+    build real search, not a static blob".) **Read `drive_search.py`'s
+    own module docstring first** - the scope boundary it describes (not
+    a hardcoded folder-ID list, not a recursive tree walk) is a
+    deliberate design decision, not an oversight. Shape of the flow:
+    `classify_custom_test_text()` (above) still runs first and produces
+    a usable `kind="answer"` from the fixed background text alone, same
+    as before - `resolve_custom_criterion()` then tries to do *better*,
+    calling `drive_search.search_drive(text)` and, if it finds anything,
+    a second Gemini call (`custom_metrics.answer_with_drive_context()`,
+    through the same shared `gemini_client.py` helper) that prefers the
+    Drive excerpts over the generic background text when they're
+    specific and relevant. **Every failure mode falls back to the
+    already-produced background-text answer, never fails the whole
+    request**: no Drive results, `DriveNotConfigured` (ADC/scope/API
+    issue), or the follow-up Gemini call itself failing all just keep
+    the original answer - Drive grounding is strictly an enrichment,
+    confirmed by `test_drive_grounded_answer.py`'s CASE 2-4 pattern of
+    "the fallback path still returns 200, not an error".
+    - **Scope is "whatever the service account can see," not a
+      hardcoded list of 3 folders.** Drive's own full-text search
+      (`files.list(q="fullText contains '...'")`) already only returns
+      files the calling identity has access to - so once the service
+      account (`speed-limit-check-runner@...`) is shared as a Viewer on
+      a folder (Data Science/Development/Product, as of this writing -
+      a one-time manual step in Drive's own UI, since Drive sharing is
+      a Workspace permission, not a GCP IAM role `deploy.sh` can grant),
+      everything under it becomes searchable automatically, no code
+      change needed - and the same is true if it's ever shared on
+      *more* folders later. Don't "fix" this by hardcoding the 3 current
+      folder IDs into a query filter; that would silently stop tracking
+      reality the moment sharing changes.
+    - **Text extraction is real, by file type, not Drive's search-result
+      snippet alone** - Google-native Docs/Slides/Sheets go through
+      Drive's own `files.export(mimeType="text/plain")` (no parsing
+      library needed, Drive converts server-side); uploaded `.docx`/
+      `.pptx` are downloaded (`files.get_media` +
+      `MediaIoBaseDownload`) and parsed with `python-docx`/`python-pptx`
+      - added specifically because a real look at the "Archimedes"
+      subfolder under Data Science found exactly these two formats
+      (3 `.pptx` plan decks + 1 `.docx` platform plan, zero
+      Google-native files) - supporting only native export would have
+      extracted nothing from the single most relevant folder. **PDFs
+      are a known, documented gap, not a silent one** - `_fetch_snippet()`
+      just returns an empty string for a PDF today (the file's
+      title/link still show up as a result, just with no body text fed
+      to Gemini); add a PDF text-extraction library there if that turns
+      out to matter rather than reaching for it preemptively.
+    - **Sources are shown, not just used** - `search_drive()`'s results
+      (title + `webViewLink`) are threaded all the way through
+      (`CustomTestResult.sources` -> both `/speed-limits/custom-test(/sample)`
+      JSON responses' `"sources"` field -> `_ask_archimedes.html`'s
+      `#custom-test-answer-sources`, rendered as clickable links under
+      the answer) specifically so a reader can verify/open the actual
+      doc an answer came from, not just trust a possibly-stale summary.
+      `sources` is `None`/absent whenever Drive grounding didn't
+      actually change anything (no results, or any fallback case above)
+      - don't show a "Sources:" line for the plain background-text
+      answer, that would misattribute it.
+    - `requirements.txt` needs `google-api-python-client` (the Drive v3
+      client), `python-docx`, and `python-pptx` for this - verified
+      against the actually-installed versions (2.x discovery client,
+      python-docx 1.x, python-pptx 1.0.2) by round-tripping real
+      in-memory `.docx`/`.pptx` files through the extraction functions,
+      not assumed from memory, same discipline this file already
+      documents for `google-genai`. `Dockerfile`'s `COPY` line needs
+      `drive_search.py` - same "don't forget the new module" mistake
+      this file already warns about more than once above. `deploy.sh`
+      enables `drive.googleapis.com` but - deliberately - grants no new
+      IAM role for it, since there isn't one to grant; see that script's
+      own header comment for the one manual Drive-sharing step this
+      still needs.
   - **A fourth `kind="example"` lets someone ask for a sample
     comparison instead of typing their own** ("give me an example of a
     query and feed that into the textbox as a template to start with" was

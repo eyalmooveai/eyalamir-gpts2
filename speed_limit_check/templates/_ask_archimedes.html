@@ -30,6 +30,7 @@
 
     <div id="custom-test-answer-block" style="display:none;">
       <div class="answer-block" id="custom-test-answer-text"></div>
+      <p id="custom-test-answer-sources" style="color:var(--muted); font-size:0.78rem; margin:8px 0 0; display:none;"></p>
     </div>
 
     <div id="custom-test-comparison-block" style="display:none;">
@@ -113,6 +114,7 @@
     document.getElementById('custom-test-sql-results-block').style.display = 'none';
     document.getElementById('custom-test-sql-error-block').style.display = 'none';
     document.getElementById('custom-test-sql-fix-block').style.display = 'none';
+    document.getElementById('custom-test-answer-sources').style.display = 'none';
   }
 
   function sqlCostLabel(gb, costUsd) {
@@ -184,6 +186,12 @@
         if (data.kind === 'answer') {
           document.getElementById('custom-test-answer-text').textContent = data.answer;
           document.getElementById('custom-test-answer-block').style.display = 'block';
+          const sourcesEl = document.getElementById('custom-test-answer-sources');
+          if (data.sources && data.sources.length) {
+            const links = data.sources.map(s => `<a href="${s.url}" target="_blank" rel="noopener">${escapeHtml(s.title)}</a>`).join(', ');
+            sourcesEl.innerHTML = 'Sources: ' + links;
+            sourcesEl.style.display = 'block';
+          }
           return;
         }
         if (data.kind === 'example') {

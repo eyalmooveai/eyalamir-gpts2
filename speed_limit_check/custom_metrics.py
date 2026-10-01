@@ -482,6 +482,59 @@ def classify_custom_test_text(
     return parsed
 
 
+# --- Drive-grounded answers (general Q&A enrichment) --------------------
+#
+# classify_custom_test_text() above already produces a usable answer from
+# the fixed _MOOVE_BACKGROUND/_ARCHIMEDES_BACKGROUND text alone - this is
+# a SECOND, optional step, only for kind="answer" results, that tries to
+# do better by grounding the answer in live Google Drive search results
+# (drive_search.py) instead. "Use all the information in my GDrive to
+# answer questions about Archimedes" was explicit, and "I actually want
+# everything - build real search, not a static blob" ruled out just
+# folding a few docs into the fixed background text the way
+# _ARCHIMEDES_BACKGROUND itself was built. If Drive search is unavailable
+# (DriveNotConfigured) or turns up nothing relevant, callers fall back to
+# the plain classify_custom_test_text() answer - this is strictly an
+# enrichment, never the only path to an answer.
+
+class _DriveAnswer(BaseModel):
+    answer: str
+
+
+_DRIVE_ANSWER_SYSTEM_PROMPT = """You are Archimedes, Moove's internal Q&A assistant, answering a question about Moove or about Archimedes itself. You'll be given the question and relevant excerpts from Moove's internal Google Drive documents - prefer them over the general background below whenever they're relevant and specific, since they reflect the real, current state of things in a way the fixed background text below can't. If the Drive excerpts don't actually answer the question, fall back to the general background, or say plainly that you don't have enough information - never invent facts either way. Answer in 1-4 sentences.
+
+General background about Moove:
+{moove_background}
+
+General background about Archimedes:
+{archimedes_background}
+
+Relevant Google Drive documents:
+{drive_context}
+
+Output ONLY the structured fields - nothing else."""
+
+
+def answer_with_drive_context(question: str, drive_results: list, project: str) -> str:
+    """Raises whatever gemini_client.call_structured() raises
+    (CredentialsNotConfigured/RuntimeError) - callers should catch that
+    and fall back to the plain classify_custom_test_text() answer rather
+    than fail the whole request over an enrichment step."""
+    if drive_results:
+        drive_context = "\n\n".join(f"### {r.title}\n{r.snippet or '(no readable text extracted - title/link only)'}" for r in drive_results)
+    else:
+        drive_context = "(no relevant documents found)"
+    parsed = _call_gemini_structured(
+        system_instruction=_DRIVE_ANSWER_SYSTEM_PROMPT.format(
+            moove_background=_MOOVE_BACKGROUND, archimedes_background=_ARCHIMEDES_BACKGROUND, drive_context=drive_context,
+        ),
+        user_text=question,
+        response_schema=_DriveAnswer,
+        project=project,
+    )
+    return parsed.answer
+
+
 @dataclasses.dataclass
 class CustomTestResult:
     kind: str  # "expression" | "answer" | "example"
@@ -490,6 +543,7 @@ class CustomTestResult:
     example: Optional[str] = None  # set when kind == "example" - raw text for the box, NOT executed
     source: str = "direct"  # "direct" | "llm"
     explanation: Optional[str] = None  # Gemini's one-line summary, only set for an "expression"/"example" from "llm"
+    sources: Optional[list[dict]] = None  # set when kind == "answer" and Drive grounding found something - [{"title": ..., "url": ...}, ...]
 
 
 def resolve_custom_criterion(
@@ -529,7 +583,22 @@ def resolve_custom_criterion(
             raise ExpressionError(f"Couldn't parse that as a direct comparison ({direct_error}), and Gemini couldn't help: {llm_error}") from llm_error
 
         if classified.kind == "answer":
-            return CustomTestResult(kind="answer", answer=classified.answer or "(no answer)", source="llm")
+            answer = classified.answer or "(no answer)"
+            sources = None
+            try:
+                import drive_search
+                drive_results = drive_search.search_drive(text)
+                if drive_results:
+                    answer = answer_with_drive_context(text, drive_results, project)
+                    sources = [{"title": r.title, "url": r.web_view_link} for r in drive_results if r.web_view_link]
+            except Exception as e:
+                # Drive search/grounding is strictly an enrichment - any
+                # failure (not configured, API error, Gemini unavailable
+                # for the follow-up call, ...) just falls back to the
+                # plain background-text answer already produced above,
+                # never fails the whole request over it.
+                log(f"Drive-grounded answer unavailable, using background-text answer instead: {e}")
+            return CustomTestResult(kind="answer", answer=answer, source="llm", sources=sources)
         if classified.kind == "expression":
             expression = classified.expression or ""
             try:

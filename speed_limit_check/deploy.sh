@@ -50,6 +50,17 @@
 # below, and needs to be made once, separately, by someone with IAM admin
 # rights - the box still works for direct expressions without it either
 # way, same as any other missing grant here.
+#
+# That same box's general-Q&A answers are also grounded in live Google
+# Drive search (drive_search.py) - this script enables
+# drive.googleapis.com, but there's no IAM grant for it here: Drive
+# sharing is a Workspace-level permission, not a GCP IAM role. The
+# runtime service account (speed-limit-check-runner@...) needs to be
+# shared as a Viewer on whichever Drive folders should be searchable -
+# a one-time manual step in Drive's own sharing UI, same as sharing a
+# folder with any other person. Without that share, Drive search just
+# degrades to DriveNotConfigured and the box falls back to its static
+# background-text answer - not a hard failure, see custom_metrics.py.
 
 set -euo pipefail
 
@@ -87,7 +98,8 @@ gcloud services enable \
   secretmanager.googleapis.com \
   bigquery.googleapis.com \
   vision.googleapis.com \
-  aiplatform.googleapis.com
+  aiplatform.googleapis.com \
+  drive.googleapis.com
 
 echo "-- GCS cache bucket --"
 if gcloud storage buckets describe "gs://$BUCKET_NAME" >/dev/null 2>&1; then

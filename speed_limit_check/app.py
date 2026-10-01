@@ -915,7 +915,7 @@ def quality_custom_test():
     if err:
         return err
     if result.kind == "answer":
-        return jsonify({"kind": "answer", "answer": result.answer, "source": result.source})
+        return jsonify({"kind": "answer", "answer": result.answer, "source": result.source, "sources": result.sources})
     if result.kind == "example":
         return jsonify({"kind": "example", "example": result.example, "explanation": result.explanation, "source": result.source})
     validated = result.expression
@@ -953,7 +953,7 @@ def quality_custom_test_sample():
     if err:
         return err
     if result.kind == "answer":
-        return jsonify({"kind": "answer", "answer": result.answer, "source": result.source})
+        return jsonify({"kind": "answer", "answer": result.answer, "source": result.source, "sources": result.sources})
     if result.kind == "example":
         return jsonify({"kind": "example", "example": result.example, "explanation": result.explanation, "source": result.source})
     validated = result.expression
