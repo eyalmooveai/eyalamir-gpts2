@@ -79,6 +79,7 @@ from quality_metrics import (
     missing_columns_report,
 )
 from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_custom_criterion_as_expression
+from bq_sql_console import run_sql_console, sql_statement_kind
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -829,6 +830,40 @@ def quality_sample_mismatches():
     })
 
 
+def _sql_console_response(text: str):
+    """If `text` looks like a real SQL statement (SELECT/WITH/CALL, not
+    the narrow single-comparison grammar custom_metrics.py validates -
+    see bq_sql_console.sql_statement_kind()), handles it on that
+    module's own track (dry-run cost estimate, $10 reconfirmation gate,
+    privileged-only CALL, Gemini fix advice on a malformed query) and
+    returns the jsonify()'d response. Returns None if `text` doesn't look
+    like SQL at all, so the caller falls through to the normal
+    comparison/answer/example path - this check has to run BEFORE that
+    path, not after, since a real "SELECT ... FROM ..." would otherwise
+    just fail validate_custom_expression() with a confusing "Unknown
+    column 'SELECT'" instead of ever reaching here."""
+    kind = sql_statement_kind(text)
+    if kind is None:
+        return None
+    confirmed = request.form.get("confirmed", "").strip().lower() in ("1", "true", "yes")
+    result = run_sql_console(text, DEFAULT_PROJECT, _requester_email(), confirmed, log=print)
+    if result.kind == "error":
+        return jsonify({
+            "kind": "sql_error", "error": result.bq_error,
+            "fix_explanation": result.fix_explanation, "fix_suggested_sql": result.fix_suggested_sql,
+        }), 400
+    if result.kind == "cost_estimate":
+        return jsonify({
+            "kind": "sql_cost_estimate", "statement_kind": result.statement_kind,
+            "gb": result.gb, "cost_usd": result.cost_usd,
+        })
+    return jsonify({
+        "kind": "sql_results", "statement_kind": result.statement_kind,
+        "gb": result.gb, "cost_usd": result.cost_usd,
+        "columns": result.columns, "rows": result.rows, "truncated": result.truncated,
+    })
+
+
 def _validate_quality_custom_text(text: str, base: QualityFilters):
     """Returns (CustomTestResult, None) on success or (None, (response,
     status)) on failure - shared by both "Custom test" endpoints below,
@@ -870,6 +905,9 @@ def quality_custom_test():
     COUNT/SUM aggregate, not the nationwide six-metric query the rest of
     this page runs."""
     text = request.form.get("text", "").strip()
+    sql_response = _sql_console_response(text)
+    if sql_response is not None:
+        return sql_response
     base, err = _quality_filters_from_args(request.form, require_infer_field=False)
     if err:
         return err

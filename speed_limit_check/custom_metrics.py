@@ -50,6 +50,11 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from gemini_client import CredentialsNotConfigured as _CredentialsNotConfigured
+from gemini_client import GEMINI_LOCATION as _GEMINI_LOCATION
+from gemini_client import GEMINI_MODEL as _GEMINI_MODEL
+from gemini_client import call_structured as _call_gemini_structured
+
 # Real numeric/boolean columns from the calc_out.speed_limits_* /
 # archimedes_api.speed_limits_infer* schemas (confirmed live) that make
 # sense in a comparison - deliberately excludes here_segment_id/
@@ -106,22 +111,8 @@ _FUNCS = ("ABS", "ROUND")
 _COMPARISON_OPS = ("<=", ">=", "==", "!=", "<", ">", "=")
 _MAX_EXPRESSION_LENGTH = 500
 
-# Vertex AI project/location/model for the natural-language translation +
-# Q&A below. _GEMINI_LOCATION must be a region Vertex AI Gemini is
-# actually available in - "us-central1" is, and it also matches this
-# app's own Cloud Run REGION (deploy.sh), which is a coincidence worth
-# preserving rather than a requirement (the two don't have to match, but
-# keeping them the same avoids a second region to reason about). Chose
-# gemini-2.5-flash, not -pro, deliberately: this is a narrow
-# classification/translation task (pick one of 3 kinds, translate into a
-# tiny fixed grammar, or answer from a short fixed background text), not
-# something needing Pro-tier reasoning, and flash is cheaper and lets
-# thinking be fully disabled (thinking_budget=0 below) - Pro can't
-# disable thinking entirely, which risks the visible-JSON-output budget
-# being silently eaten by invisible thinking tokens on a task that here
-# doesn't benefit from thinking at all.
-_GEMINI_LOCATION = "us-central1"
-_GEMINI_MODEL = "gemini-2.5-flash"
+# Vertex AI location/model/Client mechanics live in gemini_client.py now
+# (shared with bq_sql_console.py) - imported at the top of this file.
 
 _TOKEN_RE = re.compile(
     r"""\s*(?:
@@ -464,13 +455,6 @@ About Archimedes:
 Output ONLY the structured fields - nothing else."""
 
 
-class _CredentialsNotConfigured(RuntimeError):
-    """Vertex AI Application Default Credentials aren't available here -
-    distinguished from other RuntimeErrors so resolve_custom_criterion()
-    can lead with this reason instead of trailing it after a confusing
-    grammar-parse error (see that function's docstring)."""
-
-
 def classify_custom_test_text(
     user_text: str, available_columns: set[str], project: str, location: str = _GEMINI_LOCATION, log=lambda msg: None,
 ) -> _ClassifiedResponse:
@@ -484,47 +468,16 @@ def classify_custom_test_text(
     up (e.g. local dev without `gcloud auth application-default login`),
     or RuntimeError on any other API failure (rate limit, network,
     malformed output, ...) - both messages are safe to show the user."""
-    from google import genai
-    from google.genai import errors as genai_errors
-    from google.genai import types
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError
-
     columns_desc = ", ".join(sorted(available_columns & set(COLUMN_TYPES)))
-    try:
-        client = genai.Client(vertexai=True, project=project, location=location)
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=user_text,
-            config=types.GenerateContentConfig(
-                system_instruction=_TRANSLATE_SYSTEM_PROMPT.format(
-                    columns=columns_desc, moove_background=_MOOVE_BACKGROUND, archimedes_background=_ARCHIMEDES_BACKGROUND,
-                ),
-                response_mime_type="application/json",
-                response_schema=_ClassifiedResponse,
-                max_output_tokens=2048,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-    except (DefaultCredentialsError, RefreshError) as e:
-        raise _CredentialsNotConfigured(
-            "Vertex AI credentials aren't configured here"
-        ) from e
-    except genai_errors.APIError as e:
-        if e.code == 429:
-            raise RuntimeError("Gemini API rate limit hit - try again in a moment, or write the comparison directly.") from e
-        raise RuntimeError(f"Gemini API error: {e}") from e
-
-    parsed = response.parsed
-    if parsed is None:
-        # response_schema validation failed silently (see google-genai's
-        # GenerateContentResponse._from_response) rather than raising -
-        # surfaced here as the one place that actually checks.
-        finish_reason = None
-        if response.candidates:
-            finish_reason = response.candidates[0].finish_reason
-        if finish_reason == types.FinishReason.MAX_TOKENS:
-            raise RuntimeError("Gemini's response was cut off before finishing (hit its output-token limit) - try rephrasing more concisely.")
-        raise RuntimeError("Gemini didn't return valid structured output for that - try rephrasing.")
+    parsed = _call_gemini_structured(
+        system_instruction=_TRANSLATE_SYSTEM_PROMPT.format(
+            columns=columns_desc, moove_background=_MOOVE_BACKGROUND, archimedes_background=_ARCHIMEDES_BACKGROUND,
+        ),
+        user_text=user_text,
+        response_schema=_ClassifiedResponse,
+        project=project,
+        location=location,
+    )
     log(f"Gemini classified {user_text!r} -> kind={parsed.kind!r}")
     return parsed
 

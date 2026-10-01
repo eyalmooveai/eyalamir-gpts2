@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY find_bad_speed_limit.py quality_metrics.py bq_cache.py batch_evaluator.py custom_metrics.py app.py ./
+COPY find_bad_speed_limit.py quality_metrics.py bq_cache.py batch_evaluator.py custom_metrics.py gemini_client.py bq_sql_console.py app.py ./
 COPY templates/ templates/
 COPY static/ static/
 

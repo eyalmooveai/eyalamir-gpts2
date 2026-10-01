@@ -838,6 +838,144 @@
     plain `RuntimeError` without re-reading the bug report in this file's
     git history first - that's what the distinction is *for*.
 
+- **The Custom test box also runs real SQL - a SEPARATE module
+  (`bq_sql_console.py`), a SEPARATE trust model, never the narrow-grammar
+  path.** ("check if this is a SQL query and do what's needed with it...
+  check if it is malformed and advise on how to fix it given tables and
+  their schemas in BQ and the procedures that one can run (CALL) in BQ",
+  plus "always estimate the amount of GBs and money that a BQ query will
+  take... if the estimate passes $10, ask the user for permission again"
+  - both explicit.) **Read `bq_sql_console.py`'s own module docstring
+  before touching this** - it exists specifically to keep this feature's
+  trust model from being confused with `custom_metrics.py`'s: that module
+  protects against untrusted/ambiguous text becoming SQL the person
+  didn't intend (re-serialized from a validated parse tree, never the
+  original text); this one is for someone who has explicitly written
+  real SQL they intend to run themselves, where the open questions are
+  authorization and cost, not injection. Never route narrow-comparison
+  text through this module, and never loosen `custom_metrics.py`'s own
+  grammar on the theory that "well, we run real SQL elsewhere now" - the
+  two are deliberately different code paths for a reason.
+  - **Routing**: `app.py`'s `_sql_console_response(text)` runs BEFORE
+    `_validate_quality_custom_text()` on both `/speed-limits/custom-test`
+    routes (the sample/map endpoint never needed it - see below) -
+    `bq_sql_console.sql_statement_kind(text)` is a plain "what's the
+    first keyword" check (SELECT/WITH -> "select", CALL -> "call", else
+    `None`), not a parser, and deliberately not a safety boundary (see
+    the module docstring) - it only decides which of the two completely
+    different downstream paths handles this text. This has to run first:
+    a real `SELECT ... FROM ...` would otherwise reach
+    `validate_custom_expression()` and fail with a confusing "Unknown
+    column 'SELECT'" instead of ever reaching the SQL console.
+    `/speed-limits/custom-test/sample` (the "show on a map" button)
+    deliberately does NOT get this routing - that button only ever
+    appears for `kind="expression"` results (never for `sql_results`/
+    `sql_cost_estimate`/`sql_error`), so raw SQL text can never reach it
+    through the normal UI flow; a raw `curl` POST of SQL text to that
+    endpoint still degrades harmlessly through the old comparison/Gemini
+    path (fails clearly, doesn't crash) since there's no sensible "plot
+    an arbitrary result set on a segment map" behavior to build for it.
+  - **Cost estimate before every execution, via a free BigQuery dry run**
+    (`bq_sql_console.estimate_query_cost()` - `bigquery.QueryJobConfig(
+    dry_run=True, use_query_cache=False)`, which validates the SQL and
+    reports `total_bytes_processed` without running or billing anything).
+    `BQ_ON_DEMAND_PRICE_PER_TIB_USD = 6.25` is BigQuery's on-demand price
+    at the time this was written, hardcoded since this app makes no live
+    pricing-API call to keep it honest automatically - re-verify against
+    the real BigQuery pricing page before trusting it if it's been a
+    while, same caution this file already gives `BQ_ON_DEMAND_PRICE_PER_TIB_USD`'s
+    own comment. Above `COST_CONFIRMATION_THRESHOLD_USD` (10.0, the
+    user's own number), `run_sql_console()` returns `kind="cost_estimate"`
+    (gb/cost_usd, no query run yet) instead of executing - the frontend
+    (`_ask_archimedes.html`) shows it as a `.badge.warn` with a "Yes, run
+    it" button that resubmits the *same* text with a `confirmed=1` form
+    field; `app.py`'s `_sql_console_response()` reads that into
+    `run_sql_console(..., confirmed=...)`. A cheap query (at/under the
+    threshold) just runs immediately on the first submit - no needless
+    extra click for something that was never going to cost real money.
+  - **`CALL` (stored procedures) is a SEPARATE gate from cost, and
+    stricter**: `PRIVILEGED_SQL_USERS` is a hardcoded allowlist (`{"eyal@moove.ai",
+    "justin@moove.ai"}` as of this writing) checked via the same
+    `_requester_email()`/IAP-header identity every other per-user
+    feature in this app already uses (the Evaluator's daily cost cap,
+    "who ran it") - checked FIRST, before any BigQuery call at all, so a
+    non-privileged user's CALL attempt never even reaches a dry run.
+    Hardcoded rather than an env var/config file deliberately: who can
+    run a procedure that might mutate production data is a rare,
+    consequential decision that should show up as a reviewed code
+    change, not a silent config edit. **A privileged user's CALL still
+    always needs the confirmation click, regardless of estimated cost**
+    (`needs_confirmation = kind == "call" or estimate.cost_usd >
+    COST_CONFIRMATION_THRESHOLD_USD`) - the real risk of CALL isn't
+    billing, it's side effects (arbitrary procedural SQL, potentially
+    including DML), so a $0.001 CALL still gets the same "are you sure"
+    step a $50 SELECT would. Don't ever make CALL skip confirmation on
+    the theory that a cheap dry run implies it's safe - cost and safety
+    are unrelated for a procedure.
+  - **Whole-project schema discovery for Gemini's fix advice** - the
+    explicit ask was "given tables and their schemas in BQ and the
+    procedures that one can run (CALL) in BQ", scoped (per the
+    conversation that decided this) to literally every dataset/table/
+    procedure the project has, not just this app's own `calc_out`/
+    `archimedes_api` tables the rest of Archimedes already knows about.
+    `fetch_project_schema_summary()` loops `client.list_datasets()` and
+    runs two `INFORMATION_SCHEMA` metadata queries per dataset (COLUMNS,
+    ROUTINES filtered to `routine_type = 'PROCEDURE'`) - metadata-only,
+    so free/cheap regardless of table size, but still TTL-cached
+    (`SCHEMA_CACHE_TTL_SECONDS`, same pattern `quality_metrics.py`
+    already uses for its own narrower schema lookups) since it's still a
+    real loop of synchronous BigQuery calls, and capped at
+    `_MAX_SCHEMA_TEXT_CHARS` so a project with many datasets can't blow
+    up the Gemini prompt - truncated with a visible note, never silently.
+    Deliberately a per-dataset loop, not a single project/region-level
+    `` `region-us`.INFORMATION_SCHEMA `` query, even though BigQuery
+    supports the latter - the loop form works regardless of which
+    region(s) this project's datasets actually live in, which wasn't
+    worth assuming correctly on the first try. Only called on the error
+    path (a malformed query), never on a successful one - a normal
+    SELECT/WITH/CALL never pays for a schema fetch.
+  - **Fix advice is Gemini, via the same `gemini_client.py` helper
+    `custom_metrics.py` uses** (factored out of `custom_metrics.py`'s
+    former `classify_custom_test_text()` into its own module specifically
+    because this feature needed the identical Vertex AI Client/
+    structured-output/credentials-and-rate-limit-error mechanics a
+    second time - see `gemini_client.py`'s own module docstring for why
+    duplicating it instead would have been exactly the kind of drift this
+    file warns against elsewhere). `suggest_sql_fix()` sends the failed
+    SQL, BigQuery's own error text, and the project schema summary above
+    to Gemini, asking for a 1-3 sentence explanation plus an optional
+    `suggested_sql` - **never validated or auto-run**, exactly like an
+    "example" (see above): `_ask_archimedes.html`'s "Use this suggestion"
+    button only loads it into the text box, same as the example-kind
+    flow, so it still goes through a real cost estimate (and the
+    confirmation gate, if it crosses the threshold) when the user
+    actually submits it. If Gemini itself isn't available (no ADC, rate
+    limited, ...), `run_sql_console()` still returns the raw BigQuery
+    error on its own (`_error_with_fix_advice()` catches that separately
+    and degrades to `fix_explanation=None`) - a missing LLM should never
+    turn a real, actionable BigQuery error into a blank screen.
+  - **Results rendering is a generic table, not the narrow comparison
+    path's match-count/map UI** - a raw SELECT/WITH can return any shape
+    of result, so `_ask_archimedes.html` builds a plain `<table>` from
+    `columns`/`rows` at request time (`renderSqlResultsTable()`), reusing
+    this app's existing bare `table`/`td`/`th` CSS in `layout.html`
+    rather than inventing a new table style. `MAX_RESULT_ROWS` (500) caps
+    what's fetched/returned independently of `quality_metrics.PREVIEW_MAX_SEGMENTS`
+    (300, the narrow path's own "sample points on a map" cap) - different
+    caps for a different kind of result, not something that should be
+    unified just because the numbers are similar. BigQuery row values
+    (date/datetime/Decimal/bytes, ...) aren't directly JSON-serializable
+    by Flask's `jsonify()` - `bq_sql_console._json_safe()` stringifies
+    anything that isn't already a JSON-primitive before the route ever
+    calls `jsonify()`, since this module is the one that actually knows
+    these are BigQuery values; don't push that conversion up into `app.py`.
+  - `requirements.txt` needs nothing new for this (`google-cloud-bigquery`
+    already pulls in `google-api-core`, whose `GoogleAPICallError`/
+    `BadRequest` this module catches) - but `Dockerfile`'s `COPY` line
+    needs both new modules, `gemini_client.py` and `bq_sql_console.py` -
+    same "don't forget the new module" mistake this file already warns
+    about more than once above.
+
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo
   is checked out at `~/Claude/MooveAI/eyalamir-gpts2/`, with

@@ -55,6 +55,30 @@
       <div id="custom-test-map" style="height:440px; border-radius:8px; border:1px solid var(--border); margin-top:10px; display:none;"></div>
     </div>
 
+    <div id="custom-test-sql-cost-block" style="display:none;">
+      <p id="custom-test-sql-cost-text" class="badge warn" style="display:inline-block;"></p>
+      <p style="margin:8px 0 0;">
+        <button type="button" class="btn-secondary" id="custom-test-sql-confirm-btn" onclick="runCustomTest(true)">Yes, run it</button>
+      </p>
+    </div>
+
+    <div id="custom-test-sql-results-block" style="display:none;">
+      <p id="custom-test-sql-cost-note" style="color:var(--muted); font-size:0.78rem; margin:0 0 8px;"></p>
+      <div style="overflow-x:auto; max-height:420px; overflow-y:auto;">
+        <table id="custom-test-sql-results-table"></table>
+      </div>
+      <p id="custom-test-sql-truncated-note" style="color:var(--muted); font-size:0.78rem; margin:8px 0 0; display:none;"></p>
+    </div>
+
+    <div id="custom-test-sql-error-block" style="display:none;">
+      <p id="custom-test-sql-error-text" class="badge err" style="display:inline-block;"></p>
+      <div id="custom-test-sql-fix-block" style="margin-top:8px; display:none;">
+        <p id="custom-test-sql-fix-explanation" style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;"></p>
+        <pre id="custom-test-sql-fix-suggestion" class="log" style="font-size:0.78rem; display:none;"></pre>
+        <button type="button" class="btn-secondary" id="custom-test-sql-fix-btn" style="display:none;" onclick="useSqlFixSuggestion()">Use this suggestion</button>
+      </div>
+    </div>
+
     <p id="custom-test-error" class="badge err" style="display:none;"></p>
   </div>
 </div>
@@ -67,13 +91,15 @@
 
   let lastCustomTestSql = null;
   let lastCustomTestText = '';
+  let lastSqlFixSuggestion = null;
   let customMap = null;
   let customLayer = null;
 
-  function customTestFormData() {
+  function customTestFormData(confirmed) {
     const form = document.getElementById('quality-filters-form');
     const fd = new FormData(form);
     fd.set('text', document.getElementById('custom-test-text').value);
+    if (confirmed) fd.set('confirmed', '1');
     return fd;
   }
 
@@ -83,6 +109,24 @@
     document.getElementById('custom-test-error').style.display = 'none';
     document.getElementById('custom-test-map').style.display = 'none';
     document.getElementById('custom-test-map-message').style.display = 'none';
+    document.getElementById('custom-test-sql-cost-block').style.display = 'none';
+    document.getElementById('custom-test-sql-results-block').style.display = 'none';
+    document.getElementById('custom-test-sql-error-block').style.display = 'none';
+    document.getElementById('custom-test-sql-fix-block').style.display = 'none';
+  }
+
+  function sqlCostLabel(gb, costUsd) {
+    const gbText = gb < 0.01 ? '<0.01 GB' : `~${gb.toFixed(gb < 1 ? 3 : 1)} GB`;
+    const costText = costUsd < 0.01 ? '<$0.01' : `~$${costUsd.toFixed(2)}`;
+    return `${gbText} / ${costText}`;
+  }
+
+  function renderSqlResultsTable(columns, rows) {
+    const table = document.getElementById('custom-test-sql-results-table');
+    const cols = columns && columns.length ? columns : (rows.length ? Object.keys(rows[0]) : []);
+    const headRow = '<tr>' + cols.map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
+    const bodyRows = rows.map(r => '<tr>' + cols.map(c => `<td>${r[c] === null || typeof r[c] === 'undefined' ? '' : escapeHtml(String(r[c]))}</td>`).join('') + '</tr>').join('');
+    table.innerHTML = `<thead>${headRow}</thead><tbody>${bodyRows}</tbody>`;
   }
 
   // Enter runs the test/question (same as clicking "Run"); Shift+Enter
@@ -96,7 +140,7 @@
     }
   });
 
-  window.runCustomTest = function () {
+  window.runCustomTest = function (confirmed) {
     const btn = document.getElementById('custom-test-btn');
     const text = document.getElementById('custom-test-text').value.trim();
     if (!text) return;
@@ -106,14 +150,31 @@
     const loadingEl = document.getElementById('custom-test-loading');
     resultEl.style.display = 'block';
     resetCustomTestBlocks();
-    loadingEl.textContent = 'Thinking...';
+    loadingEl.textContent = confirmed ? 'Running...' : 'Thinking...';
     lastCustomTestSql = null;
 
-    fetch('/speed-limits/custom-test', { method: 'POST', body: customTestFormData() })
+    fetch('/speed-limits/custom-test', { method: 'POST', body: customTestFormData(confirmed) })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         btn.disabled = false;
         loadingEl.textContent = '';
+
+        if (data.kind === 'sql_error') {
+          document.getElementById('custom-test-sql-error-text').textContent = data.error || 'unknown error';
+          document.getElementById('custom-test-sql-error-block').style.display = 'block';
+          if (data.fix_explanation) {
+            document.getElementById('custom-test-sql-fix-explanation').textContent = data.fix_explanation;
+            document.getElementById('custom-test-sql-fix-block').style.display = 'block';
+            if (data.fix_suggested_sql) {
+              lastSqlFixSuggestion = data.fix_suggested_sql;
+              const sugEl = document.getElementById('custom-test-sql-fix-suggestion');
+              sugEl.textContent = data.fix_suggested_sql;
+              sugEl.style.display = 'block';
+              document.getElementById('custom-test-sql-fix-btn').style.display = 'inline-block';
+            }
+          }
+          return;
+        }
         if (!ok || data.error) {
           const errEl = document.getElementById('custom-test-error');
           errEl.textContent = data.error || 'unknown error';
@@ -135,6 +196,20 @@
           document.getElementById('custom-test-answer-block').style.display = 'block';
           return;
         }
+        if (data.kind === 'sql_cost_estimate') {
+          const what = data.statement_kind === 'call' ? 'This will CALL a stored procedure' : 'This query';
+          document.getElementById('custom-test-sql-cost-text').textContent =
+            `${what}: estimated ${sqlCostLabel(data.gb, data.cost_usd)}. Run it?`;
+          document.getElementById('custom-test-sql-cost-block').style.display = 'block';
+          return;
+        }
+        if (data.kind === 'sql_results') {
+          document.getElementById('custom-test-sql-cost-note').textContent =
+            `Processed ${sqlCostLabel(data.gb, data.cost_usd)}.` + (data.truncated ? ` Showing the first ${data.rows.length.toLocaleString()} rows.` : ` ${data.rows.length.toLocaleString()} row(s).`);
+          renderSqlResultsTable(data.columns, data.rows);
+          document.getElementById('custom-test-sql-results-block').style.display = 'block';
+          return;
+        }
         lastCustomTestSql = data.sql;
         document.getElementById('custom-test-summary').textContent =
           `${data.matching_count.toLocaleString()} of ${data.total_segments.toLocaleString()} segments match (${data.pct_matching.toFixed(2)}%).`;
@@ -150,6 +225,14 @@
         errEl.textContent = err.message;
         errEl.style.display = 'inline-block';
       });
+  };
+
+  window.useSqlFixSuggestion = function () {
+    if (!lastSqlFixSuggestion) return;
+    const textEl = document.getElementById('custom-test-text');
+    textEl.value = lastSqlFixSuggestion;
+    textEl.focus();
+    textEl.setSelectionRange(textEl.value.length, textEl.value.length);
   };
 
   window.showCustomTestMap = function () {
