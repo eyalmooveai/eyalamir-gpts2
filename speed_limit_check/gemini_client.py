@@ -47,7 +47,7 @@ class CredentialsNotConfigured(RuntimeError):
 
 def call_structured(
     system_instruction: str, user_text: str, response_schema: type[_SchemaT], project: str,
-    location: str = GEMINI_LOCATION, max_output_tokens: int = 2048,
+    location: str = GEMINI_LOCATION, max_output_tokens: int = 8192,
 ) -> _SchemaT:
     """Makes one Vertex AI Gemini call with structured JSON output
     conforming to `response_schema` (a pydantic model), thinking fully

@@ -742,7 +742,29 @@
     a clear `RuntimeError` (distinguishing a `MAX_TOKENS` finish reason
     from a generic bad-output case) - don't remove that check on the
     assumption `.parsed` is always populated when a schema is given, it
-    isn't. Errors are `google.genai.errors.APIError` (its `ClientError`/
+    isn't. **This actually happened in production** - a real "give me an
+    example query to test" request hit `MAX_TOKENS` at the original
+    `max_output_tokens=2048`, surfaced correctly as exactly that clear
+    error rather than a silent failure, which is how it got caught and
+    fixed instead of just failing quietly. The cause wasn't thinking
+    tokens eating the budget (`thinking_budget=0` is documented as fully
+    disabling thinking, not just discouraging it, and the error message
+    itself named the output budget, not thinking, as what was
+    exhausted) - it was the visible JSON output itself coming out longer
+    than 2048 tokens for that prompt, despite the system prompts asking
+    for "1-4 sentences"/"one-sentence" answers; LLMs don't always obey a
+    brevity instruction as strictly as a hard token ceiling would.
+    `gemini_client.call_structured()`'s `max_output_tokens` default is
+    `8192` now (was `2048`) - a pure safety-margin increase (Vertex AI
+    bills actual tokens generated, not the ceiling, so raising this has
+    no cost unless a response genuinely needs it) shared by all three
+    callers (`classify_custom_test_text()`, `bq_sql_console.suggest_sql_fix()`,
+    `answer_with_drive_context()`) since they all construct a
+    `GenerateContentConfig` through this one helper. If `MAX_TOKENS`
+    shows up again after this, that's a sign the root cause is
+    verbosity, not budget size - tighten the prompts' length
+    instructions rather than keep raising the ceiling as an everything
+    fix. Errors are `google.genai.errors.APIError` (its `ClientError`/
     `ServerError` subclasses cover all 4xx/5xx - there's no separate
     typed auth/rate-limit exception the way the old Anthropic SDK had,
     so rate-limiting is instead detected by checking `e.code == 429`) and
