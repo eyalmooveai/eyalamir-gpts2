@@ -80,6 +80,7 @@ from quality_metrics import (
 )
 from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_custom_criterion_as_expression
 from bq_sql_console import run_sql_console, sql_statement_kind
+from model_library import compare_models, discover_models, find_model
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -861,6 +862,56 @@ def _sql_console_response(text: str):
         "kind": "sql_results", "statement_kind": result.statement_kind,
         "gb": result.gb, "cost_usd": result.cost_usd,
         "columns": result.columns, "rows": result.rows, "truncated": result.truncated,
+    })
+
+
+@app.route("/models/library", methods=["GET"])
+def models_library():
+    """Backs the model-library sidebar included on every page
+    (templates/_model_library_sidebar.html) - every model archived in
+    calc_archive.model_registry_results, fetched fresh on each page load
+    rather than baked into render_template() for every single route, so
+    adding the sidebar didn't require touching every page's view function."""
+    try:
+        models = discover_models(DEFAULT_PROJECT)
+    except Exception as e:
+        return jsonify({"error": f"Could not load the model library: {type(e).__name__}: {e}"}), 500
+    return jsonify({"models": [m.to_json() for m in models]})
+
+
+@app.route("/models/compare", methods=["POST"])
+def models_compare():
+    """Compares two models the user picked from the sidebar, identified
+    by their stable ModelEntry.key (never a raw table name from the
+    client - see ModelEntry.key's docstring) - both keys are re-resolved
+    against a fresh discover_models() call here before building any SQL,
+    so a stale/forged key just fails the lookup rather than reaching
+    BigQuery. Same dry-run cost estimate / $10 reconfirmation gate as the
+    SQL console (model_library.compare_models)."""
+    data = request.get_json(silent=True) or {}
+    key_a, key_b = data.get("key_a"), data.get("key_b")
+    if not key_a or not key_b:
+        return jsonify({"error": "Pick two models to compare."}), 400
+    if key_a == key_b:
+        return jsonify({"error": "Pick two different models to compare."}), 400
+    confirmed = bool(data.get("confirmed"))
+
+    try:
+        models = discover_models(DEFAULT_PROJECT)
+    except Exception as e:
+        return jsonify({"error": f"Could not load the model library: {type(e).__name__}: {e}"}), 500
+    entry_a, entry_b = find_model(models, key_a), find_model(models, key_b)
+    if entry_a is None or entry_b is None:
+        return jsonify({"error": "One of the selected models is no longer in the archive - refresh the list and try again."}), 400
+
+    result = compare_models(DEFAULT_PROJECT, entry_a, entry_b, confirmed, log=print)
+    if result.kind == "error":
+        return jsonify({"kind": "error", "error": result.bq_error}), 400
+    if result.kind == "cost_estimate":
+        return jsonify({"kind": "cost_estimate", "gb": result.gb, "cost_usd": result.cost_usd})
+    return jsonify({
+        "kind": "results", "gb": result.gb, "cost_usd": result.cost_usd, "stats": result.stats,
+        "label_a": entry_a.label, "label_b": entry_b.label,
     })
 
 

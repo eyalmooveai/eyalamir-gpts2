@@ -1076,6 +1076,107 @@
     same "don't forget the new module" mistake this file already warns
     about more than once above.
 
+- **Model library sidebar - a library of archived speed-limit model
+  variants, shown on every page, with a "pick two, compare them" flow.**
+  ("I now want to integrate the whole scheme from the 'speed limits
+  improvements' as a library of models that are shown in the Archimedes
+  portal... I want a library of models shown on the left (or right) of
+  each page, so a user can select two models to compare... I want only
+  models that already exist in the archive to be available for
+  comparisons in the UI" - all explicit.) **Read `model_library.py`'s own
+  module docstring before touching this** - it explains why
+  `calc_archive.model_registry_results` was chosen as the single source
+  of truth rather than inventing a second notion of "model".
+  - **"Models that already exist" is `calc_archive.model_registry_results`,
+    confirmed against BigQuery itself, not guessed.** `calc_archive` has
+    ~100+ tables, almost all BigQuery table *SNAPSHOT*s named
+    `<base>__<variant>` (variant one of `avgspeed_only`/`freeflow_only`/
+    `both`/`baseline`) - `model_registry_results` is the one plain
+    `TABLE` in that dataset, and inspecting `calc.model_registry_*`'s own
+    DDL (via `INFORMATION_SCHEMA.ROUTINES`) confirmed it's the real
+    registry, not a guess from the naming scheme alone:
+    `calc.model_registry_insert_result` is what populates a row's
+    `archived_plain_table`/`archived_details_table` on every archive run,
+    and `calc.model_registry_resolve_table`/`model_registry_browse`/
+    `model_registry_describe` are what later look a run back up by
+    `tag`/`state`/`year_num`/`month_num` - the exact four columns
+    `model_library.ModelEntry` keys a "model" by. As of this writing the
+    table has exactly 4 rows (CO, 2026-08, one per variant tag). No
+    written spec of this scheme exists in Drive (checked via the same
+    live-Drive-search mechanism `drive_search.py` already uses, for the
+    "Archimedes"/"Data Science"/"Development"/"Product" folders this app
+    can see) - the stored procedures and the example query below are the
+    only authoritative source, not a doc to cross-check against.
+  - **"The methods to compare models" (plural, from the request) - two
+    were found in BigQuery itself, and the one actually implemented
+    matches the user's own example query.** `calc.model_registry_relate_columns`
+    is a generic three-way per-segment join (any two tables' columns plus
+    a third "relate" table, all on `here_segment_id`) - a finer-grained
+    tool than what this feature needed. The aggregate methodology the
+    user's own example SQL demonstrated (`COUNT`/`COUNTIF` agree/disagree
+    on the corrected inferred limit, `AVG(ABS(...))` for the mph
+    difference, HERE-match counts) is also exactly what
+    `calc.compare_speed_limit_model_variants`/
+    `calc.model_registry_compare_speed_limit_model_variants` use the
+    `avgspeed_only`/`freeflow_only`/`both` variants for in production -
+    so `model_library.build_comparison_sql()` implements that one
+    (`COUNT`, agree/disagree `COUNTIF`, `avg_abs_diff_mph`, HERE-match
+    counts for each side, plus each side's average `confidence_pct`,
+    since every archived `*_details` table carries that column too -
+    confirmed identical across the `avgspeed_only`/`both`/`baseline`/
+    `freeflow_only` variants of the same month via
+    `INFORMATION_SCHEMA.COLUMNS`, so it's safe to reference unconditionally
+    rather than probing per-table first).
+  - **A "model" is identified to the frontend by a stable key
+    (`tag|state|year_num|month_num`), never by a raw table name.**
+    `ModelEntry.key` is what `_model_library_sidebar.html`'s checkboxes
+    use and what `/models/compare` takes as `key_a`/`key_b` - the route
+    always re-resolves both keys against a FRESH `discover_models()` call
+    before building any SQL (`app.py`'s `models_compare()`), so a
+    stale or forged key just fails the lookup instead of ever reaching
+    `build_comparison_sql()`'s table-name interpolation. Don't change
+    this to accept a table name (or an unvalidated index) directly from
+    the client - the whole point is that the only tables this feature can
+    ever query are ones the server itself just read out of the registry.
+  - **Same `$10` dry-run/cost-gate flow as the SQL console, reused rather
+    than reinvented** (`bq_sql_console.estimate_query_cost`/
+    `COST_CONFIRMATION_THRESHOLD_USD`) - these `archived_details_table`
+    tables are full per-segment archives (hundreds of thousands of rows
+    each), so a join across two of them is exactly the kind of query that
+    gate exists for. `model_library.compare_models()` returns
+    `kind="cost_estimate"` (no execution) until confirmed, same shape
+    (`gb`/`cost_usd`) the sidebar's JS already knows how to render from
+    building the Ask Archimedes cost-estimate UI first.
+  - **The sidebar is included once, in `layout.html` itself, not per-page** -
+    `{% include "_model_library_sidebar.html" %}` right before
+    `</body>`, so "shown on each page" didn't require touching every
+    existing route/template's `render_template()` call. It fetches
+    `GET /models/library` itself via JS on load (a plain JSON endpoint,
+    not baked into any page's own render context) rather than every view
+    function needing to pass a `models=` list through - the tradeoff is a
+    second request per page load, which is fine for a handful of registry
+    rows.
+  - **Fixed-position overlay, not part of `.wrap`'s centered flow** -
+    `layout.html`'s existing `.wrap { max-width: 900px; margin: 0 auto; }`
+    centers every page's content, so a sidebar that reflowed it would have
+    meant touching that on every page; instead the panel is
+    `position: fixed`, slides in from the right over the page (a
+    persistent vertical "Models" tab stays visible either way), open by
+    default above an 860px viewport and collapsed below it, with the
+    open/closed choice remembered in `localStorage` purely as a
+    per-viewer convenience (same caution this file would give any
+    `localStorage` use - never relied on for anything the server needs to
+    read back).
+  - **Selection is capped at 2 by disabling the other checkboxes, not by
+    silently dropping an earlier pick** - `onModelCheck()` in the sidebar's
+    JS disables every unchecked box once 2 are selected (and re-enables
+    them the moment one is unchecked), so it's always visually obvious
+    why a third click didn't register, rather than it silently swapping
+    out an earlier selection.
+  - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
+    forget the new module" mistake this file already warns about more
+    than once above.
+
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo
   is checked out at `~/Claude/MooveAI/eyalamir-gpts2/`, with

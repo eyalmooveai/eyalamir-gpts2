@@ -1,0 +1,165 @@
+{#
+  The model-library sidebar - included once from layout.html (not a
+  per-page template) so "a library of models shown on each page" didn't
+  require touching every existing route/template. A fixed-position
+  overlay panel (not part of .wrap's centered flow) that fetches
+  /models/library on load and lets the user pick two archived models to
+  compare via /models/compare - both routes backed by model_library.py,
+  itself backed by calc_archive.model_registry_results (the authoritative
+  "which models already exist" source - see that module's docstring for
+  how that was confirmed against the real calc.model_registry_* stored
+  procedures rather than guessed).
+#}
+<button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
+<aside class="model-lib-panel" id="model-lib-panel">
+  <button type="button" class="model-lib-close" onclick="toggleModelLib(false)" aria-label="Close">&times;</button>
+  <span class="eyebrow">Model Library</span>
+  <h3>Compare archived models</h3>
+  <p class="section-intro" style="margin:-2px 0 10px;">
+    Pick two to compare - only models already archived in <code>calc_archive</code> are listed here.
+  </p>
+  <div id="model-lib-list" style="font-size:0.82rem; color:var(--muted);">Loading...</div>
+  <button type="button" class="btn-secondary model-lib-compare-btn" id="model-lib-compare-btn" disabled onclick="compareSelectedModels()">Compare selected (0/2)</button>
+  <div id="model-lib-result" class="model-lib-result" style="display:none;"></div>
+</aside>
+
+<script>
+(function () {
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  let models = [];
+  const selected = [];
+
+  window.toggleModelLib = function (force) {
+    const panel = document.getElementById('model-lib-panel');
+    const open = typeof force === 'boolean' ? force : !panel.classList.contains('open');
+    panel.classList.toggle('open', open);
+    try { localStorage.setItem('archimedes-model-lib-open', open ? '1' : '0'); } catch (e) {}
+  };
+
+  function pctLabel(frac) {
+    return typeof frac === 'number' ? (frac * 100).toFixed(1) + '%' : 'n/a';
+  }
+
+  function renderList() {
+    const listEl = document.getElementById('model-lib-list');
+    if (!models.length) {
+      listEl.textContent = 'No archived models found.';
+      return;
+    }
+    const byTag = {};
+    models.forEach(m => { (byTag[m.tag] = byTag[m.tag] || []).push(m); });
+    const groups = Object.keys(byTag).sort().map(tag => {
+      const rows = byTag[tag].map(m => `
+        <div class="model-lib-row">
+          <input type="checkbox" id="model-lib-${m.key}" value="${escapeHtml(m.key)}" onchange="onModelCheck(this)">
+          <label for="model-lib-${m.key}">
+            ${escapeHtml(m.state)} ${m.year_num}-${String(m.month_num).padStart(2, '0')}
+            <span class="model-lib-meta">error rate ${pctLabel(m.error_rate)} &middot; ${(m.rows_total || 0).toLocaleString()} rows</span>
+          </label>
+        </div>`).join('');
+      return `<div class="model-lib-group"><h4>${escapeHtml(tag)}</h4>${rows}</div>`;
+    }).join('');
+    listEl.innerHTML = groups;
+  }
+
+  window.onModelCheck = function (input) {
+    const key = input.value;
+    if (input.checked) {
+      if (selected.length >= 2) { input.checked = false; return; }
+      selected.push(key);
+    } else {
+      const idx = selected.indexOf(key);
+      if (idx >= 0) selected.splice(idx, 1);
+    }
+    document.querySelectorAll('#model-lib-list input[type="checkbox"]').forEach(cb => {
+      if (!selected.includes(cb.value)) cb.disabled = selected.length >= 2;
+    });
+    const btn = document.getElementById('model-lib-compare-btn');
+    btn.textContent = `Compare selected (${selected.length}/2)`;
+    btn.disabled = selected.length !== 2;
+    document.getElementById('model-lib-result').style.display = 'none';
+  };
+
+  function statTile(label, value) {
+    return `<div class="stat-tile"><div class="stat-value">${value}</div><div class="stat-label">${escapeHtml(label)}</div></div>`;
+  }
+
+  window.compareSelectedModels = function (confirmed) {
+    if (selected.length !== 2) return;
+    const resultEl = document.getElementById('model-lib-result');
+    const btn = document.getElementById('model-lib-compare-btn');
+    btn.disabled = true;
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = `<p style="color:var(--muted); margin:0;">${confirmed ? 'Running...' : 'Estimating cost...'}</p>`;
+
+    fetch('/models/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_a: selected[0], key_b: selected[1], confirmed: !!confirmed }),
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        btn.disabled = selected.length !== 2;
+        if (!ok || data.kind === 'error') {
+          resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(data.error || 'unknown error')}</p>`;
+          return;
+        }
+        if (data.kind === 'cost_estimate') {
+          const gbText = data.gb < 0.01 ? '<0.01 GB' : `~${data.gb.toFixed(data.gb < 1 ? 3 : 1)} GB`;
+          const costText = data.cost_usd < 0.01 ? '<$0.01' : `~$${data.cost_usd.toFixed(2)}`;
+          resultEl.innerHTML = `
+            <p class="badge warn" style="display:inline-block;">This comparison is estimated at ${gbText} / ${costText}. Run it?</p>
+            <p style="margin:8px 0 0;"><button type="button" class="btn-secondary" onclick="compareSelectedModels(true)">Yes, run it</button></p>`;
+          return;
+        }
+        const s = data.stats || {};
+        const total = s.total_segments || 0;
+        const agreePct = total ? ((s.agree / total) * 100).toFixed(1) + '%' : 'n/a';
+        const disagreePct = total ? ((s.disagree / total) * 100).toFixed(1) + '%' : 'n/a';
+        resultEl.innerHTML = `
+          <p style="margin:0 0 8px; font-size:0.8rem; color:var(--muted);">
+            <strong>${escapeHtml(data.label_a)}</strong> vs <strong>${escapeHtml(data.label_b)}</strong>
+          </p>
+          <div class="stat-grid" style="grid-template-columns:1fr 1fr; gap:8px;">
+            ${statTile('Segments compared', total.toLocaleString())}
+            ${statTile('Agree', agreePct)}
+            ${statTile('Disagree', disagreePct)}
+            ${statTile('Avg abs diff (mph)', s.avg_abs_diff_mph != null ? s.avg_abs_diff_mph : 'n/a')}
+            ${statTile('A matches HERE', s.has_here ? ((s.a_matches_here / s.has_here) * 100).toFixed(1) + '%' : 'n/a')}
+            ${statTile('B matches HERE', s.has_here ? ((s.b_matches_here / s.has_here) * 100).toFixed(1) + '%' : 'n/a')}
+            ${statTile('A avg confidence', s.a_avg_confidence_pct != null ? s.a_avg_confidence_pct + '%' : 'n/a')}
+            ${statTile('B avg confidence', s.b_avg_confidence_pct != null ? s.b_avg_confidence_pct + '%' : 'n/a')}
+          </div>`;
+      })
+      .catch(err => {
+        btn.disabled = selected.length !== 2;
+        resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(err.message)}</p>`;
+      });
+  };
+
+  fetch('/models/library')
+    .then(r => r.json())
+    .then(data => {
+      models = data.models || [];
+      renderList();
+    })
+    .catch(() => {
+      document.getElementById('model-lib-list').textContent = 'Could not load the model library.';
+    });
+
+  // Open by default on a wide enough viewport that the panel won't
+  // cover page content outright; collapsed on anything narrower, and
+  // either way a per-viewer convenience the user can override, not
+  // state this app relies on reading back (see artifact storage notes
+  // elsewhere in this codebase for why localStorage is used this way).
+  let startOpen = window.innerWidth >= 860;
+  try {
+    const stored = localStorage.getItem('archimedes-model-lib-open');
+    if (stored !== null) startOpen = stored === '1';
+  } catch (e) {}
+  if (startOpen) toggleModelLib(true);
+})();
+</script>
