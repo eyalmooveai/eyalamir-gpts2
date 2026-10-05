@@ -9,6 +9,17 @@
   "which models already exist" source - see that module's docstring for
   how that was confirmed against the real calc.model_registry_* stored
   procedures rather than guessed).
+
+  Also the ONE place that feeds a chosen model into every other tab
+  ("that sidebar should feed all the tabs in this app" - explicit): a
+  "Use this model" action per row writes {table, state, year_num,
+  month_num, label} to localStorage and this same script applies it, on
+  every page load, to whichever of #table/#state/#year/#month happen to
+  exist on the current page (quality.html/explore.html/agent.html all
+  share #table; evaluator.html/index.html share #state/#year/#month) -
+  generic element-ID lookups here rather than one bespoke per-page
+  wiring, so a future tab that reuses the same field IDs is fed for
+  free, with nothing to edit in this file or that page's own template.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
@@ -17,7 +28,9 @@
   <h3>Compare archived models</h3>
   <p class="section-intro" style="margin:-2px 0 10px;">
     Pick two to compare - only models already archived in <code>calc_archive</code> are listed here.
+    Click "Use" on any one to feed it into this tab's (and every other tab's) data source.
   </p>
+  <div id="model-lib-active" style="display:none; margin:0 0 12px;"></div>
   <div id="model-lib-list" style="font-size:0.82rem; color:var(--muted);">Loading...</div>
   <button type="button" class="btn-secondary model-lib-compare-btn" id="model-lib-compare-btn" disabled onclick="compareSelectedModels()">Compare selected (0/2)</button>
   <div id="model-lib-result" class="model-lib-result" style="display:none;"></div>
@@ -29,6 +42,7 @@
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  const ACTIVE_MODEL_KEY = 'archimedes-active-model';
   let models = [];
   const selected = [];
 
@@ -42,6 +56,69 @@
   function pctLabel(frac) {
     return typeof frac === 'number' ? (frac * 100).toFixed(1) + '%' : 'n/a';
   }
+
+  // --- Feeding the chosen model into every tab's own data-source fields -
+
+  function getActiveModel() {
+    try {
+      const raw = localStorage.getItem(ACTIVE_MODEL_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function setActiveModel(m) {
+    try {
+      localStorage.setItem(ACTIVE_MODEL_KEY, JSON.stringify({
+        table: m.archived_details_table, state: m.state, year_num: m.year_num,
+        month_num: m.month_num, label: m.label,
+      }));
+    } catch (e) {}
+  }
+
+  // Applies the active model to whichever of these field IDs exist on
+  // THIS page - every page that has a #table select (quality/explore/
+  // agent) or #state/#year/#month inputs (evaluator/sign-checker) gets
+  // fed, with no per-page code of its own.
+  function applyActiveModelToPage() {
+    const active = getActiveModel();
+    if (!active) return;
+    const tableEl = document.getElementById('table');
+    if (tableEl && active.table) {
+      if (tableEl.tagName === 'SELECT' && ![...tableEl.options].some(o => o.value === active.table)) {
+        const opt = document.createElement('option');
+        opt.value = active.table;
+        opt.textContent = active.table;
+        opt.selected = true;
+        tableEl.appendChild(opt);
+      }
+      tableEl.value = active.table;
+    }
+    const stateEl = document.getElementById('state');
+    if (stateEl && active.state) stateEl.value = active.state;
+    const yearEl = document.getElementById('year');
+    if (yearEl && active.year_num) yearEl.value = active.year_num;
+    const monthEl = document.getElementById('month');
+    if (monthEl && active.month_num) monthEl.value = active.month_num;
+  }
+
+  function renderActiveBanner() {
+    const el = document.getElementById('model-lib-active');
+    const active = getActiveModel();
+    if (!active) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = `
+      <p class="badge ok" style="display:inline-block; max-width:100%; white-space:normal;">
+        Active everywhere: ${escapeHtml(active.label)}
+      </p>`;
+  }
+
+  window.useModelEverywhere = function (key) {
+    const m = models.find(x => x.key === key);
+    if (!m) return;
+    setActiveModel(m);
+    applyActiveModelToPage();
+    renderActiveBanner();
+  };
 
   function renderList() {
     const listEl = document.getElementById('model-lib-list');
@@ -58,7 +135,9 @@
           <label for="model-lib-${m.key}">
             ${escapeHtml(m.state)} ${m.year_num}-${String(m.month_num).padStart(2, '0')}
             <span class="model-lib-meta">error rate ${pctLabel(m.error_rate)} &middot; ${(m.rows_total || 0).toLocaleString()} rows</span>
+            <code class="model-lib-table">${escapeHtml(m.archived_details_table || '(no details table)')}</code>
           </label>
+          <button type="button" class="btn-secondary model-lib-use-btn" onclick="useModelEverywhere('${m.key}')" title="Use this model's table in every tab">Use</button>
         </div>`).join('');
       return `<div class="model-lib-group"><h4>${escapeHtml(tag)}</h4>${rows}</div>`;
     }).join('');
@@ -149,6 +228,13 @@
     .catch(() => {
       document.getElementById('model-lib-list').textContent = 'Could not load the model library.';
     });
+
+  // Feed whatever model was already made "active" on a previous page
+  // into THIS page's fields immediately - doesn't need the /models/library
+  // fetch above to finish first, since the active model's identity was
+  // already saved in full by setActiveModel().
+  applyActiveModelToPage();
+  renderActiveBanner();
 
   // Open by default on a wide enough viewport that the panel won't
   // cover page content outright; collapsed on anything narrower, and

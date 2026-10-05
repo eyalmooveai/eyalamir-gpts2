@@ -384,11 +384,17 @@
       margin: 0 0 6px; font-size: 0.78rem; color: var(--moove-teal);
       text-transform: uppercase; letter-spacing: 0.03em;
     }
-    .model-lib-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .model-lib-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
     .model-lib-row:last-child { border-bottom: none; }
-    .model-lib-row label { margin: 0; font-size: 0.82rem; color: var(--text); flex: 1; }
+    .model-lib-row label { margin: 0; font-size: 0.82rem; color: var(--text); flex: 1 1 200px; min-width: 0; }
     .model-lib-row .model-lib-meta { display: block; font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+    .model-lib-row .model-lib-table {
+      display: block; font-size: 0.68rem; color: var(--muted); margin-top: 3px;
+      word-break: break-all; white-space: normal; background: var(--bg);
+      border-radius: 4px; padding: 2px 4px;
+    }
     .model-lib-row input[type="checkbox"] { margin-top: 3px; }
+    .model-lib-use-btn { margin-top: 0; padding: 3px 10px; font-size: 0.72rem; flex: 0 0 auto; align-self: flex-start; }
     .model-lib-compare-btn { width: 100%; margin-top: 14px; }
     .model-lib-result { margin-top: 14px; font-size: 0.82rem; }
   </style>

@@ -1176,6 +1176,65 @@
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.
+  - **Follow-up, same conversation: full table names in the sidebar, and
+    the sidebar feeding every other tab.** ("OK, but I want to see the
+    full table names in the sidebar. Also, that sidebar should feed all
+    the tabs in this app" - both explicit, after the "Safety" design was
+    confirmed fine as-is.)
+    - `ModelEntry.to_json()` now also sends `archived_details_table`/
+      `archived_plain_table` (previously only a `has_details` bool), and
+      `_model_library_sidebar.html` renders `archived_details_table` as a
+      `<code>` line under each row (`.model-lib-table` - wraps on
+      `word-break: break-all` so a long dataset-qualified name doesn't
+      force the 300px panel wider). This is purely additive to what
+      `/models/compare` already does with these fields - the full names
+      were already being used server-side to build the comparison SQL,
+      just not shown.
+    - **"Feed all the tabs" is the sidebar itself pushing a chosen
+      model's identity into every other tab's own existing data-source
+      fields, not a second thing those tabs each have to pull** - a
+      "Use" button per row (`useModelEverywhere(key)`) writes `{table,
+      state, year_num, month_num, label}` to
+      `localStorage['archimedes-active-model']` and immediately applies
+      it to whatever's on the CURRENT page; the same
+      `applyActiveModelToPage()` call also runs unconditionally on every
+      page load (not just after clicking "Use"), straight from
+      `_model_library_sidebar.html`'s own script - since that include is
+      already on every page (see above), this is the ONE place that does
+      the feeding; no other template needed to change to participate.
+      Deliberately keyed off generic element IDs (`#table`, `#state`,
+      `#year`, `#month`) rather than one bespoke wiring per page -
+      `quality.html`/`explore.html`/`agent.html` all already share
+      `#table` (a `<select>`, so a fallback `<option>` is inserted first
+      if the active table isn't already one of `table_options`, same
+      pattern those three templates already use for an arbitrary
+      `filters.table` value), and `evaluator.html`/`index.html` share
+      `#state`/`#year`/`#month` - so a future tab that reuses the same
+      IDs is fed for free. `/deploy` has no data-source fields at all, so
+      nothing to feed there, and that's fine - nothing bad happens, the
+      lookups just no-op.
+    - **This only sets each field's value - it never auto-submits a
+      form or navigates.** Quality/Explore are GET-form pages
+      (`method="get"`) that only reflect a new table once their form is
+      actually submitted; silently resubmitting on the user's behalf
+      on every page load would mean a background-only global state
+      change could override results the user is already looking at
+      without them asking for it. Pre-filling the field and leaving the
+      existing "Apply"/"Run" button as the actual trigger was the
+      deliberate choice here, consistent with every other filter on
+      those pages already working the same way.
+    - **A small "Active everywhere: &lt;label&gt;" banner**
+      (`#model-lib-active`, a `.badge.ok`) sits above the model list
+      whenever a model has been made active, so it's visible at a
+      glance which model (if any) every tab is currently being fed,
+      without having to inspect any single tab's own fields to find out.
+    - This only ever writes a fully qualified table name the server
+      itself returned from `/models/library` moments earlier - never
+      anything derived from free-typed text - so it carries none of the
+      concerns `custom_metrics.py`'s/`bq_sql_console.py`'s docstrings
+      describe; nothing here parses or executes SQL, it just populates a
+      form field exactly the way a person typing the same value in by
+      hand would.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo

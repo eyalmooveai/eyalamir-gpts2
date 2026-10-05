@@ -105,6 +105,13 @@ class ModelEntry:
             "error_rate": self.error_rate,
             "grievous_rate": self.grievous_rate,
             "has_details": bool(self.archived_details_table),
+            # Full dataset-qualified table names, not just the tag/state/
+            # date label - shown directly in the sidebar (and used as the
+            # literal value "Use this model" writes into every other
+            # tab's #table/#state/#year/#month fields) since "I want to
+            # see the full table names in the sidebar" was explicit.
+            "archived_details_table": self.archived_details_table,
+            "archived_plain_table": self.archived_plain_table,
         }
 
 
