@@ -81,6 +81,7 @@ from quality_metrics import (
 from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_custom_criterion_as_expression
 from bq_sql_console import run_sql_console, sql_statement_kind
 from model_library import (
+    MAX_COMPARE_MODELS,
     compare_models,
     find_model,
     list_common_columns,
@@ -951,7 +952,7 @@ def models_columns():
     if len(chosen) != len(tags):
         return jsonify({"error": "One of the selected models is no longer in the archive - refresh and try again."}), 400
     try:
-        columns = list_common_columns(DEFAULT_PROJECT, [e.archived_details_table for e in chosen])
+        columns = list_common_columns(DEFAULT_PROJECT, chosen)
     except Exception as e:
         return jsonify({"error": f"Could not load common columns: {type(e).__name__}: {e}"}), 500
     return jsonify({"columns": columns})
@@ -964,19 +965,20 @@ def models_compare():
     raw table name from the client - see ModelEntry.key's docstring) -
     re-resolved against a fresh list_tags() call here before building
     any SQL, so a stale/forged key just fails the lookup rather than
-    reaching BigQuery. Same dry-run cost estimate / $10 reconfirmation
-    gate as the SQL console (model_library.compare_models)."""
+    reaching BigQuery. No pre-flight cost estimate/confirmation here -
+    calc.model_registry_compare_models can't be cost-estimated before
+    running (see model_library.py's module docstring) - the actual cost
+    is reported in the response once every pair has run."""
     data = request.get_json(silent=True) or {}
     state = (data.get("state") or "").strip()
     year_num, month_num = data.get("year_num"), data.get("month_num")
     keys = data.get("keys") or []
     column = (data.get("column") or "").strip()
-    confirmed = bool(data.get("confirmed"))
 
     if not state or not isinstance(year_num, int) or not isinstance(month_num, int):
         return jsonify({"error": "state, year_num, and month_num are required."}), 400
-    if not (2 <= len(keys) <= 3):
-        return jsonify({"error": "Pick 2 or 3 models to compare."}), 400
+    if not (2 <= len(keys) <= MAX_COMPARE_MODELS):
+        return jsonify({"error": f"Pick 2-{MAX_COMPARE_MODELS} models to compare."}), 400
     if len(set(keys)) != len(keys):
         return jsonify({"error": "Pick distinct models to compare."}), 400
     if not column:
@@ -991,21 +993,18 @@ def models_compare():
         return jsonify({"error": "One of the selected models is no longer in the archive - refresh the list and try again."}), 400
 
     try:
-        common_columns = list_common_columns(DEFAULT_PROJECT, [e.archived_details_table for e in chosen])
+        common_columns = list_common_columns(DEFAULT_PROJECT, chosen)
     except Exception as e:
         return jsonify({"error": f"Could not verify {column}: {type(e).__name__}: {e}"}), 500
     if column not in common_columns:
         return jsonify({"error": f"{column} isn't a common numeric column across the selected models - refresh and pick again."}), 400
 
-    result = compare_models(DEFAULT_PROJECT, column, chosen, confirmed, log=print)
+    result = compare_models(DEFAULT_PROJECT, column, chosen, log=print)
     if result.kind == "error":
         return jsonify({"kind": "error", "error": result.bq_error}), 400
-    if result.kind == "cost_estimate":
-        return jsonify({"kind": "cost_estimate", "gb": result.gb, "cost_usd": result.cost_usd})
     return jsonify({
-        "kind": "results", "gb": result.gb, "cost_usd": result.cost_usd,
-        "total_segments": result.total_segments, "column": column,
-        "pairs": [p.to_json(result.total_segments) for p in result.pairs],
+        "kind": "results", "gb": result.gb, "cost_usd": result.cost_usd, "column": column,
+        "pairs": [p.to_json() for p in result.pairs],
     })
 
 

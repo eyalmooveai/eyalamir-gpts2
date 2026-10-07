@@ -366,17 +366,16 @@
 
   // --- compare -----------------------------------------------------------
 
-  function statTile(label, value) {
-    return `<div class="stat-tile"><div class="stat-value">${value}</div><div class="stat-label">${escapeHtml(label)}</div></div>`;
-  }
-
-  window.runModelCompare = function (confirmed) {
+  window.runModelCompare = function () {
     if (chosen.tags.length < 2 || !chosen.column) return;
     const resultEl = document.getElementById('model-lib-result');
     const btn = document.getElementById('model-lib-compare-btn');
     btn.disabled = true;
     resultEl.style.display = 'block';
-    resultEl.innerHTML = `<p style="color:var(--muted); margin:0;">${confirmed ? 'Running...' : 'Estimating cost...'}</p>`;
+    // No cost estimate up front - calc.model_registry_compare_models can't
+    // be dry-run (see model_library.py's module docstring) - the actual
+    // cost shows up with the results below once every pair has run.
+    resultEl.innerHTML = `<p style="color:var(--muted); margin:0;">Running (cost can't be estimated beforehand for this comparison - shown below once it completes)...</p>`;
 
     const keys = chosen.tags.map(tag => currentTagEntries.find(m => m.tag === tag).key);
     fetch('/models/compare', {
@@ -384,7 +383,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         state: chosen.state, year_num: chosen.year_num, month_num: chosen.month_num,
-        keys, column: chosen.column, confirmed: !!confirmed,
+        keys, column: chosen.column,
       }),
     })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
@@ -394,24 +393,18 @@
           resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(data.error || 'unknown error')}</p>`;
           return;
         }
-        if (data.kind === 'cost_estimate') {
-          const gbText = data.gb < 0.01 ? '<0.01 GB' : `~${data.gb.toFixed(data.gb < 1 ? 3 : 1)} GB`;
-          const costText = data.cost_usd < 0.01 ? '<$0.01' : `~$${data.cost_usd.toFixed(2)}`;
-          resultEl.innerHTML = `
-            <p class="badge warn" style="display:inline-block;">This comparison is estimated at ${gbText} / ${costText}. Run it?</p>
-            <p style="margin:8px 0 0;"><button type="button" class="btn-secondary" onclick="runModelCompare(true)">Yes, run it</button></p>`;
-          return;
-        }
-        const total = data.total_segments || 0;
         const pairs = data.pairs || [];
+        const gbText = data.gb < 0.01 ? '<0.01 GB' : `~${data.gb.toFixed(data.gb < 1 ? 3 : 1)} GB`;
+        const costText = data.cost_usd < 0.01 ? '<$0.01' : `~$${data.cost_usd.toFixed(2)}`;
         resultEl.innerHTML = `
           <p style="margin:0 0 4px; font-size:0.8rem; color:var(--muted);">${escapeHtml(data.column)} &middot; joined on <code>here_segment_id</code></p>
-          <div class="stat-grid" style="grid-template-columns:1fr; gap:8px;">${statTile('Segments joined', total.toLocaleString())}</div>
+          <p class="badge ok" style="display:inline-block;">Actual cost: ${gbText} / ${costText}</p>
           <table class="model-lib-pair-table">
-            <thead><tr><th>Pair</th><th>Agree</th><th>Avg abs diff</th></tr></thead>
+            <thead><tr><th>Pair</th><th>Segments</th><th>Agree</th><th>Avg abs diff</th></tr></thead>
             <tbody>${pairs.map(p => `
               <tr>
                 <td><code>${escapeHtml(p.tag_a)}</code> vs <code>${escapeHtml(p.tag_b)}</code></td>
+                <td>${(p.total_segments || 0).toLocaleString()}</td>
                 <td>${p.agree_pct != null ? (p.agree_pct * 100).toFixed(1) + '%' : 'n/a'}</td>
                 <td>${p.avg_abs_diff != null ? p.avg_abs_diff : 'n/a'}</td>
               </tr>`).join('')}</tbody>

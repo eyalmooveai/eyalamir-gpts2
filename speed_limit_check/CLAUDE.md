@@ -1086,52 +1086,55 @@
   table names in the sidebar... that sidebar should feed all the tabs"),
   then REDESIGNED from scratch after a colleague's email described a
   purpose-built BigQuery backend (`calc.model_registry_list_states`/
-  `list_periods`/`list_tags`/`compare_models`) plus a clickable mockup
-  (a Claude artifact) for a cascading state -> period -> 2-3 tags -> a
-  shared column flow - specifically so this panel never has to list the
-  full registry table once it grows past thousands of rows. **Read
-  `model_library.py`'s own module docstring before touching this** - it
-  explains two load-bearing discrepancies between what that email
-  described and what's actually deployed, both confirmed live against
-  BigQuery rather than taken on faith:
-  - **`calc.model_registry_list_common_columns` does not exist.**
-    `calc.INFORMATION_SCHEMA.ROUTINES` was queried directly and only
-    four of the five procedures the email described are actually
-    there (`list_states`/`list_periods`/`list_tags`/`compare_models` -
-    no `list_common_columns`). `model_library.list_common_columns()`
-    computes the same thing itself instead, via a per-table
-    `INFORMATION_SCHEMA.COLUMNS` query (scoped to the 2-3 specific
-    tables someone just picked, never a dataset-wide scan) - not a
-    guess at what a missing procedure might have done, just the same
-    "intersect the common numeric columns" logic written directly.
-    Filters to `INT64`/`FLOAT64`/`NUMERIC`/`BIGNUMERIC` only, which
-    naturally excludes `here_segment_id` (STRING, the join key itself),
-    `geom` (GEOGRAPHY), and other non-metric columns without needing a
-    hand-picked allowlist.
-  - **`compare_models()` here does NOT call `calc.model_registry_compare_models`.**
-    Tested live: a dry run of `CALL calc.model_registry_compare_models(...)`
-    reports `total_bytes_processed=0`, because that procedure's real
-    query is built at runtime via `EXECUTE IMMEDIATE` inside
+  `list_periods`/`list_tags`/`list_common_columns`/`compare_models`) plus
+  a clickable mockup (a Claude artifact) for a cascading state -> period
+  -> 2-3 tags -> a shared column flow - specifically so this panel never
+  has to list the full registry table once it grows past thousands of
+  rows. **Read `model_library.py`'s own module docstring before touching
+  this** - it explains how this module actually talks to that backend,
+  confirmed live against BigQuery at each step rather than assumed:
+  - **`calc.model_registry_list_common_columns` initially did NOT exist**
+    (checked via `calc.INFORMATION_SCHEMA.ROUTINES` - only
+    `list_states`/`list_periods`/`list_tags`/`compare_models` were
+    deployed at first), so `list_common_columns()` first computed the
+    intersection itself via per-table `INFORMATION_SCHEMA.COLUMNS`
+    queries. **The colleague deployed it shortly after** ("now deployed
+    model_registry_list_common_columns") - `list_common_columns()` now
+    calls it directly (one `CALL` with an `ARRAY<STRING>` tags parameter,
+    replacing the old per-table UNION logic), then narrows its result
+    (every common column regardless of type - `here_segment_id`, `geom`,
+    `street_name`, ... all included) to numeric types with one more
+    `INFORMATION_SCHEMA.COLUMNS` query against a single resolved table,
+    since "agree %"/"avg abs diff" only make sense for
+    `INT64`/`FLOAT64`/`NUMERIC`/`BIGNUMERIC` columns and the procedure
+    itself doesn't filter by type.
+  - **`compare_models()` DOES call `calc.model_registry_compare_models` -
+    but with NO pre-flight cost estimate**, a deliberate, directed
+    exception to this app's otherwise-standing "$10 dry-run/confirm"
+    rule (`bq_sql_console.py`). Confirmed live: a dry run of `CALL
+    calc.model_registry_compare_models(...)` reports
+    `total_bytes_processed=0`, because that procedure's real query is
+    built at runtime via `EXECUTE IMMEDIATE` inside
     `calc.model_registry_relate_columns` - a dry run can't see through
-    dynamic SQL constructed after the fact. That makes it impossible to
-    give an honest cost estimate before running it, which this app's
-    standing rule requires for anything scanning a 700K-35M row archived
-    table (same `$10` dry-run/cost-gate flow as the SQL console -
-    `bq_sql_console.estimate_query_cost`/`COST_CONFIRMATION_THRESHOLD_USD`,
-    reused rather than reinvented). It would also hand back one row per
-    `here_segment_id` - exactly what the email's own scale note warned
-    against materializing client-side - meaning a second aggregation
-    query would be needed regardless. `build_pairwise_comparison_sql()`
-    builds the one literal, dry-runnable, already-aggregated query
-    instead: the same join-on-`here_segment_id` methodology
-    `model_registry_relate_columns` itself implements (and the same
-    `COUNT`/`COUNTIF` agree-count/`AVG(ABS(...))` methodology the
-    original user-supplied example query demonstrated), generalized from
-    a single pair to every pairwise combination among 2 or 3 selected
-    models in one query (aliases `a`/`b`/`c`, one join per extra model,
-    `agree_ab`/`avg_abs_diff_ab`/`agree_ac`/... columns) - written
-    directly rather than through a wrapper whose cost can't be seen in
-    advance.
+    dynamic SQL constructed after the fact, so no accurate estimate is
+    possible here no matter how the call is made. An initial version of
+    this module worked around that by building its own literal,
+    dry-runnable aggregate SQL directly against the resolved tables
+    instead of calling the procedure at all - overridden by explicit
+    instruction ("re no cost estimate -- then report the cost after the
+    procedure runs"): `compare_models()` now calls the real procedure
+    (once per PAIR among the 2-3 selected models - it only ever compares
+    two at a time, so a 3-model selection means three CALLs, each with
+    B's identifiers doubled into the required third "relate" slot per
+    the procedure's own documented workaround) and reports the ACTUAL
+    `total_bytes_billed`-derived cost from each completed job afterward,
+    summed across every pair - real numbers from a real run, never a
+    prediction, and never blocked behind a confirmation click. Its
+    result (one row per `here_segment_id`, up to tens of millions of
+    rows for a nationwide comparison) is never materialized as a list
+    either - `_call_compare_pair()` streams the `RowIterator`'s pages
+    and keeps only a few running totals (count, agreement count, sum of
+    absolute differences), discarding each page as it's consumed.
   - **`speed_limit_here_mph` is wrapped in `ROUND()` when chosen as the
     compare column; every other column isn't** - same established rule
     as `quality_metrics.py`/`find_bad_speed_limit.py` (search this file
@@ -1147,10 +1150,11 @@
     `/models/compare` takes in its `keys` array. The route always
     re-resolves every key against a FRESH `list_tags(state, year_num,
     month_num)` call, and the chosen column against a fresh
-    `list_common_columns()` call, before building any SQL (`app.py`'s
+    `list_common_columns()` call, before ever calling
+    `calc.model_registry_compare_models` (`app.py`'s
     `models_compare()`/`models_columns()`) - a stale or forged key/column
-    just fails the lookup instead of ever reaching
-    `build_pairwise_comparison_sql()`'s table-name interpolation.
+    just fails the lookup instead of ever reaching that CALL's
+    tag/state/year/month parameters.
   - **Each step only ever fetches what the previous step narrowed to** -
     `GET /models/states` (all of them, small/cheap), `GET
     /models/periods?state=` (one state), `GET

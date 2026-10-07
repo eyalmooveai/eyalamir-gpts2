@@ -1,6 +1,7 @@
 """The Model Registry Compare panel: browse `calc_archive.model_registry_results`
-(via BigQuery's own `calc.model_registry_list_*` procedures) by state, then
-period, then pick 2-3 archived tags to compare on a shared numeric column.
+(via BigQuery's own `calc.model_registry_list_*`/`compare_models`
+procedures) by state, then period, then pick 2-3 archived tags to
+compare on a shared numeric column.
 
 Each step narrows the next so nothing ever lists the full registry table -
 this matters once it grows past thousands of rows, which is exactly why
@@ -9,33 +10,38 @@ specifically for this panel - see calc.INFORMATION_SCHEMA.ROUTINES for
 their DDL) rather than this module doing one `SELECT * FROM
 model_registry_results` the way an earlier version of this panel did.
 
-Two deliberate departures from what was originally proposed for this
-panel, both confirmed live against BigQuery before deciding, not guessed:
+Two things worth knowing about calc.model_registry_compare_models,
+confirmed live against BigQuery rather than assumed:
 
-1. `calc.model_registry_list_common_columns` does NOT exist (checked via
-   `calc.INFORMATION_SCHEMA.ROUTINES` - only list_states/list_periods/
-   list_tags/compare_models are actually deployed). list_common_columns()
-   below computes the same thing directly via a per-table
-   INFORMATION_SCHEMA.COLUMNS query instead of calling a procedure that
-   isn't there - cheap, since it's always scoped to the 2-3 specific
-   archived tables someone just picked, never a dataset-wide scan.
+1. It always needs THREE model identifiers (A, B, and a "relate" pivot),
+   even for a plain two-way comparison - for a pair, this module passes
+   B's identifiers again as the "relate" slot and simply ignores
+   `value_relate` in the response (the same workaround its own author
+   documented). For 2-3 selected models, compare_models() below calls
+   this procedure once per PAIR among them (one call for 2 models, three
+   calls for 3), since the procedure itself only ever compares two
+   models at a time.
 
-2. compare_models() here does NOT call `calc.model_registry_compare_models`.
-   That procedure's final result (one row per here_segment_id) comes from
-   an EXECUTE IMMEDIATE-constructed query inside calc.model_registry_relate_columns
-   - confirmed live that a dry run of `CALL model_registry_compare_models(...)`
-   reports total_bytes_processed=0, because a dry run can't see through
-   dynamic SQL built at runtime. That makes it impossible to give an
-   honest cost estimate before running it, which this app's standing rule
-   requires for anything that scans a 700K-35M row archived table (see
-   bq_sql_console.py). It would also hand back raw per-segment rows this
-   panel must never materialize client-side (explicitly warned against,
-   given table sizes up to 35M rows) - meaning a second query to aggregate
-   them would be needed regardless. build_pairwise_comparison_sql() below
-   builds the one literal, dry-runnable, already-aggregated query instead -
-   same join-on-here_segment_id methodology model_registry_relate_columns
-   itself implements, just written directly rather than through a wrapper
-   whose cost this app can't see in advance.
+2. Its real query is built at runtime (EXECUTE IMMEDIATE, inside
+   calc.model_registry_relate_columns) - a dry run of `CALL
+   model_registry_compare_models(...)` reports total_bytes_processed=0,
+   confirmed live, because a dry run can't see through dynamic SQL
+   constructed after the fact. That makes a cost estimate BEFORE running
+   it impossible - unlike every other BigQuery call in this app
+   (bq_sql_console.py's $10 dry-run/confirm gate doesn't apply here for
+   that reason, not because this query is assumed cheap). Instead, this
+   module runs the comparison directly and reports the ACTUAL bytes
+   billed/cost from the completed job afterward - real numbers from a
+   real run, just not a prediction beforehand.
+
+Its result (one row per here_segment_id, up to tens of millions of
+rows for a nationwide comparison) is also never held in memory as a
+list - _call_compare_pair() streams the BigQuery RowIterator's pages
+and keeps only a handful of running totals (count, agreement count, sum
+of absolute differences), the same "aggregate, don't materialize"
+principle the earlier direct-SQL version of this module applied via
+GROUP BY, just computed in Python here since the procedure's own output
+is unaggregated per-segment rows.
 """
 from __future__ import annotations
 
@@ -45,13 +51,13 @@ from typing import Optional
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 
-from bq_sql_console import COST_CONFIRMATION_THRESHOLD_USD, estimate_query_cost
+from bq_sql_console import BQ_ON_DEMAND_PRICE_PER_TIB_USD
 
 REGISTRY_TABLE = "calc_archive.model_registry_results"
+_BYTES_PER_GB = 1024 ** 3
+_BYTES_PER_TIB = 1024 ** 4
 
 MAX_COMPARE_MODELS = 3
-_ALIASES = ["a", "b", "c"]
-_JOIN_COL = "here_segment_id"
 
 # speed_limit_here_mph is stored as an unrounded km/h->mph conversion
 # (e.g. 24.860161591050343) while every other speed column here is
@@ -238,84 +244,63 @@ def find_model(models: list[ModelEntry], key: str) -> Optional[ModelEntry]:
     return next((m for m in models if m.key == key), None)
 
 
-def list_common_columns(project: str, tables: list[str]) -> list[str]:
-    """Step 4's options - numeric columns common to every given
-    dataset-qualified table name (2 or 3 archived_details_table values).
-    See the module docstring for why this is computed directly instead
-    of calling calc.model_registry_list_common_columns (not deployed)."""
-    if not tables:
+def list_common_columns(project: str, entries: list[ModelEntry]) -> list[str]:
+    """Step 4's options - numeric columns common to every given model's
+    archived_details_table. Calls the now-deployed
+    calc.model_registry_list_common_columns for the raw common-column-
+    name intersection (confirmed live via calc.INFORMATION_SCHEMA.ROUTINES -
+    an earlier version of this module computed that intersection itself
+    because the procedure didn't exist yet; it does now, so this calls
+    it instead of duplicating its UNION ALL/HAVING COUNT(DISTINCT...)
+    logic). That procedure returns every common column regardless of
+    type (here_segment_id, geom, street_name, ... included), so this
+    narrows the result to numeric types with one more
+    INFORMATION_SCHEMA.COLUMNS query against a single resolved table -
+    every archived_details_table in the same pipeline family shares the
+    same column types, so checking just one is enough."""
+    if not entries:
         return []
-    client = bigquery.Client(project=project)
-    column_sets: list[dict[str, str]] = []
-    for table in tables:
-        dataset_id, table_id = table.split(".", 1)
-        rows = client.query(
-            f"SELECT column_name, data_type FROM `{project}.{dataset_id}`.INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE table_name = @p_table",
-            job_config=bigquery.QueryJobConfig(query_parameters=[
-                bigquery.ScalarQueryParameter("p_table", "STRING", table_id),
-            ]),
-        ).result()
-        column_sets.append({r.column_name: r.data_type for r in rows})
-    common = set(column_sets[0])
-    for s in column_sets[1:]:
-        common &= set(s)
-    return sorted(c for c in common if column_sets[0][c] in _COMPARABLE_DATA_TYPES)
-
-
-def _column_expr(alias: str, column: str) -> str:
-    if column in _NEEDS_ROUNDING:
-        return f"ROUND({alias}.{column})"
-    return f"{alias}.{column}"
-
-
-def build_pairwise_comparison_sql(project: str, column: str, entries: list[ModelEntry]) -> str:
-    """One query, joining 2 or 3 archived_details_table on
-    here_segment_id, computing every pair's agreement %% and average
-    absolute difference on `column` in a single pass - the same
-    COUNTIF/AVG(ABS(...)) methodology as the original example query this
-    whole feature was designed from, generalized to any chosen column
-    and to 3-way as well as 2-way comparisons. `entries` are always
-    resolved server-side against a fresh list_tags() call and `column`
-    against a fresh list_common_columns() call before this is ever
-    called - see compare_models() - never built from unchecked
-    client-supplied strings."""
-    n = len(entries)
-    assert 2 <= n <= MAX_COMPARE_MODELS, f"need 2-{MAX_COMPARE_MODELS} models, got {n}"
-    aliases = _ALIASES[:n]
-
-    from_clause = f"`{project}.{entries[0].archived_details_table}` {aliases[0]}"
-    join_clauses = "\n".join(
-        f"JOIN `{project}.{entry.archived_details_table}` {alias} USING ({_JOIN_COL})"
-        for entry, alias in zip(entries[1:], aliases[1:])
+    state, year_num, month_num = entries[0].state, entries[0].year_num, entries[0].month_num
+    tags = [e.tag for e in entries]
+    rows = _call_rows(
+        project,
+        "CALL calc.model_registry_list_common_columns(@p_state, @p_year_num, @p_month_num, @p_tags, TRUE)",
+        [
+            bigquery.ScalarQueryParameter("p_state", "STRING", state),
+            bigquery.ScalarQueryParameter("p_year_num", "INT64", year_num),
+            bigquery.ScalarQueryParameter("p_month_num", "INT64", month_num),
+            bigquery.ArrayQueryParameter("p_tags", "STRING", tags),
+        ],
     )
+    common_names = {r.column_name for r in rows}
+    if not common_names:
+        return []
 
-    pair_exprs = []
-    pairs = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            ai, aj = aliases[i], aliases[j]
-            ei, ej = _column_expr(ai, column), _column_expr(aj, column)
-            pair_exprs.append(f"COUNTIF({ei} = {ej}) AS agree_{ai}{aj}")
-            pair_exprs.append(f"ROUND(AVG(ABS({ei} - {ej})), 2) AS avg_abs_diff_{ai}{aj}")
-            pairs.append((ai, aj))
-
-    select_list = ["COUNT(*) AS total_segments"] + pair_exprs
-    sql = "SELECT\n  " + ",\n  ".join(select_list) + f"\nFROM {from_clause}\n{join_clauses}"
-    return sql
+    dataset_id, table_id = entries[0].archived_details_table.split(".", 1)
+    client = bigquery.Client(project=project)
+    type_rows = client.query(
+        f"SELECT column_name, data_type FROM `{project}.{dataset_id}`.INFORMATION_SCHEMA.COLUMNS "
+        f"WHERE table_name = @p_table",
+        job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("p_table", "STRING", table_id),
+        ]),
+    ).result()
+    return sorted(r.column_name for r in type_rows if r.column_name in common_names and r.data_type in _COMPARABLE_DATA_TYPES)
 
 
 @dataclasses.dataclass
 class PairResult:
     tag_a: str
     tag_b: str
+    total_segments: int
     agree_count: int
     avg_abs_diff: Optional[float]
+    bytes_billed: int
 
-    def to_json(self, total_segments: int) -> dict:
-        agree_pct = (self.agree_count / total_segments) if total_segments else None
+    def to_json(self) -> dict:
+        agree_pct = (self.agree_count / self.total_segments) if self.total_segments else None
         return {
-            "tag_a": self.tag_a, "tag_b": self.tag_b,
+            "tag_a": self.tag_a, "tag_b": self.tag_b, "total_segments": self.total_segments,
             "agree_count": self.agree_count, "agree_pct": agree_pct,
             "avg_abs_diff": self.avg_abs_diff,
         }
@@ -323,56 +308,93 @@ class PairResult:
 
 @dataclasses.dataclass
 class ModelComparisonResult:
-    kind: str  # "cost_estimate" | "results" | "error"
+    kind: str  # "results" | "error"
     gb: Optional[float] = None
     cost_usd: Optional[float] = None
-    total_segments: Optional[int] = None
     pairs: Optional[list[PairResult]] = None
     bq_error: Optional[str] = None
 
 
-def compare_models(
-    project: str, column: str, entries: list[ModelEntry], confirmed: bool, log=lambda msg: None,
-) -> ModelComparisonResult:
-    """Dry-run cost estimate first (free, and - unlike CALLing
-    model_registry_compare_models directly - accurate, since this is a
-    literal query BigQuery can actually analyze), same $10
-    reconfirmation gate as the SQL console
-    (bq_sql_console.COST_CONFIRMATION_THRESHOLD_USD). Returns
-    kind="cost_estimate" (no execution) until `confirmed` is true."""
+def _call_compare_pair(project: str, column: str, entry_a: ModelEntry, entry_b: ModelEntry) -> PairResult:
+    """CALLs calc.model_registry_compare_models for one pair - B's
+    identifiers doubled into the required third "relate" slot (ignoring
+    value_relate in the response), per the module docstring. Streams the
+    result's pages rather than materializing them into a list, keeping
+    only the running totals needed for the agree-count/avg-abs-diff this
+    panel actually shows."""
+    params = [
+        bigquery.ScalarQueryParameter("p_tag_a", "STRING", entry_a.tag),
+        bigquery.ScalarQueryParameter("p_state_a", "STRING", entry_a.state),
+        bigquery.ScalarQueryParameter("p_year_a", "INT64", entry_a.year_num),
+        bigquery.ScalarQueryParameter("p_month_a", "INT64", entry_a.month_num),
+        bigquery.ScalarQueryParameter("p_column_a", "STRING", column),
+        bigquery.ScalarQueryParameter("p_use_details_a", "BOOL", True),
+        bigquery.ScalarQueryParameter("p_tag_b", "STRING", entry_b.tag),
+        bigquery.ScalarQueryParameter("p_state_b", "STRING", entry_b.state),
+        bigquery.ScalarQueryParameter("p_year_b", "INT64", entry_b.year_num),
+        bigquery.ScalarQueryParameter("p_month_b", "INT64", entry_b.month_num),
+        bigquery.ScalarQueryParameter("p_column_b", "STRING", column),
+        bigquery.ScalarQueryParameter("p_use_details_b", "BOOL", True),
+        bigquery.ScalarQueryParameter("p_relate_tag", "STRING", entry_b.tag),
+        bigquery.ScalarQueryParameter("p_relate_state", "STRING", entry_b.state),
+        bigquery.ScalarQueryParameter("p_relate_year", "INT64", entry_b.year_num),
+        bigquery.ScalarQueryParameter("p_relate_month", "INT64", entry_b.month_num),
+        bigquery.ScalarQueryParameter("p_relate_column", "STRING", column),
+        bigquery.ScalarQueryParameter("p_use_details_relate", "BOOL", True),
+    ]
+    sql = """CALL calc.model_registry_compare_models(
+        @p_tag_a, @p_state_a, @p_year_a, @p_month_a, @p_column_a, @p_use_details_a,
+        @p_tag_b, @p_state_b, @p_year_b, @p_month_b, @p_column_b, @p_use_details_b,
+        @p_relate_tag, @p_relate_state, @p_relate_year, @p_relate_month, @p_relate_column, @p_use_details_relate)"""
+    client = bigquery.Client(project=project)
+    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
+
+    needs_round = column in _NEEDS_ROUNDING
+    total = 0
+    agree = 0
+    diff_sum = 0.0
+    diff_count = 0
+    for row in job.result():
+        total += 1
+        va, vb = row.value_a, row.value_b
+        if va is None or vb is None:
+            continue
+        if needs_round:
+            va, vb = round(va), round(vb)
+        if va == vb:
+            agree += 1
+        diff_sum += abs(va - vb)
+        diff_count += 1
+
+    avg_abs_diff = round(diff_sum / diff_count, 2) if diff_count else None
+    return PairResult(
+        tag_a=entry_a.tag, tag_b=entry_b.tag, total_segments=total, agree_count=agree,
+        avg_abs_diff=avg_abs_diff, bytes_billed=job.total_bytes_billed or 0,
+    )
+
+
+def compare_models(project: str, column: str, entries: list[ModelEntry], log=lambda msg: None) -> ModelComparisonResult:
+    """Runs one calc.model_registry_compare_models CALL per pair among
+    2-3 selected models - no pre-flight cost estimate/confirmation (see
+    the module docstring for why that isn't possible here), just the
+    real cost of each call, summed and reported once every pair has run."""
     missing = [e.label for e in entries if not e.archived_details_table]
     if missing:
         return ModelComparisonResult(kind="error", bq_error=f"No archived details table for: {', '.join(missing)}.")
 
-    sql = build_pairwise_comparison_sql(project, column, entries)
-
-    try:
-        estimate = estimate_query_cost(project, sql)
-    except GoogleAPICallError as e:
-        log(f"Model comparison dry run failed: {e}")
-        return ModelComparisonResult(kind="error", bq_error=str(e))
-
-    if estimate.cost_usd > COST_CONFIRMATION_THRESHOLD_USD and not confirmed:
-        return ModelComparisonResult(kind="cost_estimate", gb=estimate.gb, cost_usd=estimate.cost_usd)
-
-    try:
-        client = bigquery.Client(project=project)
-        row = next(iter(client.query(sql).result()))
-        row_dict = dict(row)
-    except GoogleAPICallError as e:
-        log(f"Model comparison query failed: {e}")
-        return ModelComparisonResult(kind="error", bq_error=str(e))
-
-    total_segments = row_dict["total_segments"]
-    aliases = _ALIASES[:len(entries)]
     pairs = []
+    total_bytes_billed = 0
     for i in range(len(entries)):
         for j in range(i + 1, len(entries)):
-            ai, aj = aliases[i], aliases[j]
-            pairs.append(PairResult(
-                tag_a=entries[i].tag, tag_b=entries[j].tag,
-                agree_count=row_dict[f"agree_{ai}{aj}"],
-                avg_abs_diff=row_dict[f"avg_abs_diff_{ai}{aj}"],
-            ))
-    log(f"Compared {[e.key for e in entries]} on {column} ({estimate.gb:.3f} GB, ${estimate.cost_usd:.4f})")
-    return ModelComparisonResult(kind="results", gb=estimate.gb, cost_usd=estimate.cost_usd, total_segments=total_segments, pairs=pairs)
+            try:
+                pair = _call_compare_pair(project, column, entries[i], entries[j])
+            except GoogleAPICallError as e:
+                log(f"Model comparison failed on {entries[i].tag} vs {entries[j].tag}: {e}")
+                return ModelComparisonResult(kind="error", bq_error=str(e))
+            total_bytes_billed += pair.bytes_billed
+            pairs.append(pair)
+
+    gb = total_bytes_billed / _BYTES_PER_GB
+    cost_usd = (total_bytes_billed / _BYTES_PER_TIB) * BQ_ON_DEMAND_PRICE_PER_TIB_USD
+    log(f"Compared {[e.key for e in entries]} on {column} ({gb:.3f} GB, ${cost_usd:.4f} actual)")
+    return ModelComparisonResult(kind="results", gb=gb, cost_usd=cost_usd, pairs=pairs)
