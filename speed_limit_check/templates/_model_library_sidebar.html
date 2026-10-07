@@ -16,6 +16,17 @@
   month_num, label} to localStorage and this same script applies it, on
   every page load, to whichever of #table/#state/#year/#month happen to
   exist on the current page.
+
+  That connection is also surfaced IN the page's own content, not just
+  inside this sidebar (renderPageModelNote()) - a screenshot of the live
+  Quality page was real feedback that the relationship was invisible
+  (the field silently changed with nothing on the page explaining why).
+  On a GET-form page (Quality/Explore), clicking "Use" now navigates
+  immediately - "Use" means use it now, not "remember this for later" -
+  and a mismatched page offers a "show it here" link that does the same.
+  On a POST-form page (Evaluator/Sign-checker, whose forms start a real
+  run), nothing is ever auto-submitted - only the matching fields get
+  filled in, with a note saying so.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
@@ -162,6 +173,13 @@
       }));
     } catch (e) {}
   }
+  // Captured once, before applyActiveModelToPage() ever touches #table -
+  // this is what the PAGE actually rendered/is showing right now (its
+  // own server-side filters.table, or whatever a prior script already
+  // set), independent of any active model. Used by renderPageModelNote()
+  // to tell "already showing the active model" from "out of sync with it".
+  const initialTableValue = document.getElementById('table')?.value ?? null;
+
   function applyActiveModelToPage() {
     const active = getActiveModel();
     if (!active) return;
@@ -188,12 +206,82 @@
     el.style.display = 'block';
     el.innerHTML = `<p class="badge ok" style="display:inline-block; max-width:100%; white-space:normal;">Active everywhere: ${escapeHtml(active.label)}</p>`;
   }
+
+  // The visible, on-PAGE half of "feed all the tabs" - a note placed
+  // right in the page's own content (not just inside this sidebar),
+  // next to whichever field the active model feeds, so the connection
+  // between the two is obvious without having to open the sidebar at
+  // all. Real UI feedback on an earlier version of this (a screenshot of
+  // the live Quality page) was that the sidebar's effect on the page was
+  // invisible - this is the fix: the page itself says, in its own
+  // content, what the sidebar did to it and why the field reads what it
+  // reads.
+  function renderPageModelNote() {
+    const active = getActiveModel();
+    const tableEl = document.getElementById('table');
+    const stateEl = document.getElementById('state');
+    const anchorEl = tableEl || stateEl;
+    let note = document.getElementById('model-lib-page-note');
+    if (!active || !anchorEl) {
+      if (note) note.remove();
+      return;
+    }
+    if (!note) {
+      note = document.createElement('p');
+      note.id = 'model-lib-page-note';
+      note.style.cssText = 'font-size:0.78rem; color:var(--muted); margin:6px 0 14px;';
+      anchorEl.insertAdjacentElement('afterend', note);
+    }
+    const form = anchorEl.form;
+    const isGet = form && form.method && form.method.toLowerCase() === 'get';
+    const clearLink = `<a href="#" onclick="return clearActiveModelOnPage();">clear</a>`;
+    if (!tableEl) {
+      // state/year/month-only pages (Evaluator/Sign-checker) - fields
+      // are filled in, nothing is ever navigated/submitted here.
+      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected - filled in below &middot; ${clearLink}`;
+    } else if (initialTableValue === active.table) {
+      note.innerHTML = `Showing <strong>${escapeHtml(active.label)}</strong> (from Model Registry Compare) &middot; ${clearLink}`;
+    } else if (isGet) {
+      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected &middot; <a href="#" onclick="return applyActiveModelNow();">show it here</a> &middot; ${clearLink}`;
+    } else {
+      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected - filled in below &middot; ${clearLink}`;
+    }
+  }
+
+  window.applyActiveModelNow = function () {
+    applyActiveModelToPage();
+    const tableEl = document.getElementById('table');
+    const form = tableEl && tableEl.form;
+    if (form && form.method && form.method.toLowerCase() === 'get') form.submit();
+    return false;
+  };
+  window.clearActiveModelOnPage = function () {
+    try { localStorage.removeItem(ACTIVE_MODEL_KEY); } catch (e) {}
+    renderActiveBanner();
+    renderPageModelNote();
+    return false;
+  };
+
   window.useModelEverywhere = function (key) {
     const m = currentTagEntries.find(x => x.key === key);
     if (!m) return;
     setActiveModel(m);
+    const tableEl = document.getElementById('table');
+    const form = tableEl && tableEl.form;
+    if (form && form.method && form.method.toLowerCase() === 'get') {
+      // "Use" means use it now, on THIS page, not "remember this for
+      // later" - a GET-form page (Quality/Explore) can safely navigate
+      // itself to show it immediately; a POST-form page (Evaluator/
+      // Sign-checker start-a-real-run forms) never auto-submits, since
+      // that would kick off actual work the user didn't ask for - see
+      // renderPageModelNote().
+      applyActiveModelToPage();
+      form.submit();
+      return;
+    }
     applyActiveModelToPage();
     renderActiveBanner();
+    renderPageModelNote();
   };
 
   // --- step 1: state ---------------------------------------------------
@@ -436,6 +524,7 @@
   // in full by setActiveModel().
   applyActiveModelToPage();
   renderActiveBanner();
+  renderPageModelNote();
 
   // Open by default on a wide enough viewport that the panel won't cover
   // page content outright; collapsed on anything narrower, and either

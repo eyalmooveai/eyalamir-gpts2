@@ -72,6 +72,24 @@ _NEEDS_ROUNDING = {"speed_limit_here_mph"}
 # GEOGRAPHY/BOOL, and anything else that isn't a plain number.
 _COMPARABLE_DATA_TYPES = {"INT64", "FLOAT64", "NUMERIC", "BIGNUMERIC"}
 
+# A numeric-typed common column still isn't necessarily something worth
+# comparing - an archived_details_table also carries columns like
+# functional_class/judgement_over_osm/t12_sp/t3_sp/t40m_sp/t60p_sp
+# (internal thresholds/classifications, not speed metrics), which made
+# the "Column to compare" picker cluttered and confusing in practice
+# (real user feedback on the live UI). Narrowed to the columns this app
+# already treats as real comparison metrics elsewhere -
+# quality_metrics.QUALITY_METRICS' own `required_columns` entries
+# (speed_limit_osm_mph/speed_limit_here_mph/speed_AVG_mph/freeflow_mph)
+# plus the inferred-speed and confidence columns the original
+# (pre-redesign) version of this module already singled out - rather
+# than a type-only filter or a newly-invented list.
+_METRIC_COLUMNS = {
+    "speed_limit_infer_mph_corrected", "speed_limit_infer_mph",
+    "speed_limit_osm_mph", "speed_limit_here_mph",
+    "speed_AVG_mph", "freeflow_mph", "confidence_pct",
+}
+
 
 def _call_rows(project: str, sql: str, params: Optional[list] = None) -> list:
     client = bigquery.Client(project=project)
@@ -285,7 +303,11 @@ def list_common_columns(project: str, entries: list[ModelEntry]) -> list[str]:
             bigquery.ScalarQueryParameter("p_table", "STRING", table_id),
         ]),
     ).result()
-    return sorted(r.column_name for r in type_rows if r.column_name in common_names and r.data_type in _COMPARABLE_DATA_TYPES)
+    return sorted(
+        r.column_name for r in type_rows
+        if r.column_name in common_names and r.data_type in _COMPARABLE_DATA_TYPES
+        and r.column_name in _METRIC_COLUMNS
+    )
 
 
 @dataclasses.dataclass

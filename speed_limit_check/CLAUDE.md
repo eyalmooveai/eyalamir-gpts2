@@ -1201,13 +1201,63 @@
     `_model_library_sidebar.html`'s own script, so this is the ONE place
     that does the feeding - no other template needs to change to
     participate, and a future tab reusing the same field IDs is fed for
-    free. Deliberately only ever SETS a field's value - never
-    auto-submits a form or navigates (Quality/Explore are GET-form pages
-    that should only reflect a new table once the user actually submits,
-    not silently on page load). A small "Active everywhere: &lt;label&gt;"
-    banner (`#model-lib-active`, a `.badge.ok`) shows which model (if
-    any) is currently being fed, without needing to inspect any one
-    tab's fields to find out.
+    free. A small "Active everywhere: &lt;label&gt;" banner
+    (`#model-lib-active`, a `.badge.ok`, inside the sidebar itself) shows
+    which model (if any) is currently being fed, without needing to
+    inspect any one tab's fields to find out.
+  - **Follow-up: a real screenshot of the live Quality page was fed back
+    as "it seems confusing - how should the sidebar affect the main
+    page? Should it be integral to the page?"** - two separate problems
+    in that one screenshot, both fixed: the "Column to compare" picker
+    was cluttered with non-metric numeric columns, and the sidebar's
+    effect on the page was entirely invisible (the `#table` field
+    changed with nothing in the page explaining why, and clicking "Use"
+    did nothing a viewer could see without re-opening the sidebar).
+    - **`list_common_columns()` now also filters through
+      `model_library._METRIC_COLUMNS`** - a numeric-typed common column
+      isn't necessarily something worth comparing (`functional_class`,
+      `judgement_over_osm`, `t12_sp`/`t3_sp`/`t40m_sp`/`t60p_sp` are all
+      numeric but internal thresholds/classifications, not speed
+      metrics - confirmed cluttering the real picker in that
+      screenshot). The allowlist is grounded in columns this app already
+      treats as real comparison metrics elsewhere -
+      `quality_metrics.QUALITY_METRICS`' own `required_columns` entries
+      (`speed_limit_osm_mph`/`speed_limit_here_mph`/`speed_AVG_mph`/
+      `freeflow_mph`) plus the inferred-speed/confidence columns the
+      original (pre-redesign) version of this module already singled
+      out - not a newly-invented list.
+    - **"Use" now means use it now, not "remember this for later"** -
+      reversing the earlier "deliberately only ever SETS a field's value
+      - never auto-submits" design this file used to document here,
+      overridden by the explicit follow-up ask. On a GET-form page
+      (`quality.html`/`explore.html`, `method="get"`), clicking "Use"
+      immediately submits that page's own filter form with the new
+      table - the previous caution (a silent background change
+      shouldn't override results someone's already looking at) still
+      holds for passive page loads, so this only triggers on the
+      explicit "Use" click itself, never automatically. On a POST-form
+      page (`evaluator.html`/`index.html`, whose forms start a real
+      batch run/sign check), nothing is ever auto-submitted regardless -
+      `useModelEverywhere()`/`applyActiveModelNow()` both check
+      `form.method.toLowerCase() === 'get'` before calling
+      `form.submit()`, so a POST form only ever gets its fields filled
+      in, same as before.
+    - **The connection is now visible IN the page's own content, not
+      just inside the sidebar** - `renderPageModelNote()` inserts a line
+      directly after the page's `#table` (or `#state`, on a page with no
+      `#table`) saying what's active and why: "Showing X (from Model
+      Registry Compare)" when the page already matches, "X selected -
+      show it here" (a click-through link that applies it and submits,
+      same as "Use") when a GET-form page doesn't yet match, or "X
+      selected - filled in below" on a POST-form page where nothing can
+      "show" it without starting a real run. Always pairs with a
+      "clear" link. Captured once at script-init time, before anything
+      mutates `#table` -
+      `const initialTableValue = document.getElementById('table')?.value` -
+      specifically so the "already showing/not yet showing" check
+      compares against what the PAGE itself actually rendered
+      server-side, not a value this same script may have already
+      overwritten.
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.
