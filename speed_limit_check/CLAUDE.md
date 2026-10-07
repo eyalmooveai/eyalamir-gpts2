@@ -1258,6 +1258,73 @@
       compares against what the PAGE itself actually rendered
       server-side, not a value this same script may have already
       overwritten.
+  - **Follow-up: two real bugs reported from a live screenshot ("why so
+    many tables are same? why no columns to compare?"), plus an explicit
+    new requirement.** Both root-caused against the real registry data
+    (never guessed) and both come from the same underlying fact:
+    `calc_archive.model_registry_results` is APPEND-ONLY -
+    `calc.model_registry_insert_result` does a plain `INSERT` (confirmed
+    reading its DDL), with nothing enforcing uniqueness on
+    tag/state/year/month, so re-archiving the same tag/period a second
+    time just adds a second row rather than replacing the first.
+    Confirmed live for CO 2026-08: `avgspeed_only` has two rows with
+    different `archived_at` but the IDENTICAL `archived_details_table`
+    (the table name is deterministic, so a re-archive overwrites the
+    same physical table, not a new one).
+    - **Bug 1, "why so many tables are same"**: `calc.model_registry_list_tags`
+      is a plain `SELECT` with no `DISTINCT`/`QUALIFY`, so it faithfully
+      returned BOTH `avgspeed_only` rows - two identical checkboxes in
+      the live UI. `list_tags()` no longer trusts that procedure for
+      per-tag data at all; it only uses it to learn which TAGS exist (a
+      `set`, naturally deduped), then separately fetches every candidate
+      registry row per tag to decide which ONE to actually show - see
+      bug 3 below for how that choice is made now.
+    - **Bug 2, "why no columns to compare" (silently empty, not an
+      error)**: a direct consequence of bug 1 - `/models/columns` and
+      `/models/compare` both re-resolve the client's selected tags
+      against a fresh `list_tags()` call and reject the request
+      (`len(chosen) != len(tags)`) if the resolved count doesn't match
+      what was asked for, which a duplicate tag always triggered (2
+      tags selected, 3 entries resolved - the UI had 2 "avgspeed_only"
+      checkboxes, so checking either one still only sent 1 `avgspeed_only`
+      in the request, but `entries` from the broken `list_tags()` still
+      contained both). That correctly returned a 400 - but
+      `loadColumns()`/`loadPeriods()`/`loadTags()` in
+      `_model_library_sidebar.html` never checked `r.ok` or `data.error`
+      before using the response, so a 400 `{"error": "..."}` body
+      rendered as `data.columns || []` -> `[]` -> the EXACT SAME "No
+      common numeric column across these models" message a real empty
+      intersection would show. Fixed in both places: the backend no
+      longer produces the mismatch (bug 1's fix), and all three loaders
+      now check `ok`/`data.error` first and show the real message
+      instead of silently guessing it was an empty result.
+    - **Bug 3, explicit requirement: "we should show when the model was
+      created together with the registry. Also, if a registry [row] is
+      of an older version, then we should also include the current
+      (backed up) location if it exists. Otherwise, there's no way to
+      use this model, so listing it is useless to the user."** These
+      archived tables are BigQuery table SNAPSHOTs (confirmed via
+      `INFORMATION_SCHEMA.TABLES` - `table_type = 'SNAPSHOT'`, same
+      query surfaces `model_registry_results` itself as `BASE TABLE`),
+      which can expire or be cleaned up independently of the registry
+      row that still names them - so a registry row is a CLAIM a table
+      exists, not a guarantee, unlike what
+      `calc.model_registry_resolve_table`'s own `ORDER BY archived_at
+      DESC LIMIT 1` assumes. `list_tags()` now fetches every candidate
+      row per tag (newest `archived_at` first) and checks which
+      candidates' `archived_details_table` ACTUALLY still exists
+      (`_existing_tables()` - one `INFORMATION_SCHEMA.TABLES` query
+      covering every candidate across every tag at once, grouped by
+      dataset), picking the first (most recent) one that does.
+      `ModelEntry.is_backup` is `True` whenever that's not the newest
+      candidate - the sidebar shows a `.badge.warn` "using older backup"
+      next to that model, rather than silently presenting a fallback
+      archive as if it were current. A tag with NO existing candidate at
+      all is dropped from the list entirely - the explicit "otherwise
+      listing it is useless" case. `archived_at` (already sent in
+      `ModelEntry.to_json()`, just never displayed before) is now shown
+      as "created &lt;date&gt;" on every row via a small
+      `formatArchivedAt()` helper.
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.

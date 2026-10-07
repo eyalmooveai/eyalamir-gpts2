@@ -137,6 +137,7 @@ class ModelEntry:
     predictions: Optional[int] = None
     errors: Optional[int] = None
     grievous_errors: Optional[int] = None
+    is_backup: bool = False
 
     @property
     def key(self) -> str:
@@ -181,6 +182,7 @@ class ModelEntry:
             "has_details": bool(self.archived_details_table),
             "archived_details_table": self.archived_details_table,
             "archived_plain_table": self.archived_plain_table,
+            "is_backup": self.is_backup,
         }
 
 
@@ -204,14 +206,53 @@ def list_periods(project: str, state: str) -> list[PeriodEntry]:
 
 
 def list_tags(project: str, state: str, year_num: int, month_num: int) -> list[ModelEntry]:
-    """Step 3 - CALL calc.model_registry_list_tags(@p_state, @p_year_num,
-    @p_month_num), scoped to one state+period (at most a handful of
-    rows - one per archived tag). Enriched with each tag's
-    predictions/errors/grievous_errors/archived_at via one small
-    follow-up query against model_registry_results itself, filtered by
-    the same state+period+tags - still never a full-table scan, since
-    it's WHERE-scoped to at most a handful of rows."""
-    rows = _call_rows(
+    """Step 3 - which tags exist for this state+period, and the one
+    CURRENTLY USABLE row for each - "usable" meaning its
+    archived_details_table still actually exists in BigQuery, not just
+    that a registry row claims it does.
+
+    `calc.model_registry_list_tags` is a plain SELECT with no DISTINCT/
+    QUALIFY, so it returns one row per REGISTRY ROW, not one per tag -
+    and `calc_archive.model_registry_results` is append-only
+    (`calc.model_registry_insert_result` does a plain INSERT, confirmed
+    by reading its DDL; nothing in this registry's design enforces
+    uniqueness on tag/state/year/month). Re-archiving the same
+    tag/period a second time - confirmed live for CO 2026-08's
+    `avgspeed_only`, which has two rows with different `archived_at`
+    but the IDENTICAL `archived_details_table` (the table name is
+    deterministic, so a re-archive overwrites the same physical table,
+    not a new one) - means the procedure can and does hand back the
+    same tag twice. That duplicate showed up directly in the live UI as
+    two identical "avgspeed_only" checkboxes, and indirectly broke
+    /models/columns and /models/compare: both re-resolve the client's
+    selected tags against a fresh list_tags() call and reject the
+    request if the resolved count doesn't match the number of tags
+    asked for - which a duplicate tag always triggers (2 tags selected,
+    3 entries resolved) - though that failure was invisible in the UI
+    too, see _model_library_sidebar.html's loadColumns()/runModelCompare()
+    docstrings for the matching frontend-side fix.
+
+    Explicit follow-up instruction: "if a registry [row] is of an older
+    version, then we should also include the current (backed up)
+    location if it exists. Otherwise, there's no way to use this model,
+    so listing it is useless to the user." So this doesn't just trust
+    `ORDER BY archived_at DESC LIMIT 1` the way
+    calc.model_registry_resolve_table does - a registry row is a claim,
+    not a guarantee, and these are BigQuery table SNAPSHOTs (confirmed
+    via INFORMATION_SCHEMA.TABLES - table_type='SNAPSHOT', not a plain
+    TABLE), which can expire or be cleaned up independently of the
+    registry row that still names them. For every tag this fetches
+    EVERY candidate row (newest archived_at first), checks which
+    candidates' archived_details_table actually still exists
+    (_existing_tables(), one INFORMATION_SCHEMA.TABLES query covering
+    every candidate across every tag at once), and picks the first
+    (most recent) one that does - `is_backup=True` on the ModelEntry
+    whenever that's NOT the newest candidate, so the UI can say so
+    rather than silently presenting an older archive as if it were
+    current. A tag with NO existing candidate at all is dropped from
+    the list entirely - exactly the "otherwise listing it is useless"
+    case."""
+    tag_rows = _call_rows(
         project, "CALL calc.model_registry_list_tags(@p_state, @p_year_num, @p_month_num)",
         [
             bigquery.ScalarQueryParameter("p_state", "STRING", state),
@@ -219,43 +260,77 @@ def list_tags(project: str, state: str, year_num: int, month_num: int) -> list[M
             bigquery.ScalarQueryParameter("p_month_num", "INT64", month_num),
         ],
     )
-    entries = [
-        ModelEntry(
-            tag=r.tag, state=state, year_num=year_num, month_num=month_num,
-            rows_total=r.rows_total, archived_plain_table=r.archived_plain_table,
-            archived_details_table=r.archived_details_table,
-        )
-        for r in rows
-    ]
-    if entries:
-        _enrich_with_quality_stats(project, entries)
-    return entries
+    tags = {r.tag for r in tag_rows}
+    if not tags:
+        return []
 
-
-def _enrich_with_quality_stats(project: str, entries: list[ModelEntry]) -> None:
-    state, year_num, month_num = entries[0].state, entries[0].year_num, entries[0].month_num
     client = bigquery.Client(project=project)
-    rows = client.query(
+    rows = list(client.query(
         f"""
-        SELECT tag, archived_at, predictions, errors, grievous_errors
+        SELECT tag, archived_at, predictions, errors, grievous_errors,
+               rows_total, archived_plain_table, archived_details_table
         FROM `{project}.{REGISTRY_TABLE}`
         WHERE state = @p_state AND year_num = @p_year_num AND month_num = @p_month_num
+        ORDER BY tag, archived_at DESC
         """,
         job_config=bigquery.QueryJobConfig(query_parameters=[
             bigquery.ScalarQueryParameter("p_state", "STRING", state),
             bigquery.ScalarQueryParameter("p_year_num", "INT64", year_num),
             bigquery.ScalarQueryParameter("p_month_num", "INT64", month_num),
         ]),
-    ).result()
-    by_tag = {r.tag: r for r in rows}
-    for entry in entries:
-        stats = by_tag.get(entry.tag)
-        if stats is None:
-            continue
-        entry.archived_at = stats.archived_at.isoformat() if stats.archived_at else None
-        entry.predictions = stats.predictions
-        entry.errors = stats.errors
-        entry.grievous_errors = stats.grievous_errors
+    ).result())
+
+    candidates_by_tag: dict[str, list] = {}
+    for r in rows:
+        if r.tag in tags:
+            candidates_by_tag.setdefault(r.tag, []).append(r)
+
+    all_tables = {r.archived_details_table for r in rows if r.archived_details_table}
+    existing = _existing_tables(project, all_tables)
+
+    entries = []
+    for tag, candidates in candidates_by_tag.items():
+        usable = next((i for i, r in enumerate(candidates) if r.archived_details_table in existing), None)
+        if usable is None:
+            continue  # not one candidate's table still exists - nothing usable to list
+        r = candidates[usable]
+        entries.append(ModelEntry(
+            tag=tag, state=state, year_num=year_num, month_num=month_num,
+            rows_total=r.rows_total, archived_plain_table=r.archived_plain_table,
+            archived_details_table=r.archived_details_table,
+            archived_at=r.archived_at.isoformat() if r.archived_at else None,
+            predictions=r.predictions, errors=r.errors, grievous_errors=r.grievous_errors,
+            is_backup=usable > 0,
+        ))
+    return entries
+
+
+def _existing_tables(project: str, table_refs: set[str]) -> set[str]:
+    """Which of these `dataset.table` names currently exist (as either a
+    live TABLE or a SNAPSHOT - confirmed both surface in
+    INFORMATION_SCHEMA.TABLES, e.g. model_registry_results itself is
+    BASE TABLE while every archived_details_table is SNAPSHOT). Grouped
+    by dataset since INFORMATION_SCHEMA.TABLES is a per-dataset view -
+    in practice everything here is `calc_archive`, but this doesn't
+    assume that."""
+    if not table_refs:
+        return set()
+    client = bigquery.Client(project=project)
+    by_dataset: dict[str, list[str]] = {}
+    for ref in table_refs:
+        dataset_id, table_id = ref.split(".", 1)
+        by_dataset.setdefault(dataset_id, []).append(table_id)
+    existing = set()
+    for dataset_id, table_ids in by_dataset.items():
+        rows = client.query(
+            f"SELECT table_name FROM `{project}.{dataset_id}`.INFORMATION_SCHEMA.TABLES "
+            f"WHERE table_name IN UNNEST(@p_tables)",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("p_tables", "STRING", table_ids),
+            ]),
+        ).result()
+        existing.update(f"{dataset_id}.{r.table_name}" for r in rows)
+    return existing
 
 
 def find_model(models: list[ModelEntry], key: str) -> Optional[ModelEntry]:
