@@ -39,6 +39,41 @@
   (quality.html/evaluator_status.html) while the comparison runs, since
   that's unmistakably "work is happening" where the earlier plain-text
   "Running..." message could read as stuck.
+
+  Follow-up real feedback on THAT modal, from a live screenshot: "I need
+  it with the ability to display/export full report with all details"
+  (the summary row alone wasn't enough), "the comparison took too much
+  time" (and nothing showed cost until the very end), and "nothing
+  changed on the main page" STILL, even with the modal - clicking
+  Compare didn't touch the Table/Inferred-field pickers behind it. Three
+  separate fixes, all in runModelCompare()/pollCompareStatus() below:
+  - **Live progress, not just a spinner**: /models/compare now returns a
+    job_id immediately (see app.py's COMPARE_JOBS/model_library.py's
+    compare_models() on_event callback) and this polls
+    /models/compare/status/<job_id> every ~1.2s, showing which pair is
+    running and a LIVE cost estimate (BigQuery exposes a running query's
+    total_bytes_processed well before it finishes - genuinely different
+    from the "no pre-flight dry-run estimate" fact documented in
+    model_library.py, not a contradiction of it).
+  - **Full report, exportable**: each pair's result now also carries a
+    small abs-diff histogram and a capped (200) sample of disagreeing
+    segments (segment id, both values, street_name/functional_class, a
+    Street View link when lat/lon were found - see
+    model_library._lookup_sample_metadata) - shown per pair in a
+    <details> drill-down, plus "Download JSON" (the entire fetched
+    result) and "Download disagreements CSV" (every pair's sampled
+    segments, flattened) buttons - both built client-side from the
+    already-fetched `lastCompareResult`, no extra request.
+  - **Auto-fills the main page, right when Compare is clicked**: sets
+    the SAME localStorage-backed "active model" this sidebar already
+    uses for "Use" (see setActiveModel/applyActiveModelToPage above),
+    now carrying the compared column too, and applies it to the page
+    immediately - #table becomes the first compared model's table,
+    #infer_field (new) becomes the compared column. Deliberately does
+    NOT submit/navigate (unlike "Use") - the compare modal is about to
+    open over this same page, so reloading it would be counterproductive;
+    filling the fields (and updating the on-page note beneath the
+    modal) is what was actually asked for here.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
@@ -186,11 +221,11 @@
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   }
-  function setActiveModel(m) {
+  function setActiveModel(m, column) {
     try {
       localStorage.setItem(ACTIVE_MODEL_KEY, JSON.stringify({
         table: m.archived_details_table, state: m.state, year_num: m.year_num,
-        month_num: m.month_num, label: m.label,
+        month_num: m.month_num, label: m.label, column: column || null,
       }));
     } catch (e) {}
   }
@@ -212,6 +247,20 @@
         tableEl.appendChild(opt);
       }
       tableEl.value = active.table;
+    }
+    // Set when runModelCompare() fills this in right as "Compare" is
+    // clicked (see below) - "you should have linked the items from the
+    // left panel to the page itself" - auto-filling the main page's own
+    // Inferred-field picker to match the column being compared, same
+    // generic by-ID pattern #table already uses.
+    const inferEl = document.getElementById('infer_field');
+    if (inferEl && active.column) {
+      if (inferEl.tagName === 'SELECT' && ![...inferEl.options].some(o => o.value === active.column)) {
+        const opt = document.createElement('option');
+        opt.value = active.column; opt.textContent = active.column; opt.selected = true;
+        inferEl.appendChild(opt);
+      }
+      inferEl.value = active.column;
     }
     const stateEl = document.getElementById('state');
     if (stateEl && active.state) stateEl.value = active.state;
@@ -256,16 +305,17 @@
     const form = anchorEl.form;
     const isGet = form && form.method && form.method.toLowerCase() === 'get';
     const clearLink = `<a href="#" onclick="return clearActiveModelOnPage();">clear</a>`;
+    const columnNote = active.column ? ` &middot; comparing on <code>${escapeHtml(active.column)}</code>` : '';
     if (!tableEl) {
       // state/year/month-only pages (Evaluator/Sign-checker) - fields
       // are filled in, nothing is ever navigated/submitted here.
-      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected - filled in below &middot; ${clearLink}`;
+      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected - filled in below${columnNote} &middot; ${clearLink}`;
     } else if (initialTableValue === active.table) {
-      note.innerHTML = `Showing <strong>${escapeHtml(active.label)}</strong> (from Model Registry Compare) &middot; ${clearLink}`;
+      note.innerHTML = `Showing <strong>${escapeHtml(active.label)}</strong> (from Model Registry Compare)${columnNote} &middot; ${clearLink}`;
     } else if (isGet) {
-      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected &middot; <a href="#" onclick="return applyActiveModelNow();">show it here</a> &middot; ${clearLink}`;
+      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected${columnNote} &middot; <a href="#" onclick="return applyActiveModelNow();">show it here</a> &middot; ${clearLink}`;
     } else {
-      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected - filled in below &middot; ${clearLink}`;
+      note.innerHTML = `Model Registry Compare has <strong>${escapeHtml(active.label)}</strong> selected - filled in below${columnNote} &middot; ${clearLink}`;
     }
   }
 
@@ -524,22 +574,153 @@
     if (!modal.hidden && e.key === 'Escape') closeModelCompareModal();
   });
 
+  let lastCompareResult = null; // the final /models/compare/status payload - what Download JSON/CSV export from
+
+  function gbCostText(gb, cost_usd) {
+    const gbText = gb < 0.01 ? '<0.01 GB' : `~${gb.toFixed(gb < 1 ? 3 : 1)} GB`;
+    const costText = cost_usd < 0.01 ? '<$0.0001' : `~$${cost_usd.toFixed(4)}`;
+    return { gbText, costText };
+  }
+
+  function renderCompareRunning(body, status, fallbackPairsTotal) {
+    const pairsTotal = status.pairs_total || fallbackPairsTotal;
+    const pairNum = Math.min((status.pairs_done || 0) + 1, pairsTotal);
+    const { gbText, costText } = gbCostText(status.gb || 0, status.cost_usd || 0);
+    body.innerHTML = `
+      <p style="margin:0 0 6px;">Pair ${pairNum} of ${pairsTotal}${status.current_pair_label ? ` &middot; <code>${escapeHtml(status.current_pair_label)}</code>` : ''}&hellip;</p>
+      <p class="hint" style="font-size:0.78rem; color:var(--muted); margin:0 0 8px;">Processed so far: ${gbText} / ${costText} (running estimate - not the final cost)</p>
+      <div class="progress-indeterminate"></div>`;
+  }
+
+  function csvCell(v) {
+    const s = String(v == null ? '' : v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  function downloadBlob(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  window.exportCompareJson = function () {
+    if (!lastCompareResult) return;
+    downloadBlob('model-registry-compare.json', JSON.stringify(lastCompareResult, null, 2), 'application/json');
+  };
+  window.exportCompareCsv = function () {
+    if (!lastCompareResult) return;
+    const rows = [['pair', 'segment_id', 'street_name', 'functional_class', 'value_a', 'value_b', 'abs_diff']];
+    (lastCompareResult.pairs || []).forEach(p => {
+      (p.sample || []).forEach(s => {
+        rows.push([`${p.tag_a} vs ${p.tag_b}`, s.segment_id, s.street_name, s.functional_class, s.value_a, s.value_b, s.abs_diff]);
+      });
+    });
+    downloadBlob('model-registry-compare-disagreements.csv', rows.map(r => r.map(csvCell).join(',')).join('\r\n'), 'text/csv');
+  };
+
+  function renderPairDetail(p, column) {
+    const hist = p.histogram || {};
+    const histRows = Object.entries(hist).map(([label, count]) => `
+      <tr><td>${escapeHtml(label)}</td><td>${count.toLocaleString()}</td></tr>`).join('');
+    const sample = p.sample || [];
+    const disagreeCount = (p.total_segments || 0) - (p.agree_count || 0);
+    const sampleRows = sample.map(s => {
+      const seg = (s.lat != null && s.lon != null)
+        ? `<a href="https://www.google.com/maps?q=&layer=c&cbll=${s.lat},${s.lon}" target="_blank" rel="noopener">${escapeHtml(s.segment_id)}</a>`
+        : escapeHtml(s.segment_id);
+      return `<tr><td>${seg}</td><td>${escapeHtml(s.street_name || '')}</td><td>${s.value_a}</td><td>${s.value_b}</td><td>${s.abs_diff}</td></tr>`;
+    }).join('');
+    return `
+      <details style="margin:10px 0;">
+        <summary style="cursor:pointer; font-size:0.82rem; color:var(--muted);"><code>${escapeHtml(p.tag_a)}</code> vs <code>${escapeHtml(p.tag_b)}</code> &middot; diff breakdown &amp; disagreeing segments</summary>
+        <table class="model-lib-pair-table" style="font-size:0.82rem; margin-top:8px;">
+          <thead><tr><th>Abs diff (${escapeHtml(column)})</th><th>Segments</th></tr></thead>
+          <tbody>${histRows}</tbody>
+        </table>
+        ${sample.length ? `
+          <p class="hint" style="font-size:0.7rem; color:var(--muted); margin:10px 0 4px;">First ${sample.length.toLocaleString()} disagreeing segment${sample.length === 1 ? '' : 's'} of ${disagreeCount.toLocaleString()} total</p>
+          <div style="max-height:220px; overflow-y:auto;">
+            <table class="model-lib-pair-table" style="font-size:0.78rem;">
+              <thead><tr><th>Segment</th><th>Street</th><th>A</th><th>B</th><th>Abs diff</th></tr></thead>
+              <tbody>${sampleRows}</tbody>
+            </table>
+          </div>` : '<p class="hint" style="font-size:0.72rem; color:var(--muted);">No disagreements.</p>'}
+      </details>`;
+  }
+
+  function renderCompareResults(body, data) {
+    const pairs = data.pairs || [];
+    const { gbText, costText } = gbCostText(data.gb || 0, data.cost_usd || 0);
+    body.innerHTML = `
+      <p style="margin:0 0 4px; font-size:0.85rem; color:var(--muted);">${escapeHtml(data.column)} &middot; joined on <code>here_segment_id</code></p>
+      <p class="badge ok" style="display:inline-block;">Actual cost: ${gbText} / ${costText}</p>
+      <div style="margin:8px 0;">
+        <button type="button" class="btn-secondary" onclick="exportCompareJson()">Download full report (JSON)</button>
+        <button type="button" class="btn-secondary" onclick="exportCompareCsv()">Download disagreements (CSV)</button>
+      </div>
+      <table class="model-lib-pair-table" style="font-size:0.9rem;">
+        <thead><tr><th>Pair</th><th>Segments</th><th>Agree</th><th>Avg abs diff</th></tr></thead>
+        <tbody>${pairs.map(p => `
+          <tr>
+            <td><code>${escapeHtml(p.tag_a)}</code> vs <code>${escapeHtml(p.tag_b)}</code></td>
+            <td>${(p.total_segments || 0).toLocaleString()}</td>
+            <td>${p.agree_pct != null ? (p.agree_pct * 100).toFixed(1) + '%' : 'n/a'}</td>
+            <td>${p.avg_abs_diff != null ? p.avg_abs_diff : 'n/a'}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+      ${pairs.map(p => renderPairDetail(p, data.column)).join('')}`;
+  }
+
+  function pollCompareStatus(jobId, btn, body, fallbackPairsTotal) {
+    fetch(`/models/compare/status/${jobId}`)
+      .then(r => r.json())
+      .then(status => {
+        if (status.status === 'error') {
+          btn.disabled = false;
+          body.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(status.error || 'unknown error')}</p>`;
+          return;
+        }
+        if (status.status === 'done') {
+          btn.disabled = false;
+          lastCompareResult = status;
+          renderCompareResults(body, status);
+          return;
+        }
+        renderCompareRunning(body, status, fallbackPairsTotal);
+        setTimeout(() => pollCompareStatus(jobId, btn, body, fallbackPairsTotal), 1200);
+      })
+      .catch(err => {
+        btn.disabled = false;
+        body.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(err.message)}</p>`;
+      });
+  }
+
   window.runModelCompare = function () {
     if (chosen.tags.length < 2 || !chosen.column) return;
+
+    // Auto-fill the main page's own Table/Inferred-field to match what's
+    // being compared, right as Compare is clicked - "nothing changed on
+    // the main page" was explicit live feedback. Fills (doesn't submit/
+    // navigate) since the result modal is about to cover this same page.
+    const firstEntry = currentTagEntries.find(m => m.tag === chosen.tags[0]);
+    if (firstEntry) {
+      setActiveModel(firstEntry, chosen.column);
+      applyActiveModelToPage();
+      renderActiveBanner();
+      renderPageModelNote();
+    }
+
     const modal = document.getElementById('model-lib-compare-modal');
     const body = document.getElementById('model-lib-compare-modal-body');
     const btn = document.getElementById('model-lib-compare-btn');
     btn.disabled = true;
     modal.hidden = false;
-    // No cost estimate up front - calc.model_registry_compare_models can't
-    // be dry-run (see model_library.py's module docstring) - the actual
-    // cost shows up with the results below once every pair has run. The
-    // progress bar is the same .progress-indeterminate element
-    // quality.html/evaluator_status.html already use for "a BigQuery job
-    // is running, no meaningful %% to report" - not a new pattern.
-    body.innerHTML = `
-      <p style="margin:0 0 10px;">Running - cost can't be estimated beforehand for this comparison, shown here once it completes&hellip;</p>
-      <div class="progress-indeterminate"></div>`;
+    lastCompareResult = null;
+    const pairsTotal = chosen.tags.length * (chosen.tags.length - 1) / 2;
+    renderCompareRunning(body, { pairs_total: pairsTotal, pairs_done: 0, gb: 0, cost_usd: 0 }, pairsTotal);
 
     const keys = chosen.tags.map(tag => currentTagEntries.find(m => m.tag === tag).key);
     fetch('/models/compare', {
@@ -552,27 +733,12 @@
     })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
-        btn.disabled = false;
-        if (!ok || data.kind === 'error') {
+        if (!ok || data.error) {
+          btn.disabled = false;
           body.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(data.error || 'unknown error')}</p>`;
           return;
         }
-        const pairs = data.pairs || [];
-        const gbText = data.gb < 0.01 ? '<0.01 GB' : `~${data.gb.toFixed(data.gb < 1 ? 3 : 1)} GB`;
-        const costText = data.cost_usd < 0.01 ? '<$0.01' : `~$${data.cost_usd.toFixed(2)}`;
-        body.innerHTML = `
-          <p style="margin:0 0 4px; font-size:0.85rem; color:var(--muted);">${escapeHtml(data.column)} &middot; joined on <code>here_segment_id</code></p>
-          <p class="badge ok" style="display:inline-block;">Actual cost: ${gbText} / ${costText}</p>
-          <table class="model-lib-pair-table" style="font-size:0.9rem;">
-            <thead><tr><th>Pair</th><th>Segments</th><th>Agree</th><th>Avg abs diff</th></tr></thead>
-            <tbody>${pairs.map(p => `
-              <tr>
-                <td><code>${escapeHtml(p.tag_a)}</code> vs <code>${escapeHtml(p.tag_b)}</code></td>
-                <td>${(p.total_segments || 0).toLocaleString()}</td>
-                <td>${p.agree_pct != null ? (p.agree_pct * 100).toFixed(1) + '%' : 'n/a'}</td>
-                <td>${p.avg_abs_diff != null ? p.avg_abs_diff : 'n/a'}</td>
-              </tr>`).join('')}</tbody>
-          </table>`;
+        pollCompareStatus(data.job_id, btn, body, pairsTotal);
       })
       .catch(err => {
         btn.disabled = false;

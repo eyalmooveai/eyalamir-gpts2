@@ -82,6 +82,7 @@ from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_cu
 from bq_sql_console import run_sql_console, sql_statement_kind
 from model_library import (
     MAX_COMPARE_MODELS,
+    bytes_to_gb_cost,
     compare_models,
     find_model,
     list_common_columns,
@@ -198,6 +199,18 @@ MAX_QUALITY_JOBS = 20
 # it's not the source of truth for status the way JOBS/QUALITY_JOBS are.
 BATCH_CANCEL_EVENTS: dict[str, threading.Event] = {}
 BATCH_CANCEL_EVENTS_LOCK = threading.Lock()
+
+# Model Registry Compare's own job store, same pattern as JOBS/QUALITY_JOBS
+# above - a compare can take a while (up to 3 sequential
+# calc.model_registry_compare_models CALLs, each a real nationwide join),
+# so /models/compare starts it in a background thread and returns a job_id
+# immediately; the sidebar polls /models/compare/status/<job_id> for live
+# progress (which pair, bytes processed so far) instead of the request
+# blocking until every pair finishes - real feedback ("nothing changed on
+# the main page... no progress meter") on the previous blocking version.
+COMPARE_JOBS: dict[str, dict] = {}
+COMPARE_JOBS_LOCK = threading.Lock()
+MAX_COMPARE_JOBS = 20
 
 
 def _image_url(path: Path) -> str:
@@ -550,6 +563,83 @@ def _run_quality_job(job_id: str, base: QualityFilters, group_by: str, param1: f
         _update_quality_job(job_id, status="error", error=str(e))
     except Exception as e:
         _update_quality_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
+
+
+def _new_compare_job() -> str:
+    job_id = uuid.uuid4().hex
+    with COMPARE_JOBS_LOCK:
+        COMPARE_JOBS[job_id] = {
+            "status": "running",  # "running" | "done" | "error"
+            "error": None,
+            "column": None,
+            "pairs_total": 0,
+            "pairs_done": 0,
+            "current_pair_label": None,
+            "current_pair_bytes_processed": 0,
+            "bytes_so_far": 0,  # sum of COMPLETED pairs' bytes_billed only
+            "pairs": [],  # completed pairs' to_json(), in order
+        }
+        while len(COMPARE_JOBS) > MAX_COMPARE_JOBS:
+            del COMPARE_JOBS[next(iter(COMPARE_JOBS))]
+    return job_id
+
+
+def _update_compare_job(job_id: str, **kwargs) -> None:
+    with COMPARE_JOBS_LOCK:
+        if job_id in COMPARE_JOBS:
+            COMPARE_JOBS[job_id].update(kwargs)
+
+
+def _get_compare_job(job_id: str) -> dict | None:
+    with COMPARE_JOBS_LOCK:
+        job = COMPARE_JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _run_compare_job(job_id: str, column: str, entries: list) -> None:
+    """Runs compare_models() in a background thread, translating its
+    on_event callback into updates on this job's COMPARE_JOBS record -
+    see model_library.compare_models's own docstring for what each event
+    carries. Never writes the final gb/cost_usd directly: the status
+    route always recomputes them from bytes_so_far (+ whatever the
+    in-progress pair has processed), so there's one formula, not two
+    that could drift apart (see model_library.bytes_to_gb_cost)."""
+    _update_compare_job(job_id, column=column)
+
+    def on_event(event: str, **kw) -> None:
+        if event == "start":
+            _update_compare_job(job_id, pairs_total=kw["pairs_total"])
+        elif event == "pair_started":
+            _update_compare_job(
+                job_id, current_pair_label=f'{kw["tag_a"]} vs {kw["tag_b"]}', current_pair_bytes_processed=0,
+            )
+        elif event == "bytes_update":
+            _update_compare_job(job_id, current_pair_bytes_processed=kw["bytes_processed"])
+        elif event == "pair_done":
+            with COMPARE_JOBS_LOCK:
+                job = COMPARE_JOBS.get(job_id)
+                if job is not None:
+                    pair = kw["pair"]
+                    job["pairs"].append(pair.to_json())
+                    job["bytes_so_far"] = job.get("bytes_so_far", 0) + pair.bytes_billed
+                    job["pairs_done"] = kw["index"] + 1
+                    job["current_pair_bytes_processed"] = 0
+
+    try:
+        result = compare_models(DEFAULT_PROJECT, column, entries, log=print, on_event=on_event)
+    except Exception as e:
+        _update_compare_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
+        return
+    if result.kind == "error":
+        _update_compare_job(job_id, status="error", error=result.bq_error)
+        return
+    # The authoritative final write, not just a status flip - "pairs" was
+    # already built up incrementally via on_event's "pair_done" events
+    # (what the live-polling UI sees mid-run), but this overwrites it with
+    # result.pairs directly so the done state is always correct even if
+    # an on_event call were ever missed, rather than depending on two
+    # mechanisms agreeing.
+    _update_compare_job(job_id, status="done", pairs=[p.to_json() for p in result.pairs])
 
 
 @app.route("/", methods=["GET"])
@@ -960,15 +1050,21 @@ def models_columns():
 
 @app.route("/models/compare", methods=["POST"])
 def models_compare():
-    """Compares 2-3 models the user picked from the sidebar on one
-    shared column, identified by their stable ModelEntry.key (never a
-    raw table name from the client - see ModelEntry.key's docstring) -
+    """Starts comparing 2-3 models the user picked from the sidebar on
+    one shared column, identified by their stable ModelEntry.key (never
+    a raw table name from the client - see ModelEntry.key's docstring) -
     re-resolved against a fresh list_tags() call here before building
     any SQL, so a stale/forged key just fails the lookup rather than
     reaching BigQuery. No pre-flight cost estimate/confirmation here -
     calc.model_registry_compare_models can't be cost-estimated before
-    running (see model_library.py's module docstring) - the actual cost
-    is reported in the response once every pair has run."""
+    running (see model_library.py's module docstring).
+
+    Runs in a background thread (see _run_compare_job) rather than
+    blocking this request for however long up to 3 sequential CALLs
+    take - returns a job_id immediately; the sidebar polls
+    /models/compare/status/<job_id> for live progress and the final
+    result, same pattern this app already uses for the sign checker
+    (JOBS) and the Quality page's own aggregate query (QUALITY_JOBS)."""
     data = request.get_json(silent=True) or {}
     state = (data.get("state") or "").strip()
     year_num, month_num = data.get("year_num"), data.get("month_num")
@@ -999,12 +1095,34 @@ def models_compare():
     if column not in common_columns:
         return jsonify({"error": f"{column} isn't a common numeric column across the selected models - refresh and pick again."}), 400
 
-    result = compare_models(DEFAULT_PROJECT, column, chosen, log=print)
-    if result.kind == "error":
-        return jsonify({"kind": "error", "error": result.bq_error}), 400
+    job_id = _new_compare_job()
+    thread = threading.Thread(target=_run_compare_job, args=(job_id, column, chosen), daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id}), 202
+
+
+@app.route("/models/compare/status/<job_id>")
+def models_compare_status(job_id):
+    """Polled by the sidebar every ~1s while a comparison runs - live
+    pairs_done/pairs_total + current_pair_label, a running (gb, cost_usd)
+    estimate (completed pairs' real billed bytes plus the in-progress
+    pair's own polled total_bytes_processed - see
+    model_library.compare_models's docstring for why that in-progress
+    number is available even though a pre-flight dry-run estimate isn't),
+    and every completed pair's full result (summary + histogram + capped
+    disagreement sample) as soon as it finishes, not just at the end."""
+    job = _get_compare_job(job_id)
+    if not job:
+        return jsonify({"status": "error", "error": "Unknown or expired comparison job - try again."}), 404
+    bytes_so_far = job.get("bytes_so_far", 0) + job.get("current_pair_bytes_processed", 0)
+    gb, cost_usd = bytes_to_gb_cost(bytes_so_far)
     return jsonify({
-        "kind": "results", "gb": result.gb, "cost_usd": result.cost_usd, "column": column,
-        "pairs": [p.to_json() for p in result.pairs],
+        "status": job["status"], "error": job.get("error"),
+        "column": job.get("column"),
+        "pairs_total": job.get("pairs_total", 0), "pairs_done": job.get("pairs_done", 0),
+        "current_pair_label": job.get("current_pair_label"),
+        "gb": gb, "cost_usd": cost_usd,
+        "pairs": job.get("pairs", []),
     })
 
 

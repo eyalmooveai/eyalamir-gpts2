@@ -1345,6 +1345,97 @@
     panel wasn't. The 5 earlier `#model-lib-result` resets (whenever an
     earlier step changes) became `closeModelCompareModal()` calls instead
     - don't reintroduce `#model-lib-result`; it no longer exists.
+  - **Follow-up: real feedback on THAT modal, from a live screenshot -
+    "I need it with the ability to display/export full report with all
+    details", "the comparison took too much time" and "you still did not
+    give me the cost spent" (nothing showed cost until the very end, not
+    even once Compare had been running a while), and "nothing changed on
+    the main page" STILL - clicking Compare didn't touch the Table/
+    Inferred-field pickers behind the modal.** Three separate, deliberate
+    fixes, not one:
+    - **`/models/compare` is now async, with a pollable status
+      endpoint** (`GET /models/compare/status/<job_id>`) - returns a
+      `job_id` immediately (202) and runs the actual comparison in a
+      background thread (`app.py`'s `COMPARE_JOBS`/`_run_compare_job`,
+      same in-memory-dict-+-lock pattern as the sign checker's `JOBS`
+      and the Quality page's own `QUALITY_JOBS`), instead of blocking
+      the request for however long up to 3 sequential
+      `calc.model_registry_compare_models` CALLs take.
+      `model_library.compare_models()` reports progress through an
+      `on_event` callback (`"start"`/`"pair_started"`/`"bytes_update"`/
+      `"pair_done"`/`"done"` - see its own docstring) that
+      `_run_compare_job` translates into updates on the job record;
+      `_model_library_sidebar.html`'s `pollCompareStatus()` polls it
+      every ~1.2s, showing which pair is running and a progress bar
+      (still `.progress-indeterminate` - a single pair's own % complete
+      genuinely isn't knowable, only which pair of up to 3 is active).
+    - **Cost shown LIVE, not just at the end - without contradicting
+      "no pre-flight dry-run estimate is possible" (confirmed earlier,
+      still true)**: a BigQuery job's own `total_bytes_processed`
+      becomes available from its statistics once the query planner has
+      sized it - which happens early, well before the job finishes
+      running - confirmed live by polling `job.reload()` right after
+      submission. `compare_models()`'s polling loop (`job.reload()` ->
+      `on_event("bytes_update", ...)` -> `time.sleep(1.0)` until
+      `job.done()`) reports that in-progress number; app.py's status
+      route combines it with completed pairs' real billed bytes
+      (`bytes_so_far`) into a running `(gb, cost_usd)` estimate via the
+      one shared `model_library.bytes_to_gb_cost()` helper - the same
+      formula the final total uses, computed once, not duplicated. This
+      is a genuinely different thing from a pre-flight dry-run estimate
+      (a number read off a job that's already running vs. one from a
+      dry run that reports 0 bytes here) - don't conflate the two or
+      conclude the "no pre-flight estimate" fact was wrong.
+    - **Full report, exportable**: `model_library._collect_compare_pair_result()`
+      now also buckets every row's abs-diff into a small fixed histogram
+      (`_DIFF_BUCKET_LABELS`: exact match/0-1/1-2/2-5/5-10/10+) and keeps
+      the first `_SAMPLE_CAP` (200) disagreeing segments verbatim - both
+      O(1) additions to the SAME streaming loop that already visits
+      every row for agree_count/avg_abs_diff, never a second pass or a
+      second query against the compare procedure itself. Those sampled
+      segments get ONE extra small lookup
+      (`_lookup_sample_metadata()`, bounded to at most 200 ids) against
+      entry_a's own `archived_details_table` for
+      `street_name`/`functional_class`/a centroid lat-lon via
+      `ST_CENTROID(geom)` - needed because
+      `calc.model_registry_compare_models`'s own result only ever has
+      `here_segment_id, value_a, value_b, value_relate` (confirmed via
+      `calc.INFORMATION_SCHEMA.ROUTINES`'s DDL for both that procedure
+      and `model_registry_relate_columns` - its dynamic SQL is a plain
+      3-way join on exactly those 4 columns, nothing else to build a
+      Street View link or functional_class breakdown from). The
+      sidebar renders each pair's histogram + a scrollable disagreeing-
+      segments table (Street View link via the same no-API-key
+      `cbll=<lat>,<lon>` pattern this app uses everywhere, when a
+      lat/lon was found) inside a `<details>` drill-down, plus "Download
+      full report (JSON)" (the entire fetched status payload) and
+      "Download disagreements (CSV)" (every pair's sampled segments,
+      flattened) buttons - both built client-side from the already-
+      fetched `lastCompareResult` via a Blob + a synthetic `<a download>`
+      click, no extra request.
+    - **Auto-fills the main page's own Table/Inferred-field, right when
+      Compare is clicked** - not a vague "integrate the sidebar with the
+      page" ask but a specific one, confirmed via `AskUserQuestion`:
+      "Auto-fill Table + Inferred field" (not auto-running the page's
+      own metrics query too - that option was explicitly NOT chosen).
+      `setActiveModel()`'s stored shape gained an optional `column`
+      field; `applyActiveModelToPage()` now also fills `#infer_field`
+      (new, alongside the existing `#table`) when `active.column` is
+      set, and `renderPageModelNote()` mentions it ("comparing on
+      `<column>`"). `runModelCompare()` calls `setActiveModel(firstEntry,
+      chosen.column)` + `applyActiveModelToPage()` + `renderActiveBanner()`
+      + `renderPageModelNote()` immediately, synchronously, before the
+      POST even starts - but deliberately does NOT call `form.submit()`
+      the way "Use" does: the compare modal is about to cover this same
+      page, so navigating away from it would be counterproductive here,
+      unlike the single-row "Use" action this reuses the storage/apply
+      plumbing from.
+    - `_run_compare_job`'s final write (`status="done"`) always sets
+      `pairs` from `result.pairs` directly (not just from whatever
+      `on_event("pair_done", ...)` already accumulated) - a safety net
+      so the done state is correct even if an event were ever missed,
+      rather than depending on two mechanisms (live accumulation vs.
+      the authoritative return value) agreeing.
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.

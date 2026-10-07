@@ -36,16 +36,64 @@ confirmed live against BigQuery rather than assumed:
 
 Its result (one row per here_segment_id, up to tens of millions of
 rows for a nationwide comparison) is also never held in memory as a
-list - _call_compare_pair() streams the BigQuery RowIterator's pages
-and keeps only a handful of running totals (count, agreement count, sum
-of absolute differences), the same "aggregate, don't materialize"
-principle the earlier direct-SQL version of this module applied via
-GROUP BY, just computed in Python here since the procedure's own output
-is unaggregated per-segment rows.
+list - _collect_compare_pair_result() streams the BigQuery RowIterator's
+pages and keeps only a handful of running totals (count, agreement
+count, sum of absolute differences, a small fixed-size disagreement
+histogram) and a CAPPED sample of disagreeing segments (_SAMPLE_CAP),
+the same "aggregate, don't materialize" principle the earlier
+direct-SQL version of this module applied via GROUP BY, just computed
+in Python here since the procedure's own output is unaggregated
+per-segment rows.
+
+Real UI feedback drove two more additions on top of that streamed
+aggregate, both read-only against the same running total, not a second
+pass over the data:
+
+1. "Cost should show live/during the run, not just at the end." A
+   pre-flight dry-run estimate is impossible here (see above) - but a
+   query's `total_bytes_processed` becomes available from the job's own
+   statistics once BigQuery's planner has sized it, which happens early,
+   well before the job finishes running - confirmed live by polling
+   `job.reload()` right after submission and seeing a non-zero
+   `total_bytes_processed` within the first second on a job that then
+   ran for several more. compare_models()'s `on_event("bytes_update",
+   ...)` callback reports that polled-in-progress number so a caller
+   (app.py's background job thread) can show a running cost estimate -
+   genuinely different from, and not in conflict with, the "no pre-flight
+   estimate" fact: one is a number read off a job that's already running,
+   the other would have to come from a dry run that reports 0 bytes here.
+2. "Full report with all details, exportable" plus "the comparison
+   [took] too much time" (real feedback on the first version, which
+   only surfaced total_segments/agree_pct/avg_abs_diff and blocked the
+   whole request until every pair finished). `_collect_compare_pair_result()`
+   now also buckets every row's abs-diff into a small fixed histogram
+   (`_DIFF_BUCKET_LABELS`) and keeps the first `_SAMPLE_CAP` (200)
+   disagreeing segments verbatim (segment id + both values) - both are
+   O(1) additions to the SAME streaming loop that already visits every
+   row for agree_count/avg_abs_diff, not a second query or a second pass.
+   The sampled segments then get ONE extra small lookup
+   (`_lookup_sample_metadata()`, bounded to at most 200 ids) against
+   entry_a's own archived_details_table for street_name/functional_class/
+   a centroid lat-lon - needed because the compare procedure's own result
+   only ever has `here_segment_id, value_a, value_b, value_relate`
+   (confirmed via calc.INFORMATION_SCHEMA.ROUTINES's DDL for both
+   model_registry_compare_models and model_registry_relate_columns - its
+   dynamic SQL is a plain 3-way join on exactly those 4 columns, nothing
+   else to build a Street View link or functional_class breakdown from).
+   And instead of blocking the whole HTTP request until every pair's
+   query finishes, compare_models() reports progress through pairs via
+   the same `on_event` callback (`"start"`/`"pair_started"`/
+   `"pair_done"`) - app.py's /models/compare now starts this in a
+   background thread and returns a job_id immediately, the same
+   poll-a-status-endpoint pattern this app already uses for the sign
+   checker (JOBS) and the Quality page's own aggregate query
+   (QUALITY_JOBS), rather than holding the request open for however long
+   up to 3 sequential BigQuery CALLs take.
 """
 from __future__ import annotations
 
 import dataclasses
+import time
 from typing import Optional
 
 from google.api_core.exceptions import GoogleAPICallError
@@ -89,6 +137,47 @@ _METRIC_COLUMNS = {
     "speed_limit_osm_mph", "speed_limit_here_mph",
     "speed_AVG_mph", "freeflow_mph", "confidence_pct",
 }
+
+# How many disagreeing segments compare_models() keeps verbatim (id +
+# both values, later enriched with street_name/functional_class/lat-lon)
+# per pair, for the "full report"'s drill-down table and CSV export -
+# never the full disagreement set, which can be millions of rows for a
+# nationwide comparison. An ordered (not arbitrary) sample - the first
+# _SAMPLE_CAP disagreements the stream happens to visit, same as any
+# LIMIT without an ORDER BY would give.
+_SAMPLE_CAP = 200
+
+# Fixed buckets for the per-pair abs-diff histogram shown in the "full
+# report" - mph, since every _METRIC_COLUMNS entry is a speed in mph.
+# Order matters (iterated to build each pair's histogram dict, which a
+# plain Python dict preserves insertion order for).
+_DIFF_BUCKET_LABELS = ["exact match", "0-1", "1-2", "2-5", "5-10", "10+"]
+
+
+def _diff_bucket(d: float) -> str:
+    if d == 0:
+        return "exact match"
+    if d <= 1:
+        return "0-1"
+    if d <= 2:
+        return "1-2"
+    if d <= 5:
+        return "2-5"
+    if d <= 10:
+        return "5-10"
+    return "10+"
+
+
+def bytes_to_gb_cost(bytes_billed: int) -> tuple[float, float]:
+    """The one place `_BYTES_PER_GB`/`_BYTES_PER_TIB`/`BQ_ON_DEMAND_PRICE_PER_TIB_USD`
+    get combined into a (gb, cost_usd) pair - used both for compare_models()'s
+    own final total and for app.py's live in-progress estimate (summed
+    bytes from completed pairs plus the in-progress pair's own polled
+    total_bytes_processed), so the two numbers are always computed the
+    same way."""
+    gb = bytes_billed / _BYTES_PER_GB
+    cost_usd = (bytes_billed / _BYTES_PER_TIB) * BQ_ON_DEMAND_PRICE_PER_TIB_USD
+    return gb, cost_usd
 
 
 def _call_rows(project: str, sql: str, params: Optional[list] = None) -> list:
@@ -393,6 +482,13 @@ class PairResult:
     agree_count: int
     avg_abs_diff: Optional[float]
     bytes_billed: int
+    # The "full report" detail beyond the summary row - a fixed abs-diff
+    # histogram (free: computed in the same streaming loop as
+    # agree_count/avg_abs_diff) and a capped (_SAMPLE_CAP) sample of
+    # disagreeing segments, enriched with street_name/functional_class/
+    # lat-lon via one small extra lookup - see _collect_compare_pair_result.
+    histogram: dict = dataclasses.field(default_factory=dict)
+    sample: list = dataclasses.field(default_factory=list)
 
     def to_json(self) -> dict:
         agree_pct = (self.agree_count / self.total_segments) if self.total_segments else None
@@ -400,6 +496,8 @@ class PairResult:
             "tag_a": self.tag_a, "tag_b": self.tag_b, "total_segments": self.total_segments,
             "agree_count": self.agree_count, "agree_pct": agree_pct,
             "avg_abs_diff": self.avg_abs_diff,
+            "histogram": self.histogram,
+            "sample": self.sample,
         }
 
 
@@ -412,13 +510,13 @@ class ModelComparisonResult:
     bq_error: Optional[str] = None
 
 
-def _call_compare_pair(project: str, column: str, entry_a: ModelEntry, entry_b: ModelEntry) -> PairResult:
-    """CALLs calc.model_registry_compare_models for one pair - B's
-    identifiers doubled into the required third "relate" slot (ignoring
-    value_relate in the response), per the module docstring. Streams the
-    result's pages rather than materializing them into a list, keeping
-    only the running totals needed for the agree-count/avg-abs-diff this
-    panel actually shows."""
+def _submit_compare_pair_job(project: str, column: str, entry_a: ModelEntry, entry_b: ModelEntry) -> bigquery.QueryJob:
+    """Submits (does NOT wait for) the calc.model_registry_compare_models
+    CALL for one pair - B's identifiers doubled into the required third
+    "relate" slot (ignoring value_relate in the response), per the
+    module docstring. Returns the QueryJob immediately so a caller can
+    poll its in-progress total_bytes_processed before it's done (see
+    compare_models())."""
     params = [
         bigquery.ScalarQueryParameter("p_tag_a", "STRING", entry_a.tag),
         bigquery.ScalarQueryParameter("p_state_a", "STRING", entry_a.state),
@@ -444,13 +542,53 @@ def _call_compare_pair(project: str, column: str, entry_a: ModelEntry, entry_b: 
         @p_tag_b, @p_state_b, @p_year_b, @p_month_b, @p_column_b, @p_use_details_b,
         @p_relate_tag, @p_relate_state, @p_relate_year, @p_relate_month, @p_relate_column, @p_use_details_relate)"""
     client = bigquery.Client(project=project)
-    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
+    return client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
 
+
+def _lookup_sample_metadata(project: str, table_ref: str, segment_ids: list[str]) -> tuple[dict, int]:
+    """street_name/functional_class/centroid lat-lon for a BOUNDED set of
+    segment ids (the sampled disagreements only - at most _SAMPLE_CAP,
+    never the full per-pair result) - looked up from entry_a's own
+    archived_details_table, since the compare procedure's own result row
+    only ever has here_segment_id/value_a/value_b/value_relate (see the
+    module docstring). Returns ({segment_id: Row}, bytes_billed) - the
+    bytes get folded into the pair's own bytes_billed total, same as any
+    other real query this feature runs."""
+    if not segment_ids:
+        return {}, 0
+    dataset_id, table_id = table_ref.split(".", 1)
+    client = bigquery.Client(project=project)
+    job = client.query(
+        f"""
+        SELECT here_segment_id, street_name, functional_class,
+               ST_Y(ST_CENTROID(geom)) AS lat, ST_X(ST_CENTROID(geom)) AS lon
+        FROM `{project}.{dataset_id}.{table_id}`
+        WHERE here_segment_id IN UNNEST(@p_ids)
+        """,
+        job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ArrayQueryParameter("p_ids", "STRING", segment_ids),
+        ]),
+    )
+    rows = list(job.result())
+    return {r.here_segment_id: r for r in rows}, (job.total_bytes_billed or 0)
+
+
+def _collect_compare_pair_result(
+    job: bigquery.QueryJob, project: str, column: str, entry_a: ModelEntry, entry_b: ModelEntry,
+) -> PairResult:
+    """Streams an already-submitted (and finished) compare job's
+    RowIterator, keeping only running totals - never the full per-segment
+    result set. Builds the abs-diff histogram and a capped disagreement
+    sample in the same pass (see module docstring), then does one small
+    extra lookup to enrich that sample."""
     needs_round = column in _NEEDS_ROUNDING
     total = 0
     agree = 0
     diff_sum = 0.0
     diff_count = 0
+    histogram = {label: 0 for label in _DIFF_BUCKET_LABELS}
+    disagreements: list[tuple[str, float, float]] = []
+
     for row in job.result():
         total += 1
         va, vb = row.value_a, row.value_b
@@ -458,40 +596,96 @@ def _call_compare_pair(project: str, column: str, entry_a: ModelEntry, entry_b: 
             continue
         if needs_round:
             va, vb = round(va), round(vb)
+        d = abs(va - vb)
         if va == vb:
             agree += 1
-        diff_sum += abs(va - vb)
+        elif len(disagreements) < _SAMPLE_CAP:
+            disagreements.append((row.here_segment_id, va, vb))
+        diff_sum += d
         diff_count += 1
+        histogram[_diff_bucket(d)] += 1
 
     avg_abs_diff = round(diff_sum / diff_count, 2) if diff_count else None
+    meta, meta_bytes_billed = _lookup_sample_metadata(
+        project, entry_a.archived_details_table, [seg_id for seg_id, _, _ in disagreements],
+    )
+    sample = []
+    for seg_id, va, vb in disagreements:
+        m = meta.get(seg_id)
+        sample.append({
+            "segment_id": seg_id, "value_a": va, "value_b": vb, "abs_diff": round(abs(va - vb), 3),
+            "street_name": m.street_name if m else None,
+            "functional_class": m.functional_class if m else None,
+            "lat": m.lat if m else None, "lon": m.lon if m else None,
+        })
+
     return PairResult(
         tag_a=entry_a.tag, tag_b=entry_b.tag, total_segments=total, agree_count=agree,
-        avg_abs_diff=avg_abs_diff, bytes_billed=job.total_bytes_billed or 0,
+        avg_abs_diff=avg_abs_diff, bytes_billed=(job.total_bytes_billed or 0) + meta_bytes_billed,
+        histogram=histogram, sample=sample,
     )
 
 
-def compare_models(project: str, column: str, entries: list[ModelEntry], log=lambda msg: None) -> ModelComparisonResult:
+def _call_compare_pair(project: str, column: str, entry_a: ModelEntry, entry_b: ModelEntry) -> PairResult:
+    """Synchronous one-shot submit+wait+collect - kept for anything that
+    doesn't need live in-progress byte-count updates (e.g. a unit test).
+    compare_models() below calls _submit_compare_pair_job/
+    _collect_compare_pair_result directly instead, polling the job in
+    between so it can report live progress."""
+    job = _submit_compare_pair_job(project, column, entry_a, entry_b)
+    job.result()
+    return _collect_compare_pair_result(job, project, column, entry_a, entry_b)
+
+
+def compare_models(
+    project: str, column: str, entries: list[ModelEntry],
+    log=lambda msg: None, on_event=lambda event, **kw: None,
+) -> ModelComparisonResult:
     """Runs one calc.model_registry_compare_models CALL per pair among
     2-3 selected models - no pre-flight cost estimate/confirmation (see
     the module docstring for why that isn't possible here), just the
-    real cost of each call, summed and reported once every pair has run."""
+    real cost of each call, summed and reported once every pair has run.
+
+    `on_event` reports live progress as it happens, so a caller (app.py's
+    background job thread, see model_library's module docstring) can
+    update a pollable status record instead of blocking a request for
+    however long up to 3 sequential CALLs take:
+      - "start" (pairs_total)
+      - "pair_started" (index, tag_a, tag_b)
+      - "bytes_update" (index, bytes_processed) - polled from the still-
+        running job's own total_bytes_processed, repeatedly until done
+      - "pair_done" (index, pair) - a completed PairResult
+      - "done" (gb, cost_usd) - once every pair has run
+    """
     missing = [e.label for e in entries if not e.archived_details_table]
     if missing:
         return ModelComparisonResult(kind="error", bq_error=f"No archived details table for: {', '.join(missing)}.")
 
+    pair_indices = [(i, j) for i in range(len(entries)) for j in range(i + 1, len(entries))]
+    on_event("start", pairs_total=len(pair_indices))
+
     pairs = []
     total_bytes_billed = 0
-    for i in range(len(entries)):
-        for j in range(i + 1, len(entries)):
-            try:
-                pair = _call_compare_pair(project, column, entries[i], entries[j])
-            except GoogleAPICallError as e:
-                log(f"Model comparison failed on {entries[i].tag} vs {entries[j].tag}: {e}")
-                return ModelComparisonResult(kind="error", bq_error=str(e))
-            total_bytes_billed += pair.bytes_billed
-            pairs.append(pair)
+    for idx, (i, j) in enumerate(pair_indices):
+        entry_a, entry_b = entries[i], entries[j]
+        on_event("pair_started", index=idx, tag_a=entry_a.tag, tag_b=entry_b.tag)
+        try:
+            job = _submit_compare_pair_job(project, column, entry_a, entry_b)
+            while True:
+                job.reload()
+                on_event("bytes_update", index=idx, bytes_processed=job.total_bytes_processed or 0)
+                if job.done():
+                    break
+                time.sleep(1.0)
+            pair = _collect_compare_pair_result(job, project, column, entry_a, entry_b)
+        except GoogleAPICallError as e:
+            log(f"Model comparison failed on {entry_a.tag} vs {entry_b.tag}: {e}")
+            return ModelComparisonResult(kind="error", bq_error=str(e))
+        total_bytes_billed += pair.bytes_billed
+        pairs.append(pair)
+        on_event("pair_done", index=idx, pair=pair)
 
-    gb = total_bytes_billed / _BYTES_PER_GB
-    cost_usd = (total_bytes_billed / _BYTES_PER_TIB) * BQ_ON_DEMAND_PRICE_PER_TIB_USD
+    gb, cost_usd = bytes_to_gb_cost(total_bytes_billed)
     log(f"Compared {[e.key for e in entries]} on {column} ({gb:.3f} GB, ${cost_usd:.4f} actual)")
+    on_event("done", gb=gb, cost_usd=cost_usd)
     return ModelComparisonResult(kind="results", gb=gb, cost_usd=cost_usd, pairs=pairs)
