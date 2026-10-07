@@ -1076,165 +1076,137 @@
     same "don't forget the new module" mistake this file already warns
     about more than once above.
 
-- **Model library sidebar - a library of archived speed-limit model
-  variants, shown on every page, with a "pick two, compare them" flow.**
-  ("I now want to integrate the whole scheme from the 'speed limits
-  improvements' as a library of models that are shown in the Archimedes
-  portal... I want a library of models shown on the left (or right) of
-  each page, so a user can select two models to compare... I want only
-  models that already exist in the archive to be available for
-  comparisons in the UI" - all explicit.) **Read `model_library.py`'s own
-  module docstring before touching this** - it explains why
-  `calc_archive.model_registry_results` was chosen as the single source
-  of truth rather than inventing a second notion of "model".
-  - **"Models that already exist" is `calc_archive.model_registry_results`,
-    confirmed against BigQuery itself, not guessed.** `calc_archive` has
-    ~100+ tables, almost all BigQuery table *SNAPSHOT*s named
-    `<base>__<variant>` (variant one of `avgspeed_only`/`freeflow_only`/
-    `both`/`baseline`) - `model_registry_results` is the one plain
-    `TABLE` in that dataset, and inspecting `calc.model_registry_*`'s own
-    DDL (via `INFORMATION_SCHEMA.ROUTINES`) confirmed it's the real
-    registry, not a guess from the naming scheme alone:
-    `calc.model_registry_insert_result` is what populates a row's
-    `archived_plain_table`/`archived_details_table` on every archive run,
-    and `calc.model_registry_resolve_table`/`model_registry_browse`/
-    `model_registry_describe` are what later look a run back up by
-    `tag`/`state`/`year_num`/`month_num` - the exact four columns
-    `model_library.ModelEntry` keys a "model" by. As of this writing the
-    table has exactly 4 rows (CO, 2026-08, one per variant tag). No
-    written spec of this scheme exists in Drive (checked via the same
-    live-Drive-search mechanism `drive_search.py` already uses, for the
-    "Archimedes"/"Data Science"/"Development"/"Product" folders this app
-    can see) - the stored procedures and the example query below are the
-    only authoritative source, not a doc to cross-check against.
-  - **"The methods to compare models" (plural, from the request) - two
-    were found in BigQuery itself, and the one actually implemented
-    matches the user's own example query.** `calc.model_registry_relate_columns`
-    is a generic three-way per-segment join (any two tables' columns plus
-    a third "relate" table, all on `here_segment_id`) - a finer-grained
-    tool than what this feature needed. The aggregate methodology the
-    user's own example SQL demonstrated (`COUNT`/`COUNTIF` agree/disagree
-    on the corrected inferred limit, `AVG(ABS(...))` for the mph
-    difference, HERE-match counts) is also exactly what
-    `calc.compare_speed_limit_model_variants`/
-    `calc.model_registry_compare_speed_limit_model_variants` use the
-    `avgspeed_only`/`freeflow_only`/`both` variants for in production -
-    so `model_library.build_comparison_sql()` implements that one
-    (`COUNT`, agree/disagree `COUNTIF`, `avg_abs_diff_mph`, HERE-match
-    counts for each side, plus each side's average `confidence_pct`,
-    since every archived `*_details` table carries that column too -
-    confirmed identical across the `avgspeed_only`/`both`/`baseline`/
-    `freeflow_only` variants of the same month via
-    `INFORMATION_SCHEMA.COLUMNS`, so it's safe to reference unconditionally
-    rather than probing per-table first).
+- **Model Registry Compare sidebar - browse archived speed-limit model
+  variants by state/period, then compare 2-3 of them, shown on every
+  page.** Originally built as a flat "pick two" list over
+  `calc_archive.model_registry_results` ("I now want to integrate the
+  whole scheme from the 'speed limits improvements' as a library of
+  models... I want only models that already exist in the archive to be
+  available for comparisons in the UI", then "I want to see the full
+  table names in the sidebar... that sidebar should feed all the tabs"),
+  then REDESIGNED from scratch after a colleague's email described a
+  purpose-built BigQuery backend (`calc.model_registry_list_states`/
+  `list_periods`/`list_tags`/`compare_models`) plus a clickable mockup
+  (a Claude artifact) for a cascading state -> period -> 2-3 tags -> a
+  shared column flow - specifically so this panel never has to list the
+  full registry table once it grows past thousands of rows. **Read
+  `model_library.py`'s own module docstring before touching this** - it
+  explains two load-bearing discrepancies between what that email
+  described and what's actually deployed, both confirmed live against
+  BigQuery rather than taken on faith:
+  - **`calc.model_registry_list_common_columns` does not exist.**
+    `calc.INFORMATION_SCHEMA.ROUTINES` was queried directly and only
+    four of the five procedures the email described are actually
+    there (`list_states`/`list_periods`/`list_tags`/`compare_models` -
+    no `list_common_columns`). `model_library.list_common_columns()`
+    computes the same thing itself instead, via a per-table
+    `INFORMATION_SCHEMA.COLUMNS` query (scoped to the 2-3 specific
+    tables someone just picked, never a dataset-wide scan) - not a
+    guess at what a missing procedure might have done, just the same
+    "intersect the common numeric columns" logic written directly.
+    Filters to `INT64`/`FLOAT64`/`NUMERIC`/`BIGNUMERIC` only, which
+    naturally excludes `here_segment_id` (STRING, the join key itself),
+    `geom` (GEOGRAPHY), and other non-metric columns without needing a
+    hand-picked allowlist.
+  - **`compare_models()` here does NOT call `calc.model_registry_compare_models`.**
+    Tested live: a dry run of `CALL calc.model_registry_compare_models(...)`
+    reports `total_bytes_processed=0`, because that procedure's real
+    query is built at runtime via `EXECUTE IMMEDIATE` inside
+    `calc.model_registry_relate_columns` - a dry run can't see through
+    dynamic SQL constructed after the fact. That makes it impossible to
+    give an honest cost estimate before running it, which this app's
+    standing rule requires for anything scanning a 700K-35M row archived
+    table (same `$10` dry-run/cost-gate flow as the SQL console -
+    `bq_sql_console.estimate_query_cost`/`COST_CONFIRMATION_THRESHOLD_USD`,
+    reused rather than reinvented). It would also hand back one row per
+    `here_segment_id` - exactly what the email's own scale note warned
+    against materializing client-side - meaning a second aggregation
+    query would be needed regardless. `build_pairwise_comparison_sql()`
+    builds the one literal, dry-runnable, already-aggregated query
+    instead: the same join-on-`here_segment_id` methodology
+    `model_registry_relate_columns` itself implements (and the same
+    `COUNT`/`COUNTIF` agree-count/`AVG(ABS(...))` methodology the
+    original user-supplied example query demonstrated), generalized from
+    a single pair to every pairwise combination among 2 or 3 selected
+    models in one query (aliases `a`/`b`/`c`, one join per extra model,
+    `agree_ab`/`avg_abs_diff_ab`/`agree_ac`/... columns) - written
+    directly rather than through a wrapper whose cost can't be seen in
+    advance.
+  - **`speed_limit_here_mph` is wrapped in `ROUND()` when chosen as the
+    compare column; every other column isn't** - same established rule
+    as `quality_metrics.py`/`find_bad_speed_limit.py` (search this file
+    for "always wrapped in `ROUND()`"): it's the one column stored as a
+    noisy, unrounded km/h->mph conversion, and comparing it unrounded
+    would read as spurious disagreement. `model_library._NEEDS_ROUNDING`
+    is the one place this is special-cased - don't blanket-`ROUND()`
+    every column, that rule is specific to this one column for a
+    specific, confirmed reason.
   - **A "model" is identified to the frontend by a stable key
-    (`tag|state|year_num|month_num`), never by a raw table name.**
-    `ModelEntry.key` is what `_model_library_sidebar.html`'s checkboxes
-    use and what `/models/compare` takes as `key_a`/`key_b` - the route
-    always re-resolves both keys against a FRESH `discover_models()` call
-    before building any SQL (`app.py`'s `models_compare()`), so a
-    stale or forged key just fails the lookup instead of ever reaching
-    `build_comparison_sql()`'s table-name interpolation. Don't change
-    this to accept a table name (or an unvalidated index) directly from
-    the client - the whole point is that the only tables this feature can
-    ever query are ones the server itself just read out of the registry.
-  - **Same `$10` dry-run/cost-gate flow as the SQL console, reused rather
-    than reinvented** (`bq_sql_console.estimate_query_cost`/
-    `COST_CONFIRMATION_THRESHOLD_USD`) - these `archived_details_table`
-    tables are full per-segment archives (hundreds of thousands of rows
-    each), so a join across two of them is exactly the kind of query that
-    gate exists for. `model_library.compare_models()` returns
-    `kind="cost_estimate"` (no execution) until confirmed, same shape
-    (`gb`/`cost_usd`) the sidebar's JS already knows how to render from
-    building the Ask Archimedes cost-estimate UI first.
-  - **The sidebar is included once, in `layout.html` itself, not per-page** -
-    `{% include "_model_library_sidebar.html" %}` right before
-    `</body>`, so "shown on each page" didn't require touching every
-    existing route/template's `render_template()` call. It fetches
-    `GET /models/library` itself via JS on load (a plain JSON endpoint,
-    not baked into any page's own render context) rather than every view
-    function needing to pass a `models=` list through - the tradeoff is a
-    second request per page load, which is fine for a handful of registry
-    rows.
-  - **Fixed-position overlay, not part of `.wrap`'s centered flow** -
-    `layout.html`'s existing `.wrap { max-width: 900px; margin: 0 auto; }`
-    centers every page's content, so a sidebar that reflowed it would have
-    meant touching that on every page; instead the panel is
-    `position: fixed`, slides in from the right over the page (a
-    persistent vertical "Models" tab stays visible either way), open by
-    default above an 860px viewport and collapsed below it, with the
-    open/closed choice remembered in `localStorage` purely as a
-    per-viewer convenience (same caution this file would give any
-    `localStorage` use - never relied on for anything the server needs to
-    read back).
-  - **Selection is capped at 2 by disabling the other checkboxes, not by
-    silently dropping an earlier pick** - `onModelCheck()` in the sidebar's
-    JS disables every unchecked box once 2 are selected (and re-enables
-    them the moment one is unchecked), so it's always visually obvious
-    why a third click didn't register, rather than it silently swapping
-    out an earlier selection.
+    (`tag|state|year_num|month_num`), never by a raw table name** -
+    `ModelEntry.key`, what the step-3 checkboxes use and what
+    `/models/compare` takes in its `keys` array. The route always
+    re-resolves every key against a FRESH `list_tags(state, year_num,
+    month_num)` call, and the chosen column against a fresh
+    `list_common_columns()` call, before building any SQL (`app.py`'s
+    `models_compare()`/`models_columns()`) - a stale or forged key/column
+    just fails the lookup instead of ever reaching
+    `build_pairwise_comparison_sql()`'s table-name interpolation.
+  - **Each step only ever fetches what the previous step narrowed to** -
+    `GET /models/states` (all of them, small/cheap), `GET
+    /models/periods?state=` (one state), `GET
+    /models/tags?state=&year_num=&month_num=` (one state+period, at most
+    a handful of rows, enriched with `predictions`/`errors`/
+    `grievous_errors` via one more small query scoped by the same
+    state+period+tag - never a full-table scan), `GET
+    /models/columns?state=&year_num=&month_num=&tag=&tag=` (2-3 specific
+    tables). The OLD flat approach (`discover_models()`, one `SELECT *
+    FROM model_registry_results`) is gone entirely - it doesn't scale
+    once the registry grows past a handful of rows, which is exactly
+    what the redesign was for.
+  - **The sidebar is included once, in `layout.html` itself, not
+    per-page**, as a fixed-position overlay (not part of `.wrap`'s
+    centered flow) with a persistent vertical "Models" tab, open by
+    default above an 860px viewport, collapsed below it - open/closed
+    state remembered in `localStorage` purely as a per-viewer
+    convenience, never relied on for anything the server needs back.
+  - **Steps 1 and 2 (state, period) auto-collapse once resolved; step 3
+    (2-3 models) deliberately does NOT**, and this was a real bug caught
+    by the Playwright walkthrough while building this, not a hypothetical:
+    the first version called the same "mark done + collapse" helper for
+    step 3 the instant 2 boxes were checked, which hid the step's own
+    body - including the still-unchecked third checkbox - making it
+    physically impossible to add a third model through the UI. 2 is the
+    MINIMUM for step 3, not a finish line (3 is also valid), so it only
+    gets the "done" styling (green step number) without collapsing;
+    collapsing stays available manually (clicking the step header once
+    it's marked done). If a future step is similarly "resolved but still
+    open to more," don't reach for `setStepStatus(..., 'done')` - it
+    collapses by design.
+  - **"Use this model" (step 3, per row) feeds that model's identity into
+    every other tab** - writes `{table, state, year_num, month_num,
+    label}` to `localStorage['archimedes-active-model']` and applies it,
+    via generic element-ID lookups (`#table`, `#state`, `#year`,
+    `#month`), to whichever of those exist on the CURRENT page -
+    `quality.html`/`explore.html`/`agent.html` share `#table` (a
+    `<select>`; a fallback `<option>` is inserted first if the active
+    table isn't already one of `table_options`, same pattern those
+    templates already use for an arbitrary `filters.table` value), and
+    `evaluator.html`/`index.html` share `#state`/`#year`/`#month`. The
+    same `applyActiveModelToPage()` call also runs unconditionally on
+    every page load (not just after clicking "Use"), straight from
+    `_model_library_sidebar.html`'s own script, so this is the ONE place
+    that does the feeding - no other template needs to change to
+    participate, and a future tab reusing the same field IDs is fed for
+    free. Deliberately only ever SETS a field's value - never
+    auto-submits a form or navigates (Quality/Explore are GET-form pages
+    that should only reflect a new table once the user actually submits,
+    not silently on page load). A small "Active everywhere: &lt;label&gt;"
+    banner (`#model-lib-active`, a `.badge.ok`) shows which model (if
+    any) is currently being fed, without needing to inspect any one
+    tab's fields to find out.
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.
-  - **Follow-up, same conversation: full table names in the sidebar, and
-    the sidebar feeding every other tab.** ("OK, but I want to see the
-    full table names in the sidebar. Also, that sidebar should feed all
-    the tabs in this app" - both explicit, after the "Safety" design was
-    confirmed fine as-is.)
-    - `ModelEntry.to_json()` now also sends `archived_details_table`/
-      `archived_plain_table` (previously only a `has_details` bool), and
-      `_model_library_sidebar.html` renders `archived_details_table` as a
-      `<code>` line under each row (`.model-lib-table` - wraps on
-      `word-break: break-all` so a long dataset-qualified name doesn't
-      force the 300px panel wider). This is purely additive to what
-      `/models/compare` already does with these fields - the full names
-      were already being used server-side to build the comparison SQL,
-      just not shown.
-    - **"Feed all the tabs" is the sidebar itself pushing a chosen
-      model's identity into every other tab's own existing data-source
-      fields, not a second thing those tabs each have to pull** - a
-      "Use" button per row (`useModelEverywhere(key)`) writes `{table,
-      state, year_num, month_num, label}` to
-      `localStorage['archimedes-active-model']` and immediately applies
-      it to whatever's on the CURRENT page; the same
-      `applyActiveModelToPage()` call also runs unconditionally on every
-      page load (not just after clicking "Use"), straight from
-      `_model_library_sidebar.html`'s own script - since that include is
-      already on every page (see above), this is the ONE place that does
-      the feeding; no other template needed to change to participate.
-      Deliberately keyed off generic element IDs (`#table`, `#state`,
-      `#year`, `#month`) rather than one bespoke wiring per page -
-      `quality.html`/`explore.html`/`agent.html` all already share
-      `#table` (a `<select>`, so a fallback `<option>` is inserted first
-      if the active table isn't already one of `table_options`, same
-      pattern those three templates already use for an arbitrary
-      `filters.table` value), and `evaluator.html`/`index.html` share
-      `#state`/`#year`/`#month` - so a future tab that reuses the same
-      IDs is fed for free. `/deploy` has no data-source fields at all, so
-      nothing to feed there, and that's fine - nothing bad happens, the
-      lookups just no-op.
-    - **This only sets each field's value - it never auto-submits a
-      form or navigates.** Quality/Explore are GET-form pages
-      (`method="get"`) that only reflect a new table once their form is
-      actually submitted; silently resubmitting on the user's behalf
-      on every page load would mean a background-only global state
-      change could override results the user is already looking at
-      without them asking for it. Pre-filling the field and leaving the
-      existing "Apply"/"Run" button as the actual trigger was the
-      deliberate choice here, consistent with every other filter on
-      those pages already working the same way.
-    - **A small "Active everywhere: &lt;label&gt;" banner**
-      (`#model-lib-active`, a `.badge.ok`) sits above the model list
-      whenever a model has been made active, so it's visible at a
-      glance which model (if any) every tab is currently being fed,
-      without having to inspect any single tab's own fields to find out.
-    - This only ever writes a fully qualified table name the server
-      itself returned from `/models/library` moments earlier - never
-      anything derived from free-typed text - so it carries none of the
-      concerns `custom_metrics.py`'s/`bq_sql_console.py`'s docstrings
-      describe; nothing here parses or executes SQL, it just populates a
-      form field exactly the way a person typing the same value in by
-      hand would.
 
 - `~/Claude/MooveAI/` already exists on the machine this is worked on and
   is where all local checkouts/deployments of this repo live - the repo

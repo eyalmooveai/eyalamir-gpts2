@@ -80,7 +80,14 @@ from quality_metrics import (
 )
 from custom_metrics import ExpressionError, resolve_custom_criterion, resolve_custom_criterion_as_expression
 from bq_sql_console import run_sql_console, sql_statement_kind
-from model_library import compare_models, discover_models, find_model
+from model_library import (
+    compare_models,
+    find_model,
+    list_common_columns,
+    list_periods,
+    list_states,
+    list_tags,
+)
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
 # today (this app); the rest are placeholders naming what MooveAI expects
@@ -865,53 +872,140 @@ def _sql_console_response(text: str):
     })
 
 
-@app.route("/models/library", methods=["GET"])
-def models_library():
-    """Backs the model-library sidebar included on every page
-    (templates/_model_library_sidebar.html) - every model archived in
-    calc_archive.model_registry_results, fetched fresh on each page load
-    rather than baked into render_template() for every single route, so
-    adding the sidebar didn't require touching every page's view function."""
+@app.route("/models/states", methods=["GET"])
+def models_states():
+    """Step 1 of the model-library sidebar's cascading picker
+    (templates/_model_library_sidebar.html) - every state with at least
+    one archived run, via calc.model_registry_list_states(). Each step
+    of this picker only ever fetches what the previous step narrowed to,
+    never the full registry - see model_library.py's module docstring."""
     try:
-        models = discover_models(DEFAULT_PROJECT)
+        states = list_states(DEFAULT_PROJECT)
     except Exception as e:
-        return jsonify({"error": f"Could not load the model library: {type(e).__name__}: {e}"}), 500
-    return jsonify({"models": [m.to_json() for m in models]})
+        return jsonify({"error": f"Could not load states: {type(e).__name__}: {e}"}), 500
+    return jsonify({"states": [s.to_json() for s in states]})
+
+
+@app.route("/models/periods", methods=["GET"])
+def models_periods():
+    """Step 2 - periods archived for one state (query param `state`)."""
+    state = (request.args.get("state") or "").strip()
+    if not state:
+        return jsonify({"error": "state is required"}), 400
+    try:
+        periods = list_periods(DEFAULT_PROJECT, state)
+    except Exception as e:
+        return jsonify({"error": f"Could not load periods for {state}: {type(e).__name__}: {e}"}), 500
+    return jsonify({"periods": [p.to_json() for p in periods]})
+
+
+def _parse_year_month(args):
+    """Shared by /models/tags and /models/columns - returns (year_num,
+    month_num, None) on success or (None, None, (response, status)) on a
+    bad/missing query param."""
+    state = (args.get("state") or "").strip()
+    try:
+        year_num = int(args.get("year_num", ""))
+        month_num = int(args.get("month_num", ""))
+    except ValueError:
+        return None, None, (jsonify({"error": "year_num and month_num must be integers"}), 400)
+    if not state:
+        return None, None, (jsonify({"error": "state is required"}), 400)
+    return year_num, month_num, None
+
+
+@app.route("/models/tags", methods=["GET"])
+def models_tags():
+    """Step 3 - archived tags for one state+period (query params
+    `state`, `year_num`, `month_num`)."""
+    state = (request.args.get("state") or "").strip()
+    year_num, month_num, err = _parse_year_month(request.args)
+    if err:
+        return err
+    try:
+        entries = list_tags(DEFAULT_PROJECT, state, year_num, month_num)
+    except Exception as e:
+        return jsonify({"error": f"Could not load models for {state} {year_num}-{month_num:02d}: {type(e).__name__}: {e}"}), 500
+    return jsonify({"models": [m.to_json() for m in entries]})
+
+
+@app.route("/models/columns", methods=["GET"])
+def models_columns():
+    """Step 4 - numeric columns common to every one of 2-3 selected tags
+    (query params `state`, `year_num`, `month_num`, repeated `tag`).
+    Re-fetches list_tags() itself rather than trusting table names from
+    the client - same "never trust a client-supplied identifier, always
+    re-resolve server-side" rule /models/compare follows below."""
+    state = (request.args.get("state") or "").strip()
+    year_num, month_num, err = _parse_year_month(request.args)
+    if err:
+        return err
+    tags = request.args.getlist("tag")
+    if len(tags) < 2:
+        return jsonify({"error": "Pick at least 2 models."}), 400
+    try:
+        entries = list_tags(DEFAULT_PROJECT, state, year_num, month_num)
+    except Exception as e:
+        return jsonify({"error": f"Could not load models: {type(e).__name__}: {e}"}), 500
+    chosen = [e for e in entries if e.tag in tags]
+    if len(chosen) != len(tags):
+        return jsonify({"error": "One of the selected models is no longer in the archive - refresh and try again."}), 400
+    try:
+        columns = list_common_columns(DEFAULT_PROJECT, [e.archived_details_table for e in chosen])
+    except Exception as e:
+        return jsonify({"error": f"Could not load common columns: {type(e).__name__}: {e}"}), 500
+    return jsonify({"columns": columns})
 
 
 @app.route("/models/compare", methods=["POST"])
 def models_compare():
-    """Compares two models the user picked from the sidebar, identified
-    by their stable ModelEntry.key (never a raw table name from the
-    client - see ModelEntry.key's docstring) - both keys are re-resolved
-    against a fresh discover_models() call here before building any SQL,
-    so a stale/forged key just fails the lookup rather than reaching
-    BigQuery. Same dry-run cost estimate / $10 reconfirmation gate as the
-    SQL console (model_library.compare_models)."""
+    """Compares 2-3 models the user picked from the sidebar on one
+    shared column, identified by their stable ModelEntry.key (never a
+    raw table name from the client - see ModelEntry.key's docstring) -
+    re-resolved against a fresh list_tags() call here before building
+    any SQL, so a stale/forged key just fails the lookup rather than
+    reaching BigQuery. Same dry-run cost estimate / $10 reconfirmation
+    gate as the SQL console (model_library.compare_models)."""
     data = request.get_json(silent=True) or {}
-    key_a, key_b = data.get("key_a"), data.get("key_b")
-    if not key_a or not key_b:
-        return jsonify({"error": "Pick two models to compare."}), 400
-    if key_a == key_b:
-        return jsonify({"error": "Pick two different models to compare."}), 400
+    state = (data.get("state") or "").strip()
+    year_num, month_num = data.get("year_num"), data.get("month_num")
+    keys = data.get("keys") or []
+    column = (data.get("column") or "").strip()
     confirmed = bool(data.get("confirmed"))
 
+    if not state or not isinstance(year_num, int) or not isinstance(month_num, int):
+        return jsonify({"error": "state, year_num, and month_num are required."}), 400
+    if not (2 <= len(keys) <= 3):
+        return jsonify({"error": "Pick 2 or 3 models to compare."}), 400
+    if len(set(keys)) != len(keys):
+        return jsonify({"error": "Pick distinct models to compare."}), 400
+    if not column:
+        return jsonify({"error": "Pick a column to compare."}), 400
+
     try:
-        models = discover_models(DEFAULT_PROJECT)
+        entries = list_tags(DEFAULT_PROJECT, state, year_num, month_num)
     except Exception as e:
-        return jsonify({"error": f"Could not load the model library: {type(e).__name__}: {e}"}), 500
-    entry_a, entry_b = find_model(models, key_a), find_model(models, key_b)
-    if entry_a is None or entry_b is None:
+        return jsonify({"error": f"Could not load models: {type(e).__name__}: {e}"}), 500
+    chosen = [find_model(entries, key) for key in keys]
+    if any(e is None for e in chosen):
         return jsonify({"error": "One of the selected models is no longer in the archive - refresh the list and try again."}), 400
 
-    result = compare_models(DEFAULT_PROJECT, entry_a, entry_b, confirmed, log=print)
+    try:
+        common_columns = list_common_columns(DEFAULT_PROJECT, [e.archived_details_table for e in chosen])
+    except Exception as e:
+        return jsonify({"error": f"Could not verify {column}: {type(e).__name__}: {e}"}), 500
+    if column not in common_columns:
+        return jsonify({"error": f"{column} isn't a common numeric column across the selected models - refresh and pick again."}), 400
+
+    result = compare_models(DEFAULT_PROJECT, column, chosen, confirmed, log=print)
     if result.kind == "error":
         return jsonify({"kind": "error", "error": result.bq_error}), 400
     if result.kind == "cost_estimate":
         return jsonify({"kind": "cost_estimate", "gb": result.gb, "cost_usd": result.cost_usd})
     return jsonify({
-        "kind": "results", "gb": result.gb, "cost_usd": result.cost_usd, "stats": result.stats,
-        "label_a": entry_a.label, "label_b": entry_b.label,
+        "kind": "results", "gb": result.gb, "cost_usd": result.cost_usd,
+        "total_segments": result.total_segments, "column": column,
+        "pairs": [p.to_json(result.total_segments) for p in result.pairs],
     })
 
 

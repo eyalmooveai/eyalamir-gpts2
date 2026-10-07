@@ -1,38 +1,92 @@
 {#
-  The model-library sidebar - included once from layout.html (not a
-  per-page template) so "a library of models shown on each page" didn't
-  require touching every existing route/template. A fixed-position
-  overlay panel (not part of .wrap's centered flow) that fetches
-  /models/library on load and lets the user pick two archived models to
-  compare via /models/compare - both routes backed by model_library.py,
-  itself backed by calc_archive.model_registry_results (the authoritative
-  "which models already exist" source - see that module's docstring for
-  how that was confirmed against the real calc.model_registry_* stored
-  procedures rather than guessed).
+  The Model Registry Compare sidebar - included once from layout.html
+  (not a per-page template) so it shows on every page without touching
+  every existing route/template. A fixed-position overlay panel (not
+  part of .wrap's centered flow) implementing a 4-step cascading picker
+  - state -> period -> 2-3 tags -> a shared numeric column - each step
+  scoped to what the previous step narrowed to, so this panel never
+  lists the full calc_archive.model_registry_results table (see
+  model_library.py's module docstring for why that matters at scale).
+  Backed by /models/states, /models/periods, /models/tags,
+  /models/columns, /models/compare.
 
   Also the ONE place that feeds a chosen model into every other tab
   ("that sidebar should feed all the tabs in this app" - explicit): a
-  "Use this model" action per row writes {table, state, year_num,
+  "Use this model" action per step-3 row writes {table, state, year_num,
   month_num, label} to localStorage and this same script applies it, on
   every page load, to whichever of #table/#state/#year/#month happen to
-  exist on the current page (quality.html/explore.html/agent.html all
-  share #table; evaluator.html/index.html share #state/#year/#month) -
-  generic element-ID lookups here rather than one bespoke per-page
-  wiring, so a future tab that reuses the same field IDs is fed for
-  free, with nothing to edit in this file or that page's own template.
+  exist on the current page.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
   <button type="button" class="model-lib-close" onclick="toggleModelLib(false)" aria-label="Close">&times;</button>
-  <span class="eyebrow">Model Library</span>
-  <h3>Compare archived models</h3>
-  <p class="section-intro" style="margin:-2px 0 10px;">
-    Pick two to compare - only models already archived in <code>calc_archive</code> are listed here.
-    Click "Use" on any one to feed it into this tab's (and every other tab's) data source.
+  <span class="eyebrow">Model Registry Compare</span>
+  <h3>Pick a state, then narrow down</h3>
+  <p class="section-intro" style="margin:-2px 0 0;">
+    State &rarr; period &rarr; 2-3 archived runs &rarr; a shared column. "Use" feeds any one model into this tab's (and every other tab's) data source.
   </p>
-  <div id="model-lib-active" style="display:none; margin:0 0 12px;"></div>
-  <div id="model-lib-list" style="font-size:0.82rem; color:var(--muted);">Loading...</div>
-  <button type="button" class="btn-secondary model-lib-compare-btn" id="model-lib-compare-btn" disabled onclick="compareSelectedModels()">Compare selected (0/2)</button>
+  <div id="model-lib-active" style="display:none; margin:10px 0 0;"></div>
+
+  <div class="model-lib-step active" id="mlib-step-state">
+    <div class="model-lib-step-head" onclick="toggleStepBody('state')">
+      <div class="model-lib-step-num">1</div>
+      <div>
+        <div class="model-lib-step-title">State</div>
+        <div class="model-lib-step-sub" id="mlib-state-sub">Search by code or name</div>
+      </div>
+      <div class="model-lib-step-chip" id="mlib-state-chip"></div>
+    </div>
+    <div class="model-lib-step-body" id="mlib-state-body">
+      <input type="text" id="mlib-state-search" placeholder="e.g. CO or Colorado" autocomplete="off">
+      <p class="model-lib-count" id="mlib-state-count"></p>
+      <div id="mlib-state-list"></div>
+    </div>
+  </div>
+
+  <div class="model-lib-step locked" id="mlib-step-period">
+    <div class="model-lib-step-head" onclick="toggleStepBody('period')">
+      <div class="model-lib-step-num">2</div>
+      <div>
+        <div class="model-lib-step-title">Period</div>
+        <div class="model-lib-step-sub" id="mlib-period-sub">Pick a state first</div>
+      </div>
+      <div class="model-lib-step-chip" id="mlib-period-chip"></div>
+    </div>
+    <div class="model-lib-step-body" id="mlib-period-body">
+      <div class="model-lib-pill-row" id="mlib-period-list"></div>
+    </div>
+  </div>
+
+  <div class="model-lib-step locked" id="mlib-step-tags">
+    <div class="model-lib-step-head" onclick="toggleStepBody('tags')">
+      <div class="model-lib-step-num">3</div>
+      <div>
+        <div class="model-lib-step-title">Models to compare</div>
+        <div class="model-lib-step-sub" id="mlib-tags-sub">Pick a period first</div>
+      </div>
+      <div class="model-lib-step-chip" id="mlib-tags-chip"></div>
+    </div>
+    <div class="model-lib-step-body" id="mlib-tags-body">
+      <p class="hint" style="font-size:0.72rem; color:var(--muted); margin:0;">Check 2 or 3 - order doesn't matter, every pair is compared once you pick a column.</p>
+      <div id="mlib-tags-list"></div>
+    </div>
+  </div>
+
+  <div class="model-lib-step locked" id="mlib-step-column">
+    <div class="model-lib-step-head" onclick="toggleStepBody('column')">
+      <div class="model-lib-step-num">4</div>
+      <div>
+        <div class="model-lib-step-title">Column to compare</div>
+        <div class="model-lib-step-sub" id="mlib-column-sub">Pick models first</div>
+      </div>
+      <div class="model-lib-step-chip" id="mlib-column-chip"></div>
+    </div>
+    <div class="model-lib-step-body" id="mlib-column-body">
+      <div class="model-lib-pill-row" id="mlib-column-list"></div>
+      <button type="button" class="btn-secondary model-lib-compare-btn" id="model-lib-compare-btn" disabled onclick="runModelCompare()">Compare</button>
+    </div>
+  </div>
+
   <div id="model-lib-result" class="model-lib-result" style="display:none;"></div>
 </aside>
 
@@ -43,8 +97,47 @@
   }
 
   const ACTIVE_MODEL_KEY = 'archimedes-active-model';
-  let models = [];
-  const selected = [];
+  const STEP_IDS = ['state', 'period', 'tags', 'column'];
+  const STATE_NAMES = {
+    AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",
+    DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",
+    KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",
+    MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",
+    NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",
+    OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",
+    TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",
+    WI:"Wisconsin",WY:"Wyoming",US:"United States (nationwide)",
+  };
+
+  // chosen narrows as each step resolves; reset() clears from a given step onward
+  let chosen = { state: null, year_num: null, month_num: null, tags: [], column: null };
+  let allStates = [];
+  let currentTagEntries = []; // step 3's fetched models - also what "Use" looks a key up in
+
+  // --- step chrome (locked/active/done, collapse) --------------------
+
+  function setStepStatus(name, status) {
+    const el = document.getElementById(`mlib-step-${name}`);
+    el.classList.remove('locked', 'active', 'done', 'collapsed');
+    if (status) el.classList.add(status);
+    if (status === 'done') el.classList.add('collapsed');
+  }
+
+  window.toggleStepBody = function (name) {
+    const el = document.getElementById(`mlib-step-${name}`);
+    if (!el.classList.contains('done')) return; // only a resolved step collapses/expands on click
+    el.classList.toggle('collapsed');
+  };
+
+  function setChip(name, html) {
+    document.getElementById(`mlib-${name}-chip`).innerHTML = html;
+  }
+
+  function changeLink(name, onClick) {
+    return `<button type="button" class="model-lib-change-link" onclick="event.stopPropagation(); (${onClick})()">change</button>`;
+  }
+
+  // --- the sidebar's own open/collapse toggle (unrelated to the steps) -
 
   window.toggleModelLib = function (force) {
     const panel = document.getElementById('model-lib-panel');
@@ -53,11 +146,7 @@
     try { localStorage.setItem('archimedes-model-lib-open', open ? '1' : '0'); } catch (e) {}
   };
 
-  function pctLabel(frac) {
-    return typeof frac === 'number' ? (frac * 100).toFixed(1) + '%' : 'n/a';
-  }
-
-  // --- Feeding the chosen model into every tab's own data-source fields -
+  // --- feeding the chosen model into every tab's own data-source fields -
 
   function getActiveModel() {
     try {
@@ -65,7 +154,6 @@
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   }
-
   function setActiveModel(m) {
     try {
       localStorage.setItem(ACTIVE_MODEL_KEY, JSON.stringify({
@@ -74,11 +162,6 @@
       }));
     } catch (e) {}
   }
-
-  // Applies the active model to whichever of these field IDs exist on
-  // THIS page - every page that has a #table select (quality/explore/
-  // agent) or #state/#year/#month inputs (evaluator/sign-checker) gets
-  // fed, with no per-page code of its own.
   function applyActiveModelToPage() {
     const active = getActiveModel();
     if (!active) return;
@@ -86,9 +169,7 @@
     if (tableEl && active.table) {
       if (tableEl.tagName === 'SELECT' && ![...tableEl.options].some(o => o.value === active.table)) {
         const opt = document.createElement('option');
-        opt.value = active.table;
-        opt.textContent = active.table;
-        opt.selected = true;
+        opt.value = active.table; opt.textContent = active.table; opt.selected = true;
         tableEl.appendChild(opt);
       }
       tableEl.value = active.table;
@@ -100,88 +181,215 @@
     const monthEl = document.getElementById('month');
     if (monthEl && active.month_num) monthEl.value = active.month_num;
   }
-
   function renderActiveBanner() {
     const el = document.getElementById('model-lib-active');
     const active = getActiveModel();
     if (!active) { el.style.display = 'none'; return; }
     el.style.display = 'block';
-    el.innerHTML = `
-      <p class="badge ok" style="display:inline-block; max-width:100%; white-space:normal;">
-        Active everywhere: ${escapeHtml(active.label)}
-      </p>`;
+    el.innerHTML = `<p class="badge ok" style="display:inline-block; max-width:100%; white-space:normal;">Active everywhere: ${escapeHtml(active.label)}</p>`;
   }
-
   window.useModelEverywhere = function (key) {
-    const m = models.find(x => x.key === key);
+    const m = currentTagEntries.find(x => x.key === key);
     if (!m) return;
     setActiveModel(m);
     applyActiveModelToPage();
     renderActiveBanner();
   };
 
-  function renderList() {
-    const listEl = document.getElementById('model-lib-list');
-    if (!models.length) {
-      listEl.textContent = 'No archived models found.';
-      return;
-    }
-    const byTag = {};
-    models.forEach(m => { (byTag[m.tag] = byTag[m.tag] || []).push(m); });
-    const groups = Object.keys(byTag).sort().map(tag => {
-      const rows = byTag[tag].map(m => `
-        <div class="model-lib-row">
-          <input type="checkbox" id="model-lib-${m.key}" value="${escapeHtml(m.key)}" onchange="onModelCheck(this)">
-          <label for="model-lib-${m.key}">
-            ${escapeHtml(m.state)} ${m.year_num}-${String(m.month_num).padStart(2, '0')}
-            <span class="model-lib-meta">error rate ${pctLabel(m.error_rate)} &middot; ${(m.rows_total || 0).toLocaleString()} rows</span>
-            <code class="model-lib-table">${escapeHtml(m.archived_details_table || '(no details table)')}</code>
-          </label>
-          <button type="button" class="btn-secondary model-lib-use-btn" onclick="useModelEverywhere('${m.key}')" title="Use this model's table in every tab">Use</button>
-        </div>`).join('');
-      return `<div class="model-lib-group"><h4>${escapeHtml(tag)}</h4>${rows}</div>`;
-    }).join('');
-    listEl.innerHTML = groups;
+  // --- step 1: state ---------------------------------------------------
+
+  function statesMatching(q) {
+    q = (q || '').trim().toLowerCase();
+    return allStates.filter(s => !q || s.state.toLowerCase().startsWith(q) || (STATE_NAMES[s.state] || '').toLowerCase().includes(q));
   }
 
-  window.onModelCheck = function (input) {
-    const key = input.value;
-    if (input.checked) {
-      if (selected.length >= 2) { input.checked = false; return; }
-      selected.push(key);
-    } else {
-      const idx = selected.indexOf(key);
-      if (idx >= 0) selected.splice(idx, 1);
-    }
-    document.querySelectorAll('#model-lib-list input[type="checkbox"]').forEach(cb => {
-      if (!selected.includes(cb.value)) cb.disabled = selected.length >= 2;
+  function renderStates() {
+    const matches = statesMatching(document.getElementById('mlib-state-search').value);
+    document.getElementById('mlib-state-count').textContent = `${matches.length} of ${allStates.length} states`;
+    const shown = matches.slice(0, 8);
+    document.getElementById('mlib-state-list').innerHTML = shown.map(s => `
+      <div class="model-lib-option-row" data-state="${escapeHtml(s.state)}">
+        <span class="code">${escapeHtml(s.state)}</span>
+        <span class="name">${escapeHtml(STATE_NAMES[s.state] || '')}</span>
+        <span class="count">${s.run_count} run${s.run_count === 1 ? '' : 's'}</span>
+      </div>`).join('') + (matches.length > 8 ? `<p class="hint" style="font-size:0.7rem; color:var(--muted); margin:4px 0 0;">+ ${matches.length - 8} more - keep typing to narrow</p>` : '');
+    document.querySelectorAll('#mlib-state-list .model-lib-option-row').forEach(el => {
+      el.addEventListener('click', () => selectState(el.dataset.state));
     });
-    const btn = document.getElementById('model-lib-compare-btn');
-    btn.textContent = `Compare selected (${selected.length}/2)`;
-    btn.disabled = selected.length !== 2;
+  }
+
+  function selectState(state) {
+    chosen = { state, year_num: null, month_num: null, tags: [], column: null };
+    document.getElementById('mlib-state-search').value = '';
+    setChip('state', `<span class="model-lib-chip">${escapeHtml(state)}</span>${changeLink('state', 'changeState')}`);
+    setStepStatus('state', 'done');
+    loadPeriods(state);
+  }
+  window.changeState = function () {
+    chosen = { state: null, year_num: null, month_num: null, tags: [], column: null };
+    setStepStatus('state', 'active');
+    setChip('state', '');
+    ['period', 'tags', 'column'].forEach(n => { setStepStatus(n, 'locked'); setChip(n, ''); });
     document.getElementById('model-lib-result').style.display = 'none';
   };
+
+  // --- step 2: period ----------------------------------------------------
+
+  function loadPeriods(state) {
+    document.getElementById('mlib-period-sub').textContent = `Loading periods for ${state}...`;
+    fetch(`/models/periods?state=${encodeURIComponent(state)}`)
+      .then(r => r.json())
+      .then(data => {
+        const periods = data.periods || [];
+        document.getElementById('mlib-period-sub').textContent = `Periods archived for ${state}`;
+        document.getElementById('mlib-period-list').innerHTML = periods.map(p => `
+          <button type="button" class="model-lib-pill" data-key="${p.key}" ${p.comparable ? '' : 'disabled title="Only one tag archived - nothing to compare"'}>
+            ${p.key} (${p.tag_count})
+          </button>`).join('') || '<p class="hint" style="font-size:0.72rem; color:var(--muted);">No periods archived for this state.</p>';
+        document.querySelectorAll('#mlib-period-list .model-lib-pill').forEach(el => {
+          el.addEventListener('click', () => selectPeriod(el.dataset.key));
+        });
+        setStepStatus('period', 'active');
+      })
+      .catch(err => { document.getElementById('mlib-period-sub').textContent = `Could not load periods: ${err.message}`; });
+  }
+
+  function selectPeriod(key) {
+    const [y, m] = key.split('-').map(Number);
+    chosen.year_num = y; chosen.month_num = m; chosen.tags = []; chosen.column = null;
+    document.querySelectorAll('#mlib-period-list .model-lib-pill').forEach(el => el.classList.toggle('selected', el.dataset.key === key));
+    setChip('period', `<span class="model-lib-chip">${key}</span>${changeLink('period', 'changePeriod')}`);
+    setStepStatus('period', 'done');
+    loadTags(chosen.state, y, m);
+  }
+  window.changePeriod = function () {
+    chosen.year_num = null; chosen.month_num = null; chosen.tags = []; chosen.column = null;
+    setStepStatus('period', 'active'); setChip('period', '');
+    ['tags', 'column'].forEach(n => { setStepStatus(n, 'locked'); setChip(n, ''); });
+    document.getElementById('model-lib-result').style.display = 'none';
+  };
+
+  // --- step 3: models (tags) -----------------------------------------------
+
+  function loadTags(state, year_num, month_num) {
+    document.getElementById('mlib-tags-sub').textContent = `Loading models for ${state} ${year_num}-${String(month_num).padStart(2, '0')}...`;
+    fetch(`/models/tags?state=${encodeURIComponent(state)}&year_num=${year_num}&month_num=${month_num}`)
+      .then(r => r.json())
+      .then(data => {
+        currentTagEntries = data.models || [];
+        document.getElementById('mlib-tags-sub').textContent = `Archived for ${state} ${year_num}-${String(month_num).padStart(2, '0')}`;
+        renderTags();
+        setStepStatus('tags', 'active');
+      })
+      .catch(err => { document.getElementById('mlib-tags-sub').textContent = `Could not load models: ${err.message}`; });
+  }
+
+  function renderTags() {
+    document.getElementById('mlib-tags-list').innerHTML = currentTagEntries.map(m => `
+      <div class="model-lib-row">
+        <input type="checkbox" id="mlib-tag-${m.key}" value="${escapeHtml(m.tag)}" onchange="onTagCheck(this)">
+        <label for="mlib-tag-${m.key}">
+          ${escapeHtml(m.tag)}
+          <span class="model-lib-meta">${m.error_rate != null ? 'error rate ' + (m.error_rate * 100).toFixed(1) + '% · ' : ''}${(m.rows_total || 0).toLocaleString()} rows</span>
+          <code class="model-lib-table">${escapeHtml(m.archived_details_table || '(no details table)')}</code>
+        </label>
+        <button type="button" class="btn-secondary model-lib-use-btn" onclick="useModelEverywhere('${m.key}')" title="Use this model's table in every tab">Use</button>
+      </div>`).join('') || '<p class="hint" style="font-size:0.72rem; color:var(--muted);">No models archived for this period.</p>';
+  }
+
+  window.onTagCheck = function (input) {
+    const tag = input.value;
+    if (input.checked) {
+      if (chosen.tags.length >= 3) { input.checked = false; return; }
+      chosen.tags.push(tag);
+    } else {
+      chosen.tags = chosen.tags.filter(t => t !== tag);
+    }
+    document.querySelectorAll('#mlib-tags-list input[type="checkbox"]').forEach(cb => {
+      if (!chosen.tags.includes(cb.value)) cb.disabled = chosen.tags.length >= 3;
+    });
+    chosen.column = null;
+    document.getElementById('model-lib-result').style.display = 'none';
+    if (chosen.tags.length >= 2) {
+      setChip('tags', `<span class="model-lib-chip">${escapeHtml(chosen.tags.join(' · '))}</span>${changeLink('tags', 'changeTags')}`);
+      // "done" styling only (green step number) - deliberately NOT
+      // setStepStatus(..., 'done'), which also collapses the step body:
+      // 2 is the MINIMUM here, not the finish line (up to 3 is valid),
+      // so the still-unchecked box(es) must stay visible and clickable.
+      document.getElementById('mlib-step-tags').classList.remove('locked');
+      document.getElementById('mlib-step-tags').classList.add('done');
+      loadColumns();
+    } else {
+      document.getElementById('mlib-step-tags').classList.remove('done');
+      setChip('tags', '');
+      setStepStatus('column', 'locked');
+      setChip('column', '');
+    }
+  };
+  window.changeTags = function () {
+    chosen.tags = []; chosen.column = null;
+    document.querySelectorAll('#mlib-tags-list input[type="checkbox"]').forEach(cb => { cb.checked = false; cb.disabled = false; });
+    setStepStatus('tags', 'active'); setChip('tags', '');
+    setStepStatus('column', 'locked'); setChip('column', '');
+    document.getElementById('model-lib-result').style.display = 'none';
+  };
+
+  // --- step 4: column ---------------------------------------------------
+
+  function loadColumns() {
+    document.getElementById('mlib-column-sub').textContent = `Loading columns common to ${chosen.tags.join(', ')}...`;
+    const params = new URLSearchParams({ state: chosen.state, year_num: chosen.year_num, month_num: chosen.month_num });
+    chosen.tags.forEach(t => params.append('tag', t));
+    fetch(`/models/columns?${params.toString()}`)
+      .then(r => r.json())
+      .then(data => {
+        const columns = data.columns || [];
+        document.getElementById('mlib-column-sub').textContent = `Common to ${chosen.tags.join(', ')}`;
+        document.getElementById('mlib-column-list').innerHTML = columns.map(c => `
+          <button type="button" class="model-lib-pill" data-col="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')
+          || '<p class="hint" style="font-size:0.72rem; color:var(--muted);">No common numeric column across these models.</p>';
+        document.querySelectorAll('#mlib-column-list .model-lib-pill').forEach(el => {
+          el.addEventListener('click', () => selectColumn(el.dataset.col));
+        });
+        setStepStatus('column', 'active');
+      })
+      .catch(err => { document.getElementById('mlib-column-sub').textContent = `Could not load columns: ${err.message}`; });
+  }
+
+  function selectColumn(col) {
+    chosen.column = col;
+    document.querySelectorAll('#mlib-column-list .model-lib-pill').forEach(el => el.classList.toggle('selected', el.dataset.col === col));
+    setChip('column', `<span class="model-lib-chip">${escapeHtml(col)}</span>`);
+    document.getElementById('model-lib-compare-btn').disabled = false;
+    document.getElementById('model-lib-result').style.display = 'none';
+  }
+
+  // --- compare -----------------------------------------------------------
 
   function statTile(label, value) {
     return `<div class="stat-tile"><div class="stat-value">${value}</div><div class="stat-label">${escapeHtml(label)}</div></div>`;
   }
 
-  window.compareSelectedModels = function (confirmed) {
-    if (selected.length !== 2) return;
+  window.runModelCompare = function (confirmed) {
+    if (chosen.tags.length < 2 || !chosen.column) return;
     const resultEl = document.getElementById('model-lib-result');
     const btn = document.getElementById('model-lib-compare-btn');
     btn.disabled = true;
     resultEl.style.display = 'block';
     resultEl.innerHTML = `<p style="color:var(--muted); margin:0;">${confirmed ? 'Running...' : 'Estimating cost...'}</p>`;
 
+    const keys = chosen.tags.map(tag => currentTagEntries.find(m => m.tag === tag).key);
     fetch('/models/compare', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key_a: selected[0], key_b: selected[1], confirmed: !!confirmed }),
+      body: JSON.stringify({
+        state: chosen.state, year_num: chosen.year_num, month_num: chosen.month_num,
+        keys, column: chosen.column, confirmed: !!confirmed,
+      }),
     })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
-        btn.disabled = selected.length !== 2;
+        btn.disabled = false;
         if (!ok || data.kind === 'error') {
           resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(data.error || 'unknown error')}</p>`;
           return;
@@ -191,56 +399,55 @@
           const costText = data.cost_usd < 0.01 ? '<$0.01' : `~$${data.cost_usd.toFixed(2)}`;
           resultEl.innerHTML = `
             <p class="badge warn" style="display:inline-block;">This comparison is estimated at ${gbText} / ${costText}. Run it?</p>
-            <p style="margin:8px 0 0;"><button type="button" class="btn-secondary" onclick="compareSelectedModels(true)">Yes, run it</button></p>`;
+            <p style="margin:8px 0 0;"><button type="button" class="btn-secondary" onclick="runModelCompare(true)">Yes, run it</button></p>`;
           return;
         }
-        const s = data.stats || {};
-        const total = s.total_segments || 0;
-        const agreePct = total ? ((s.agree / total) * 100).toFixed(1) + '%' : 'n/a';
-        const disagreePct = total ? ((s.disagree / total) * 100).toFixed(1) + '%' : 'n/a';
+        const total = data.total_segments || 0;
+        const pairs = data.pairs || [];
         resultEl.innerHTML = `
-          <p style="margin:0 0 8px; font-size:0.8rem; color:var(--muted);">
-            <strong>${escapeHtml(data.label_a)}</strong> vs <strong>${escapeHtml(data.label_b)}</strong>
-          </p>
-          <div class="stat-grid" style="grid-template-columns:1fr 1fr; gap:8px;">
-            ${statTile('Segments compared', total.toLocaleString())}
-            ${statTile('Agree', agreePct)}
-            ${statTile('Disagree', disagreePct)}
-            ${statTile('Avg abs diff (mph)', s.avg_abs_diff_mph != null ? s.avg_abs_diff_mph : 'n/a')}
-            ${statTile('A matches HERE', s.has_here ? ((s.a_matches_here / s.has_here) * 100).toFixed(1) + '%' : 'n/a')}
-            ${statTile('B matches HERE', s.has_here ? ((s.b_matches_here / s.has_here) * 100).toFixed(1) + '%' : 'n/a')}
-            ${statTile('A avg confidence', s.a_avg_confidence_pct != null ? s.a_avg_confidence_pct + '%' : 'n/a')}
-            ${statTile('B avg confidence', s.b_avg_confidence_pct != null ? s.b_avg_confidence_pct + '%' : 'n/a')}
-          </div>`;
+          <p style="margin:0 0 4px; font-size:0.8rem; color:var(--muted);">${escapeHtml(data.column)} &middot; joined on <code>here_segment_id</code></p>
+          <div class="stat-grid" style="grid-template-columns:1fr; gap:8px;">${statTile('Segments joined', total.toLocaleString())}</div>
+          <table class="model-lib-pair-table">
+            <thead><tr><th>Pair</th><th>Agree</th><th>Avg abs diff</th></tr></thead>
+            <tbody>${pairs.map(p => `
+              <tr>
+                <td><code>${escapeHtml(p.tag_a)}</code> vs <code>${escapeHtml(p.tag_b)}</code></td>
+                <td>${p.agree_pct != null ? (p.agree_pct * 100).toFixed(1) + '%' : 'n/a'}</td>
+                <td>${p.avg_abs_diff != null ? p.avg_abs_diff : 'n/a'}</td>
+              </tr>`).join('')}</tbody>
+          </table>`;
       })
       .catch(err => {
-        btn.disabled = selected.length !== 2;
+        btn.disabled = false;
         resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(err.message)}</p>`;
       });
   };
 
-  fetch('/models/library')
+  // --- init ----------------------------------------------------------------
+
+  document.getElementById('mlib-state-search').addEventListener('input', renderStates);
+
+  fetch('/models/states')
     .then(r => r.json())
     .then(data => {
-      models = data.models || [];
-      renderList();
+      allStates = data.states || [];
+      renderStates();
     })
     .catch(() => {
-      document.getElementById('model-lib-list').textContent = 'Could not load the model library.';
+      document.getElementById('mlib-state-list').textContent = 'Could not load states.';
     });
 
-  // Feed whatever model was already made "active" on a previous page
-  // into THIS page's fields immediately - doesn't need the /models/library
-  // fetch above to finish first, since the active model's identity was
-  // already saved in full by setActiveModel().
+  // Feed whatever model was already made "active" on a previous page into
+  // THIS page's fields immediately - doesn't need any fetch above to
+  // finish first, since the active model's identity was already saved
+  // in full by setActiveModel().
   applyActiveModelToPage();
   renderActiveBanner();
 
-  // Open by default on a wide enough viewport that the panel won't
-  // cover page content outright; collapsed on anything narrower, and
-  // either way a per-viewer convenience the user can override, not
-  // state this app relies on reading back (see artifact storage notes
-  // elsewhere in this codebase for why localStorage is used this way).
+  // Open by default on a wide enough viewport that the panel won't cover
+  // page content outright; collapsed on anything narrower, and either
+  // way a per-viewer convenience, not state this app relies on reading
+  // back.
   let startOpen = window.innerWidth >= 860;
   try {
     const stored = localStorage.getItem('archimedes-model-lib-open');

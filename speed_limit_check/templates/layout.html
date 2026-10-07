@@ -366,7 +366,7 @@
       text-orientation: mixed; letter-spacing: 0.03em;
     }
     .model-lib-panel {
-      position: fixed; top: 56px; right: 0; bottom: 0; width: 300px;
+      position: fixed; top: 56px; right: 0; bottom: 0; width: 330px;
       background: var(--card); border-left: 1px solid var(--border);
       z-index: 55; overflow-y: auto; padding: 18px 16px;
       transform: translateX(100%); transition: transform 0.2s ease;
@@ -379,24 +379,76 @@
       background: none; border: none; color: var(--muted);
       font-size: 1.2rem; line-height: 1; cursor: pointer; padding: 2px 6px;
     }
-    .model-lib-group { margin-top: 14px; }
-    .model-lib-group h4 {
-      margin: 0 0 6px; font-size: 0.78rem; color: var(--moove-teal);
-      text-transform: uppercase; letter-spacing: 0.03em;
+
+    /* Cascading step picker (state -> period -> models -> column), each
+       step narrowing the next so this panel never has to list the full
+       registry - see model_library.py's module docstring. */
+    .model-lib-step {
+      border: 1px solid var(--border); border-radius: 10px; margin-top: 10px;
+      background: var(--bg); overflow: hidden;
     }
+    .model-lib-step-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; }
+    .model-lib-step-num {
+      width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+      font-size: 0.7rem; color: var(--muted); font-weight: 700;
+    }
+    .model-lib-step.done .model-lib-step-num { background: rgba(29,138,74,0.15); border-color: var(--ok); color: var(--ok); }
+    .model-lib-step.active .model-lib-step-num { background: rgba(0,181,173,0.15); border-color: var(--moove-teal); color: var(--moove-teal); }
+    .model-lib-step-title { font-size: 0.85rem; font-weight: 700; }
+    .model-lib-step-sub { font-size: 0.72rem; color: var(--muted); margin-top: 1px; }
+    .model-lib-step-chip { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+    .model-lib-chip {
+      background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+      padding: 2px 8px; font-size: 0.72rem; max-width: 160px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .model-lib-change-link {
+      background: none; border: none; color: var(--accent); font-size: 0.72rem;
+      cursor: pointer; text-decoration: underline; padding: 0; margin-top: 0;
+    }
+    .model-lib-step-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .model-lib-step.collapsed .model-lib-step-body { display: none; }
+    .model-lib-step.locked { opacity: 0.45; pointer-events: none; }
+
+    .model-lib-option-row {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+      cursor: pointer; font-size: 0.8rem;
+    }
+    .model-lib-option-row:hover { background: var(--card); }
+    .model-lib-option-row .code { font-family: monospace; font-weight: 700; width: 28px; flex: 0 0 auto; }
+    .model-lib-option-row .name { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model-lib-option-row .count { font-size: 0.68rem; color: var(--muted); flex: 0 0 auto; }
+    .model-lib-count { font-size: 0.68rem; color: var(--muted); margin: -2px 0 0; }
+
+    .model-lib-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .model-lib-pill {
+      font-size: 0.76rem; padding: 5px 10px; border-radius: 7px; border: 1px solid var(--border);
+      background: var(--card); color: var(--text); cursor: pointer; margin-top: 0;
+    }
+    .model-lib-pill.selected { background: rgba(0,181,173,0.15); border-color: var(--moove-teal); color: var(--moove-teal); }
+    .model-lib-pill:disabled { opacity: 0.4; cursor: not-allowed; }
+
     .model-lib-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
     .model-lib-row:last-child { border-bottom: none; }
     .model-lib-row label { margin: 0; font-size: 0.82rem; color: var(--text); flex: 1 1 200px; min-width: 0; }
     .model-lib-row .model-lib-meta { display: block; font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
     .model-lib-row .model-lib-table {
       display: block; font-size: 0.68rem; color: var(--muted); margin-top: 3px;
-      word-break: break-all; white-space: normal; background: var(--bg);
+      word-break: break-all; white-space: normal; background: var(--card);
       border-radius: 4px; padding: 2px 4px;
     }
     .model-lib-row input[type="checkbox"] { margin-top: 3px; }
     .model-lib-use-btn { margin-top: 0; padding: 3px 10px; font-size: 0.72rem; flex: 0 0 auto; align-self: flex-start; }
-    .model-lib-compare-btn { width: 100%; margin-top: 14px; }
+    .model-lib-compare-btn { width: 100%; margin-top: 4px; }
     .model-lib-result { margin-top: 14px; font-size: 0.82rem; }
+    .model-lib-pair-table { width: 100%; border-collapse: collapse; font-size: 0.76rem; margin-top: 10px; }
+    .model-lib-pair-table th {
+      text-align: left; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.03em;
+      color: var(--muted); padding: 0 6px 4px; border-bottom: 1px solid var(--border);
+    }
+    .model-lib-pair-table td { padding: 6px; border-bottom: 1px solid var(--border); }
+    .model-lib-pair-table tr:last-child td { border-bottom: none; }
   </style>
   {% block extra_head %}{% endblock %}
 </head>
