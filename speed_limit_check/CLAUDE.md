@@ -1325,6 +1325,26 @@
       `ModelEntry.to_json()`, just never displayed before) is now shown
       as "created &lt;date&gt;" on every row via a small
       `formatArchivedAt()` helper.
+  - **Follow-up: "I press Compare and nothing changed on the main page on
+    the left. I don't have a progress meter or anything to indicate
+    time/work done. These must be fixed."** Both true of the inline
+    `#model-lib-result` block that used to render inside this 330px
+    panel - a plain "Running..." text change in a narrow sidebar read as
+    nothing happening at all, especially for a comparison that can take
+    a while (a 35M-row nationwide join). Results now show in a centered
+    **modal** (`#model-lib-compare-modal`) instead - reusing the EXACT
+    `.modal-overlay`/`.lightbox-inner`/`.lightbox-topbar`/`.lightbox-close`
+    pattern `result.html`'s own Street View/Google Maps lightboxes
+    already establish (`hidden` attribute to show/hide, click-on-backdrop
+    and Escape to close), not a second modal convention - and while the
+    comparison runs, the body shows the same `.progress-indeterminate`
+    bar `quality.html`/`evaluator_status.html` already use for "a
+    BigQuery job is running, no meaningful % to report". A modal
+    appearing over the whole page is by itself an unmissable "something
+    changed" signal, which a text swap inside a narrow fixed-position
+    panel wasn't. The 5 earlier `#model-lib-result` resets (whenever an
+    earlier step changes) became `closeModelCompareModal()` calls instead
+    - don't reintroduce `#model-lib-result`; it no longer exists.
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.

@@ -27,6 +27,18 @@
   On a POST-form page (Evaluator/Sign-checker, whose forms start a real
   run), nothing is ever auto-submitted - only the matching fields get
   filled in, with a note saying so.
+
+  Compare results show in a centered MODAL (#model-lib-compare-modal),
+  not squeezed into this 330px panel - real feedback on the live UI was
+  "I press Compare and nothing changed on the main page... I don't have
+  a progress meter." Reuses the exact .modal-overlay/.lightbox-inner/
+  .lightbox-topbar/.lightbox-close pattern result.html's own
+  Street-View/map lightboxes already establish (hidden attribute to
+  toggle, click-outside and Escape to close), rather than inventing a
+  second modal convention - and the existing .progress-indeterminate bar
+  (quality.html/evaluator_status.html) while the comparison runs, since
+  that's unmistakably "work is happening" where the earlier plain-text
+  "Running..." message could read as stuck.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
@@ -98,8 +110,17 @@
     </div>
   </div>
 
-  <div id="model-lib-result" class="model-lib-result" style="display:none;"></div>
 </aside>
+
+<div id="model-lib-compare-modal" class="modal-overlay" hidden>
+  <div class="lightbox-inner" style="max-width:700px;">
+    <div class="lightbox-topbar">
+      <span>Model Registry Compare &mdash; results</span>
+      <button type="button" class="lightbox-close" onclick="closeModelCompareModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="card" id="model-lib-compare-modal-body" style="margin:0; max-height:75vh; overflow-y:auto;"></div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -318,7 +339,7 @@
     setStepStatus('state', 'active');
     setChip('state', '');
     ['period', 'tags', 'column'].forEach(n => { setStepStatus(n, 'locked'); setChip(n, ''); });
-    document.getElementById('model-lib-result').style.display = 'none';
+    closeModelCompareModal();
   };
 
   // --- step 2: period ----------------------------------------------------
@@ -358,7 +379,7 @@
     chosen.year_num = null; chosen.month_num = null; chosen.tags = []; chosen.column = null;
     setStepStatus('period', 'active'); setChip('period', '');
     ['tags', 'column'].forEach(n => { setStepStatus(n, 'locked'); setChip(n, ''); });
-    document.getElementById('model-lib-result').style.display = 'none';
+    closeModelCompareModal();
   };
 
   // --- step 3: models (tags) -----------------------------------------------
@@ -415,7 +436,7 @@
       if (!chosen.tags.includes(cb.value)) cb.disabled = chosen.tags.length >= 3;
     });
     chosen.column = null;
-    document.getElementById('model-lib-result').style.display = 'none';
+    closeModelCompareModal();
     if (chosen.tags.length >= 2) {
       setChip('tags', `<span class="model-lib-chip">${escapeHtml(chosen.tags.join(' · '))}</span>${changeLink('tags', 'changeTags')}`);
       // "done" styling only (green step number) - deliberately NOT
@@ -437,7 +458,7 @@
     document.querySelectorAll('#mlib-tags-list input[type="checkbox"]').forEach(cb => { cb.checked = false; cb.disabled = false; });
     setStepStatus('tags', 'active'); setChip('tags', '');
     setStepStatus('column', 'locked'); setChip('column', '');
-    document.getElementById('model-lib-result').style.display = 'none';
+    closeModelCompareModal();
   };
 
   // --- step 4: column ---------------------------------------------------
@@ -481,21 +502,44 @@
     document.querySelectorAll('#mlib-column-list .model-lib-pill').forEach(el => el.classList.toggle('selected', el.dataset.col === col));
     setChip('column', `<span class="model-lib-chip">${escapeHtml(col)}</span>`);
     document.getElementById('model-lib-compare-btn').disabled = false;
-    document.getElementById('model-lib-result').style.display = 'none';
+    closeModelCompareModal();
   }
 
   // --- compare -----------------------------------------------------------
+  // Results show in a centered modal, not this 330px panel - real feedback
+  // was "I press Compare and nothing changed on the main page... I don't
+  // have a progress meter" - a modal is an unmissable change to the page,
+  // and has the width a 3-model pairwise table actually needs. Same
+  // .modal-overlay/.lightbox-inner/hidden-attribute pattern result.html's
+  // own Street View/map lightboxes already use.
+
+  window.closeModelCompareModal = function () {
+    document.getElementById('model-lib-compare-modal').hidden = true;
+  };
+  document.getElementById('model-lib-compare-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'model-lib-compare-modal') closeModelCompareModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    const modal = document.getElementById('model-lib-compare-modal');
+    if (!modal.hidden && e.key === 'Escape') closeModelCompareModal();
+  });
 
   window.runModelCompare = function () {
     if (chosen.tags.length < 2 || !chosen.column) return;
-    const resultEl = document.getElementById('model-lib-result');
+    const modal = document.getElementById('model-lib-compare-modal');
+    const body = document.getElementById('model-lib-compare-modal-body');
     const btn = document.getElementById('model-lib-compare-btn');
     btn.disabled = true;
-    resultEl.style.display = 'block';
+    modal.hidden = false;
     // No cost estimate up front - calc.model_registry_compare_models can't
     // be dry-run (see model_library.py's module docstring) - the actual
-    // cost shows up with the results below once every pair has run.
-    resultEl.innerHTML = `<p style="color:var(--muted); margin:0;">Running (cost can't be estimated beforehand for this comparison - shown below once it completes)...</p>`;
+    // cost shows up with the results below once every pair has run. The
+    // progress bar is the same .progress-indeterminate element
+    // quality.html/evaluator_status.html already use for "a BigQuery job
+    // is running, no meaningful %% to report" - not a new pattern.
+    body.innerHTML = `
+      <p style="margin:0 0 10px;">Running - cost can't be estimated beforehand for this comparison, shown here once it completes&hellip;</p>
+      <div class="progress-indeterminate"></div>`;
 
     const keys = chosen.tags.map(tag => currentTagEntries.find(m => m.tag === tag).key);
     fetch('/models/compare', {
@@ -510,16 +554,16 @@
       .then(({ ok, data }) => {
         btn.disabled = false;
         if (!ok || data.kind === 'error') {
-          resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(data.error || 'unknown error')}</p>`;
+          body.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(data.error || 'unknown error')}</p>`;
           return;
         }
         const pairs = data.pairs || [];
         const gbText = data.gb < 0.01 ? '<0.01 GB' : `~${data.gb.toFixed(data.gb < 1 ? 3 : 1)} GB`;
         const costText = data.cost_usd < 0.01 ? '<$0.01' : `~$${data.cost_usd.toFixed(2)}`;
-        resultEl.innerHTML = `
-          <p style="margin:0 0 4px; font-size:0.8rem; color:var(--muted);">${escapeHtml(data.column)} &middot; joined on <code>here_segment_id</code></p>
+        body.innerHTML = `
+          <p style="margin:0 0 4px; font-size:0.85rem; color:var(--muted);">${escapeHtml(data.column)} &middot; joined on <code>here_segment_id</code></p>
           <p class="badge ok" style="display:inline-block;">Actual cost: ${gbText} / ${costText}</p>
-          <table class="model-lib-pair-table">
+          <table class="model-lib-pair-table" style="font-size:0.9rem;">
             <thead><tr><th>Pair</th><th>Segments</th><th>Agree</th><th>Avg abs diff</th></tr></thead>
             <tbody>${pairs.map(p => `
               <tr>
@@ -532,7 +576,7 @@
       })
       .catch(err => {
         btn.disabled = false;
-        resultEl.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(err.message)}</p>`;
+        body.innerHTML = `<p class="badge err" style="display:inline-block;">${escapeHtml(err.message)}</p>`;
       });
   };
 
