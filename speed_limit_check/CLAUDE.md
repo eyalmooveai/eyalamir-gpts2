@@ -1471,6 +1471,42 @@
     Verified via Playwright: after Compare completes, `#table`'s value
     is provably unchanged from what the page was server-rendered with;
     clicking "show it here" afterward does change it (and reloads).
+  - **Follow-up, explicit and general: "when I manually select on the
+    page, that selection should hold. Instead, it reverts to the value
+    selected on the right (hidden) panel. It should go instead to use
+    the one selected manually, updating both right panel and page
+    selection. This should be of course the behavior for all pages of
+    this archimedes site."** Root cause: even after the mismatch fix
+    above, the stored active model was still unconditionally RE-APPLIED
+    to `#table`/`#infer_field` on every page load, with no check for
+    whether the user had since made their own choice - so picking a
+    different table and then triggering any reload (submitting "Run
+    metrics" with it, say) got silently overwritten back to the active
+    model the instant the freshly-loaded page's script ran, before the
+    user could even notice. Fixed generically, not per-page or
+    per-field: `_model_library_sidebar.html` now attaches a `change`
+    listener to every field this sidebar ever feeds -
+    `#table`/`#infer_field`/`#state`/`#year`/`#month` - that CLEARS the
+    stored active model (`localStorage.removeItem`) the instant the user
+    edits any of them by hand, then re-renders the banner/note so they
+    disappear immediately too. Deliberately clears rather than trying to
+    reverse-engineer the user's raw pick back into a well-formed
+    state/year/month/tag `ModelEntry` - an arbitrary table string like
+    `calc_out.speed_limits_US_latest` (a live, multi-state production
+    table) often isn't one of this registry's own archived snapshots at
+    all, so there's no well-defined "what model is this now" to store.
+    This satisfies both halves of the ask in one move: the selection
+    holds (nothing is left to reapply on the next reload), and "both
+    panel and page" update - the sidebar's "Active everywhere" banner
+    and the on-page note vanish right then, honestly reflecting that the
+    user has moved past whatever Model Registry Compare had selected,
+    rather than continuing to claim a connection that no longer holds.
+    A plain `.value = x` assignment (what
+    `applyActiveModelToPage()`/"Use"/"show it here" do) never fires
+    `change` in a browser, so this can't accidentally clear a selection
+    those just made on purpose - confirmed live via Playwright (manual
+    `selectOption()` clears the active model and the choice survives a
+    full page reload; "Use"/"show it here" are unaffected).
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.

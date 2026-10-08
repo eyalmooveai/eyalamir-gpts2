@@ -91,6 +91,32 @@
   pass `force: true` - both submit the form immediately afterward, so
   forcing the field there can never create this mismatch; it's resolved
   by the reload that follows in the same breath.
+
+  Follow-up, explicit and general: "when I manually select on the page,
+  that selection should hold - instead it reverts to the value from the
+  [sidebar] panel. It should use the one selected manually, updating
+  both panel and page selection - for all pages." Root cause: before
+  this fix, the active model was unconditionally re-applied to #table/
+  #infer_field on every page load regardless of whether the page's OWN
+  content (map/metrics) had actually been (re)computed against it - so
+  a manual pick that was followed by any reload (submitting "Run
+  metrics" with a different table, say) got silently overwritten back
+  to the stale active model the instant the fresh page's script ran,
+  before the user even had a chance to notice. Fixed generically, not
+  per-page: a `change` listener on every field this sidebar ever feeds
+  (#table/#infer_field/#state/#year/#month) clears the stored active
+  model the moment the user edits any of them by hand - a programmatic
+  `.value = x` assignment (what applyActiveModelToPage()/"Use"/"show it
+  here" do) never fires `change`, so this can't self-clear a selection
+  those just made on purpose. Clearing (rather than trying to reverse-
+  engineer the user's raw pick back into a well-formed state/year/month/
+  tag ModelEntry, which an arbitrary table string like
+  `calc_out.speed_limits_US_latest` often isn't one of) satisfies both
+  halves of the ask at once: the selection holds (nothing is left to
+  reapply on the next reload), and "both panel and page" update
+  immediately - the sidebar's "Active everywhere" banner and the on-page
+  note disappear right then, rather than keep claiming a connection the
+  user has already moved past by picking something else themselves.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
@@ -813,6 +839,34 @@
   applyActiveModelToPage();
   renderActiveBanner();
   renderPageModelNote();
+
+  // "When I manually select on the page, that selection should hold -
+  // instead it reverts to the value from the [sidebar] panel. It should
+  // use the one selected manually, updating both the panel and the page
+  // selection - for all pages." A manual edit on any field this sidebar
+  // feeds (#table/#infer_field on a GET-form page, #state/#year/#month
+  // elsewhere) means the user has just made their OWN explicit choice,
+  // independent of whatever Model Registry Compare had selected - so
+  // the stored active model is cleared right then, generically, the
+  // same by-ID convention applyActiveModelToPage() already uses. This
+  // accomplishes both asks at once: nothing is left to re-apply on a
+  // later reload (the selection holds), and the sidebar's own "Active
+  // everywhere" banner plus the on-page note disappear immediately
+  // (the panel updates too) rather than keep claiming a connection the
+  // user has just moved past. A plain `.value = x` assignment (what
+  // applyActiveModelToPage()/"Use"/"show it here" do) never fires
+  // 'change', so this can't accidentally clear a selection those just
+  // set on purpose.
+  ['table', 'infer_field', 'state', 'year', 'month'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      if (!getActiveModel()) return;
+      try { localStorage.removeItem(ACTIVE_MODEL_KEY); } catch (e) {}
+      renderActiveBanner();
+      renderPageModelNote();
+    });
+  });
 
   // Open by default on a wide enough viewport that the panel won't cover
   // page content outright; collapsed on anything narrower, and either
