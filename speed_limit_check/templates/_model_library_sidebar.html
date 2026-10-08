@@ -64,16 +64,33 @@
     result) and "Download disagreements CSV" (every pair's sampled
     segments, flattened) buttons - both built client-side from the
     already-fetched `lastCompareResult`, no extra request.
-  - **Auto-fills the main page, right when Compare is clicked**: sets
-    the SAME localStorage-backed "active model" this sidebar already
-    uses for "Use" (see setActiveModel/applyActiveModelToPage above),
-    now carrying the compared column too, and applies it to the page
-    immediately - #table becomes the first compared model's table,
-    #infer_field (new) becomes the compared column. Deliberately does
-    NOT submit/navigate (unlike "Use") - the compare modal is about to
-    open over this same page, so reloading it would be counterproductive;
-    filling the fields (and updating the on-page note beneath the
-    modal) is what was actually asked for here.
+  - **Links the comparison to the main page, right when Compare is
+    clicked**: sets the SAME localStorage-backed "active model" this
+    sidebar already uses for "Use" (see setActiveModel/
+    applyActiveModelToPage above), now carrying the compared column too,
+    and updates the sidebar's own active banner plus the on-page note -
+    "comparing on `<column>`" - immediately.
+
+  Follow-up real bug, caught from a live screenshot: "the selected table
+  is not the one shown on the map." The FIRST version of the bullet
+  above also force-set #table/#infer_field's visible dropdown value the
+  instant Compare was clicked, on the theory that was the whole point of
+  "auto-fill" - but on a GET-form page (Quality/Explore), the page's
+  nationwide summary/issue map were already rendered server-side against
+  the OLD table from the page's last real request; changing a `<select>`'s
+  value with JS doesn't re-run that query, so the dropdown ended up
+  showing a table the content below it was never actually queried
+  against - a real, confusing lie, not a cosmetic nit.
+  applyActiveModelToPage() now takes an options arg - `{force: true}` -
+  and only force-sets #table/#infer_field on a GET-form page when
+  `force` is explicit; otherwise (plain page load, and runModelCompare()'s
+  own call) they're left alone on a GET-form page, same as
+  renderPageModelNote()'s own "selected - show it here" branch already
+  assumed but the code didn't actually honor. Only `applyActiveModelNow()`
+  (the note's "show it here" link) and `useModelEverywhere()` ("Use")
+  pass `force: true` - both submit the form immediately afterward, so
+  forcing the field there can never create this mismatch; it's resolved
+  by the reload that follows in the same breath.
 #}
 <button type="button" class="model-lib-tab" id="model-lib-tab" onclick="toggleModelLib()">Models</button>
 <aside class="model-lib-panel" id="model-lib-panel">
@@ -236,11 +253,31 @@
   // to tell "already showing the active model" from "out of sync with it".
   const initialTableValue = document.getElementById('table')?.value ?? null;
 
-  function applyActiveModelToPage() {
+  // `force` (default false) matters only for #table/#infer_field on a
+  // GET-form page (Quality/Explore/Agent) - real feedback caught a bug
+  // from skipping this distinction: applying the active model's table
+  // unconditionally on every call made the Table dropdown show a table
+  // the page's ALREADY-RENDERED content (the nationwide summary, the
+  // issue map) was never actually queried against ("the selected table
+  // is not the one shown on the map"), since changing a <select>'s value
+  // with JS doesn't re-run the page's own server-side query. Only force
+  // these two fields when a reload is also about to happen right after
+  // (useModelEverywhere()/applyActiveModelNow(), both of which submit
+  // the GET form immediately after calling this) - everywhere else
+  // (plain page load, and runModelCompare()'s own auto-fill), leave
+  // them alone on a GET-form page and let renderPageModelNote()'s
+  // "selected - show it here" link be the one honest way to actually
+  // apply AND reload together. #state/#year/#month (the POST-form
+  // launch pages' own fields) are unaffected - nothing has "shown"
+  // anything yet there for a filled-in field to contradict.
+  function applyActiveModelToPage(options) {
+    const force = !!(options && options.force);
     const active = getActiveModel();
     if (!active) return;
     const tableEl = document.getElementById('table');
-    if (tableEl && active.table) {
+    const tableForm = tableEl && tableEl.form;
+    const tableIsGet = tableForm && tableForm.method && tableForm.method.toLowerCase() === 'get';
+    if (tableEl && active.table && (force || !tableIsGet)) {
       if (tableEl.tagName === 'SELECT' && ![...tableEl.options].some(o => o.value === active.table)) {
         const opt = document.createElement('option');
         opt.value = active.table; opt.textContent = active.table; opt.selected = true;
@@ -252,9 +289,10 @@
     // clicked (see below) - "you should have linked the items from the
     // left panel to the page itself" - auto-filling the main page's own
     // Inferred-field picker to match the column being compared, same
-    // generic by-ID pattern #table already uses.
+    // generic by-ID pattern #table already uses (and the same force
+    // rule - see above).
     const inferEl = document.getElementById('infer_field');
-    if (inferEl && active.column) {
+    if (inferEl && active.column && (force || !tableIsGet)) {
       if (inferEl.tagName === 'SELECT' && ![...inferEl.options].some(o => o.value === active.column)) {
         const opt = document.createElement('option');
         opt.value = active.column; opt.textContent = active.column; opt.selected = true;
@@ -320,7 +358,7 @@
   }
 
   window.applyActiveModelNow = function () {
-    applyActiveModelToPage();
+    applyActiveModelToPage({ force: true }); // about to submit right below - safe to force the mismatch-prone fields here
     const tableEl = document.getElementById('table');
     const form = tableEl && tableEl.form;
     if (form && form.method && form.method.toLowerCase() === 'get') form.submit();
@@ -346,7 +384,7 @@
       // Sign-checker start-a-real-run forms) never auto-submits, since
       // that would kick off actual work the user didn't ask for - see
       // renderPageModelNote().
-      applyActiveModelToPage();
+      applyActiveModelToPage({ force: true }); // about to submit right below - same as applyActiveModelNow()
       form.submit();
       return;
     }
@@ -701,10 +739,18 @@
   window.runModelCompare = function () {
     if (chosen.tags.length < 2 || !chosen.column) return;
 
-    // Auto-fill the main page's own Table/Inferred-field to match what's
-    // being compared, right as Compare is clicked - "nothing changed on
-    // the main page" was explicit live feedback. Fills (doesn't submit/
-    // navigate) since the result modal is about to cover this same page.
+    // Links the comparison to the main page, right as Compare is clicked -
+    // "nothing changed on the main page" was explicit live feedback.
+    // applyActiveModelToPage() (no force, no navigation) does NOT change
+    // the on-GET-form-page #table/#infer_field dropdowns here (real
+    // follow-up feedback: forcing them without also reloading made the
+    // dropdown show a table the already-rendered map/metrics below were
+    // never actually queried against - "the selected table is not the
+    // one shown on the map"). What DOES update immediately: the sidebar's
+    // own active banner, and the on-page note next to #table (or #state)
+    // saying what's selected and offering one real click ("show it here")
+    // to both apply AND reload - the honest version of "linked to the
+    // page" that doesn't lie about what's currently displayed.
     const firstEntry = currentTagEntries.find(m => m.tag === chosen.tags[0]);
     if (firstEntry) {
       setActiveModel(firstEntry, chosen.column);

@@ -1436,6 +1436,41 @@
       so the done state is correct even if an event were ever missed,
       rather than depending on two mechanisms (live accumulation vs.
       the authoritative return value) agreeing.
+  - **Follow-up real bug, caught from a live screenshot of the Quality
+    page: "the selected table is not the one shown on the map."** The
+    "auto-fill the main page" fix above initially force-set `#table`'s
+    (and `#infer_field`'s) visible `<select>` value the instant Compare
+    was clicked. On a GET-form page (Quality/Explore), that page's
+    nationwide summary and issue map were already rendered server-side
+    against whatever table was in the URL at the LAST real page
+    load/submit - changing a `<select>`'s value with JS doesn't re-run
+    that query, so the dropdown ended up showing a table (the newly
+    compared model's) that the content below it was never actually
+    queried against. A real, confusing inconsistency, not a cosmetic
+    nit - exactly what the screenshot showed (map still full of
+    nationwide "vs. OSM" dots while the Table field showed a narrow
+    `calc_archive...__avgspeed_only` snapshot table).
+    `applyActiveModelToPage()` now takes an options arg -
+    `applyActiveModelToPage({force: true})` - and only force-sets
+    `#table`/`#infer_field` on a GET-form page when `force` is passed
+    explicitly; otherwise (a plain page load, and `runModelCompare()`'s
+    own call) they're left alone on a GET-form page. `#state`/`#year`/
+    `#month` (the POST-form launch pages' own fields) are unaffected -
+    nothing has "shown" anything yet there for a filled-in field to
+    contradict. Only `applyActiveModelNow()` (the on-page note's "show
+    it here" link) and `useModelEverywhere()` ("Use") pass
+    `{force: true}` - both submit the form immediately afterward, so
+    forcing the field there can never create this mismatch, it's
+    resolved by the very reload that follows in the same breath.
+    `runModelCompare()` itself still updates the sidebar's active
+    banner and the on-page note ("...selected · comparing on `<column>`
+    · show it here") immediately - that's the honest version of
+    "linked to the page": visible confirmation of what was compared,
+    with one real click to actually apply-and-reload, rather than a
+    dropdown that silently claims something the page hasn't done.
+    Verified via Playwright: after Compare completes, `#table`'s value
+    is provably unchanged from what the page was server-rendered with;
+    clicking "show it here" afterward does change it (and reloads).
   - `Dockerfile`'s `COPY` line needs `model_library.py` - same "don't
     forget the new module" mistake this file already warns about more
     than once above.
