@@ -16,6 +16,13 @@ by the monthly speed-limits pipeline, `calc.monthly_pipeline(year, month)`).
   PROCEDURE`).
 - **Never write a function** (`CREATE FUNCTION` / `CREATE OR REPLACE FUNCTION`,
   including JS or SQL UDFs).
+- **Never send a `CREATE`/`CREATE OR REPLACE` PROCEDURE or FUNCTION statement to
+  BigQuery through any tool — not even with `dryRun: true`.** Procedure and
+  function code is only ever displayed to the user, who deploys it
+  themselves. Do not try to validate it by submitting it to BigQuery; if
+  syntax needs checking, test individual expressions with read-only
+  `SELECT`s, and say plainly that the full procedure is unvalidated. Every
+  procedure definition ends with `END;` (with the semicolon).
 - **When asked for code (SQL or otherwise), display it — do not execute it
   and do not save/deploy it into BigQuery** (no running it as a job beyond a
   safe read-only preview the user has asked for, no creating routines/tables
