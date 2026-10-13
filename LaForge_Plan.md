@@ -1,13 +1,13 @@
 # LaForge: Plan
 
 **Owner:** Eyal Amir · **Status:** Draft v0.1 · **Date:** 2026-10-13
-**One line:** LaForge is Forge delivered as an agent inside the customer's own LLM. It finds feature combinations that predict the customer's target, with or without knowledge of their data and models, and hands back recipes that plug straight into the customer's insurance models.
+**One line:** LaForge is a new product, built on the ideas of Forge and Grinder, delivered as an agent inside the customer's own LLM. It finds feature combinations that predict the customer's target, with or without knowledge of their data and models, and hands back recipes that plug straight into the customer's insurance models.
 
 ---
 
 ## 1. Recommendation
 
-1. **Ship LaForge as a Moove-hosted tool server (MCP) plus a portable skill/instruction pack**, so it runs in whichever LLM the customer chose (Claude, ChatGPT, Gemini, internal LLMs). The LLM does the conversation and orchestration. All combination search, scoring, and ranking happens in deterministic tools, never in the LLM's head.
+1. **Ship LaForge as an MCP tool server plus a portable skill/instruction pack, deployable both Moove-hosted and locally inside the customer's environment.** Prototype on Claude via MCP, but design for the likely real targets: Microsoft Copilot or an unknown internal LLM running locally. None of the named design partners uses an LLM today. The LLM does the conversation and orchestration. All combination search, scoring, and ranking happens in deterministic tools, never in the LLM's head, and the tool surface stays simple enough for a weaker local model to drive.
 2. **Build four modes on one engine**, each unlocked by what the customer shares:
    - **Blind**: nothing shared. Use Moove-side priors.
    - **Schema-aware**: field names and target definition only.
@@ -45,6 +45,8 @@ Sources read: *FORGE Product* deck, *Correlation Impact on Machine-Learning*, *O
 
 - **User:** an insurer's data scientist or actuary, working in their company's LLM.
 - **Job to be done:** "Tell me which combinations of Moove features (and my own) will lift my accident/loss model, and give me the code to compute them."
+- **Design partners:** Quanata, HDVI, Milliman, Geico, State Farm. Quanata and HDVI are the nearest (Quanata was the first Forge delivery; HDVI is in production on data). None currently uses an LLM. We expect them to adopt Microsoft Copilot or an internal LLM run locally. That is an assumption to test with each partner in Phase 0.
+- **Targets (what "predicts accidents" means):** both **frequency** (volume of accidents) and **severity**, built from DOT crash data and its proxies. Details in §3.4.
 - **Out of scope for v1:** training or hosting the customer's model; replacing the customer's feature store; the agent inventing combinations or numbers it did not compute.
 
 ### 3.2 The four modes
@@ -64,6 +66,23 @@ Modes stack: a customer can start at A in a first conversation and move up as tr
 - **Plan → run → verify → explain:** the agent calls tools, checks tool-reported validation, then narrates. It must cite the tool result for every number and must refuse to rank combos it has not computed.
 - **Hand-off artifacts:** the agent returns a recipe file (SQL, pandas, and optionally a dbt/Snowflake/BigQuery UDF), a validation report, and a short rationale per combo ("why this plausibly relates to accidents").
 - **Consistent with the Archimedes boundary:** Curie routes and narrates but does not originate calculations. LaForge is the same principle in the customer's LLM: it narrates and orchestrates, and computation is deterministic and logged.
+
+### 3.4 Targets: frequency and severity from DOT data
+
+LaForge scores every combination against **two targets, plus a combined view**, rather than one "ACCIDENT" label as in the current Forge sample.
+
+| Target | Meaning | Notes |
+|---|---|---|
+| **Frequency** | Accident volume per road segment (and time bucket), normalized by exposure | Counts, so use rate-based measures (per exposure such as traffic volume or VMT), not raw counts. Exposure normalization matters: busy roads have more crashes. |
+| **Severity** | How bad accidents are: share of injury/fatal crashes, or a severity-weighted score from DOT injury coding | Heavy-tailed and sparse. Needs different metrics than frequency (rank-based and tail-aware), and more data per segment. |
+| **Combined risk** | Frequency × severity (an expected-loss style view) | Closest to what insurers price. Report it, but keep the two components visible. |
+
+**Sources:** DOT crash records are the ground truth (state DOT crash databases such as MassDOT and ODOT, which already appear in the Drive decks, plus any national DOT files we can license or use). **Proxies** stand in where DOT coverage is thin: for example, hard-braking and near-miss events, speed-variance measures, and Moove's own driver-accident and road-accident signals. Proxy list and national coverage to be decided in Phase 0.
+
+**Cautions:**
+- DOT data is under-reported and severity coding differs across states, so tag every target with its source and coverage, and run state-by-state holdouts.
+- A proxy can look excellent because it is built from the same inputs as the features. Keep proxy-derived targets separate from DOT-derived ones, and show which a combination was validated against.
+- Severity and frequency can rank combinations differently. That is useful information for the customer and must not be averaged away.
 
 ## 4. Architecture
 
@@ -86,7 +105,12 @@ LaForge Gateway (Moove-hosted)   — auth, tenancy, rate limits, audit log, mode
 1. **Tool server over prompt-only.** Combination search over ~200 features is a compute problem. The LLM calls tools: `list_features`, `suggest_combinations`, `score_combination`, `validate_shortlist`, `generate_recipe`, `explain_combination`, and (Data/Model modes) `run_search_in_env`.
 2. **Compute location follows data sensitivity.** Blind and Schema modes run on Moove's BigQuery. For Data and Model modes, ship the **search as code that runs in the customer's environment** (their warehouse via generated SQL, or an LLM code sandbox on a sample). Only metrics and the chosen recipe come back to the LLM. Raw rows stay put. Where the join needs identifiers, use Faraday tokenization or a clean room.
 3. **Combination language, not just pairs.** Keep Forge's {×, ÷, 1} on pairs for v1 parity. Add (a) triples and ratios of aggregates, (b) simple transforms (log, rank, bucket), (c) interaction with context (e.g. speed ÷ speed-limit × wet-road flag). Cap the search with a budget. Do not exhaustively enumerate beyond pairs.
-4. **LLM-agnostic delivery.** MCP is the main channel, with an OpenAPI spec for platforms that need it, and the skill/instruction pack kept small and testable per LLM. Treat each customer LLM as an integration target to certify, not an assumption.
+4. **LLM-agnostic, and local-first-capable.** The expected customer LLMs (Copilot, or an internal LLM run locally) are not under our control. MCP is the main channel, with an OpenAPI spec as fallback, and the skill/instruction pack kept small and tested per LLM. Specifically:
+   - Package the engine so it can run **inside the customer's environment** (container or local MCP server), including an offline snapshot of the Combination Store, so no call has to leave their network. This is likely what Milliman, Geico and State Farm require before they use it at all.
+   - Keep the tool surface **small and workflow-shaped** (few tools, structured inputs/outputs, the next step stated in each tool's response), because a local or smaller model will drive it less reliably than Claude.
+   - **Do not depend on Claude-specific features.** Claude via MCP is the prototype environment only.
+   - Treat MCP support in Copilot and in each partner's internal LLM as an **assumption to verify** in Phase 0, with a fallback: a CLI/notebook interface that produces the same recipe.
+   - Treat each customer LLM as an integration to certify, not an assumption.
 5. **Recipes are portable.** A recipe is a versioned spec (JSON) → generated SQL/Python. It must run without Moove runtime access, or the customer will see it as lock-in, and offline productionization is exactly what Forge/Grinder promised.
 
 ## 5. The search-and-validate engine (the real product)
@@ -109,8 +133,8 @@ Timeline is relative to kickoff. It should be aligned with the Archimedes 12-wee
 
 | Phase | Weeks | Deliverables | Exit criteria |
 |---|---|---|---|
-| **0. Foundations & decisions** | 1–2 | Decide naming/boundary vs. Forge, Grinder, Archimedes. Pick 1 design-partner customer + 1 backup. Freeze v1 feature catalog scope (~200 features) with null semantics. Reconcile Forge row-count/typo issues. Audit the current BQ Forge code for reuse. | Signed decision record; named partner; catalog v1 with owners. |
-| **1. Blind-mode MVP** | 3–6 | Precomputed Combination Store for 1–2 target proxies; MCP server with `list_features`, `suggest_combinations`, `generate_recipe`; diversity + stability selection; skill pack tested in one LLM (suggest Claude first). | A DS can, in ~10 minutes, get a de-duplicated shortlist and runnable recipe with no data shared. Internal dry run beats the current manual Forge delivery. |
+| **0. Foundations & decisions** | 1–2 | Define LaForge's boundary vs. Forge, Grinder, Archimedes (new product built on their ideas). Confirm Quanata and HDVI as first design partners; open conversations with Milliman, Geico, State Farm. Interview each on: which LLM they will use (Copilot / internal / none), whether it runs locally, and whether it supports MCP or tool calling. Choose the DOT sources and proxies for the frequency and severity targets (§3.4). Freeze v1 feature catalog scope (~200 features) with null semantics. Reconcile Forge row-count/typo issues. Audit the current BQ Forge code for reuse. | Signed decision record; two named partners; LLM-environment findings per partner; target definitions and data sources agreed; catalog v1 with owners. |
+| **1. Blind-mode MVP** | 3–6 | Precomputed Combination Store for the frequency and severity targets (DOT-based, with proxies kept separate); MCP server with `list_features`, `suggest_combinations`, `generate_recipe`; diversity + stability selection; skill pack prototyped on Claude via MCP; packaged so it can also run locally. A **compatibility spike** against Copilot and one local open model to confirm the small tool surface works. | A DS can, in ~10 minutes, get a de-duplicated shortlist and runnable recipe with no data shared. Internal dry run beats the current manual Forge delivery. The same MCP server runs locally and is driven end to end by at least one non-Claude LLM. |
 | **2. Validation layer** | 5–8 (overlaps) | Geography/time holdout, FDR control, leakage flags, combo confidence, validation report generator. | On a known case (Quanata/MA accident data), the validated shortlist outperforms naive top-N correlation on held-out data. |
 | **3. Schema-aware mode** | 7–10 | Feature mapping, de-duplication against customer features, grain adaptation, richer recipe targets (BQ, Snowflake, Databricks, pandas). | Design partner reaches a recipe tailored to their schema with no data shared. |
 | **4. Data-aware mode** | 9–14 | In-environment execution (generated SQL / sandbox code), Faraday tokenized join, security review pack, audit logging. | One partner runs a search on their own target; only aggregates leave their environment; reviewed by their security team. |
@@ -147,29 +171,41 @@ Parallel tracks throughout: security/privacy review, evaluation harness (see §7
 | Leakage (a feature that is effectively the target, e.g. historical accident score) | Leakage flags; explicit "proxy-for-target" review in the catalog. |
 | LLM hallucinates combos or numbers | Tool-only numerics; answers cite tool outputs; evals with adversarial prompts. |
 | Customers won't share data or models | Blind and Schema modes carry standalone value; in-environment execution for Data mode. |
-| Different LLMs behave differently with tools | Small certified set; per-LLM eval suite; keep the skill pack thin. |
+| Different LLMs behave differently with tools; Copilot or internal local LLMs may be weaker at tool use or lack MCP | Small workflow-shaped tool surface; per-LLM eval suite; keep the skill pack thin; CLI/notebook fallback that produces the same recipe; verify each partner's LLM setup in Phase 0. |
+| Design partners have no LLM today, so adoption depends on a purchase they have not made | Blind mode and the CLI fallback deliver value without an LLM; validate demand with partners before building Phases 4–6. |
+| DOT data gaps and inconsistent severity coding across states | Tag targets by source and coverage; state-by-state holdouts; keep DOT-based and proxy-based results separate (§3.4). |
 | Scope blur with Forge/Grinder/Archimedes | Decide boundaries in Phase 0. LaForge = delivery and agent layer on Forge's engine, consuming approved Archimedes features. |
 | Moove IP leakage via full ranking tables | Rate limits, tiered output (top-N per session), watermarking, and contract terms. Decide how much of the Combination Store is exposed. |
 | Compute cost of per-customer searches | Precompute for Blind/Schema; budgeted search; cost guardrails per tenant. |
 | BQ dependency: customers on Snowflake/Databricks | Recipe generator targets multiple SQL dialects. Moove-side compute stays on BQ. |
 
-## 9. Open questions for you
+## 9. Decisions and open questions
 
-1. **Naming and boundary:** is LaForge a new product or the delivery channel for Forge? Does it replace the Grinder, or generate Grinders?
-2. **Design partner:** Quanata (Gil) was the Forge first customer. Is that still the best partner, and which LLM do they use?
-3. **Target in Blind mode:** which accident proxies are acceptable as the target (road-accident signal, driver-accident signal, Massachusetts accident data)? A national set would be better but needs the 50-state expansion noted as a next step in the project sheet.
-4. **Commercials:** priced per recipe, per seat, per search, or bundled with data licensing? Affects how much of the Combination Store is exposed.
-5. **Which LLM first?** I recommend Claude/MCP for the MVP, then the customer-demand order.
-6. **Do you want the agent to propose new feature definitions, or only combine existing catalog features?** I recommend existing only for v1.
+**Decided (Eyal, 2026-10-13)**
+
+1. **Product:** LaForge is a new product built on the ideas of Forge and Grinder.
+2. **Design partners:** Quanata or HDVI first; Milliman, Geico and State Farm are also design partners. None uses an LLM today. We expect Copilot or an unknown internal LLM run locally.
+3. **Targets:** both accident volume (frequency) and severity, using DOT data and its proxies (§3.4).
+4. **First LLM environment:** Claude via MCP for the prototype.
+
+**Still open**
+
+1. **Relationship to existing Forge/Grinder:** does LaForge retire them, run alongside them, or reuse the Forge engine underneath? Affects the BQ audit and Quanata's existing delivery.
+2. **First partner:** Quanata or HDVI? Quanata has Forge history and a known data scientist contact; HDVI is in production on Moove data. The choice sets the first evaluation case.
+3. **DOT sources and proxies:** which state DOT files and any national sources do we already hold or license, and which proxies are acceptable? The Drive material shows Massachusetts and Ohio, and the project sheet lists a 50-state expansion as a next step.
+4. **Customer LLM reality:** will the partners actually adopt Copilot or an internal LLM, and would they allow an MCP server (hosted or local)? If not, the CLI/notebook fallback becomes the primary channel.
+5. **Commercials:** priced per recipe, per seat, per search, or bundled with data licensing? Affects how much of the Combination Store is exposed.
+6. **Feature scope:** only combine existing catalog features in v1, or also propose new feature definitions? I recommend existing only.
 7. **Archimedes dependency:** do LaForge features need to come from the Movement Index signal registry from day one, or can v1 use the current Forge feature set?
 
 ## 10. Immediate next steps (two weeks)
 
-1. Review and mark up this plan; decide §9 items 1, 2, 5.
+1. Review and mark up this plan; decide §9 open items 1, 2 and 4.
 2. Audit the existing BigQuery Forge pipeline (tables, runtime, cost per run) for reuse. I did not inspect the BQ code for this draft.
 3. Re-run Forge on the Quanata/MA case and save it as the evaluation baseline. I didn't read `quanata_accidents_MA_correlations.xlsx` (it is a shortcut) and did not see lift results from the April delivery.
 4. Draft the feature catalog v1 with null semantics, grain, and leakage flags.
-5. Sketch the MCP tool contract (§4) and agree on one LLM for the prototype.
+5. Sketch the MCP tool contract (§4), prototype on Claude via MCP, and ask Quanata/HDVI what LLM environment they expect to use.
+6. Decide the DOT sources and proxies for the frequency and severity targets (§3.4).
 
 ---
 
