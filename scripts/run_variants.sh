@@ -9,6 +9,7 @@
 # Settings (environment variables, all optional):
 #   YEAR=2026 MONTH=9 WORKERS=8 PROJECT=moove-platform-testing-data
 #   BRANCH=claude/clever-johnson-lqw9nb   (branch the runner is fetched from; never checked out)
+#   SKIP_AUTH_CHECK=1                     (on a GCE VM: credentials come from the VM's service account)
 # Any other arguments are passed straight to run_variants_parallel.py (they win over the settings above).
 set -euo pipefail
 
@@ -48,7 +49,7 @@ if ! "$VENV/bin/python" -c "import google.cloud.bigquery" 2>/dev/null; then
 fi
 
 # 3. credentials
-if ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
+if [[ "${SKIP_AUTH_CHECK:-0}" != "1" ]] && ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
   echo "no application-default credentials; logging in"
   gcloud auth application-default login
 fi
