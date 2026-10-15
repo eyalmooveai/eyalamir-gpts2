@@ -9,7 +9,7 @@ CAT = Catalog({"a_speed": "speed", "b_count": "count"})
 
 
 class FakeEngine:
-    def top(self, dataset, metric, n, cap=2):
+    def top(self, dataset, metric, n, cap=2, allowed=None):
         return [Combo("a_speed", "b_count", "divide", {m: 0.3 for m in METRICS}, 0.1)]
 
 
@@ -61,6 +61,15 @@ def test_bad_table_rejected():
     spec = {"source_table": "t; DROP", "id_column": "id", "combos": []}
     with pytest.raises(ValueError):
         render(spec, CAT, "bigquery")
+
+
+def test_features_outside_catalog_are_excluded():
+    rows = [{"feature1": "street_name", "feature2": "a_speed", "operation": "divide",
+             **{m: 1.0 for m in METRICS}},
+            {"feature1": "a_speed", "feature2": "b_count", "operation": "divide",
+             **{m: 0.4 for m in METRICS}}]
+    out = _diversify(rows, {}, "spearman", 10, allowed={"a_speed", "b_count"})
+    assert [c.feature1 for c in out] == ["a_speed"]
 
 
 def test_cap_per_parent_feature():

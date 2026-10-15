@@ -35,11 +35,13 @@ class Combo:
                 "gain_over_best_parent": None if self.gain is None else round(self.gain, 3)}
 
 
-def _diversify(rows, singles, metric, n, cap=2):
-    """Keep the best rows, but at most `cap` combinations per parent feature."""
+def _diversify(rows, singles, metric, n, cap=2, allowed=None):
+    """Keep the best rows, at most `cap` per parent feature, and only features in `allowed`."""
     used, out = {}, []
     for r in rows:
         f1, f2 = r["feature1"], r["feature2"]
+        if allowed is not None and (f1 not in allowed or f2 not in allowed):
+            continue
         if used.get(f1, 0) >= cap or used.get(f2, 0) >= cap:
             continue
         parent = max(abs(singles.get(f, {}).get(metric) or 0) for f in (f1, f2))
@@ -57,8 +59,9 @@ class Engine:
     def singles(self, dataset): raise NotImplementedError
     def pair(self, dataset, f1, op, f2): raise NotImplementedError
 
-    def top(self, dataset, metric, n, cap=2):
-        return _diversify(self.pairs(dataset, metric, 500), self.singles(dataset), metric, n, cap)
+    def top(self, dataset, metric, n, cap=2, allowed=None):
+        return _diversify(self.pairs(dataset, metric, 500), self.singles(dataset),
+                          metric, n, cap, allowed)
 
     def score(self, dataset, f1, op, f2, metric="spearman"):
         r = self.pair(dataset, f1, op, f2)

@@ -42,6 +42,8 @@ CAVEATS = [
     "Scores are in-sample correlations from the existing Forge run. No holdout, "
     "false-discovery control or stability check has been run yet.",
     "Association is not causation. Do not claim a combination causes accidents.",
+    "The number of road segments behind each score is not reported yet. Some top-ranked "
+    "pairs may rest on very few segments, so treat the ranking as a starting point to test.",
 ]
 
 
@@ -121,7 +123,8 @@ def suggest_combinations(session_id: str, target: str = "frequency",
                     "Do not substitute another target.", "suggest_combinations")
     if metric not in METRICS:
         return _err("bad_metric", f"metric must be one of {list(METRICS)}", "suggest_combinations")
-    combos = _engine().top(s["dataset"], metric, max(1, min(int(top_n), 50)))
+    combos = _engine().top(s["dataset"], metric, max(1, min(int(top_n), 50)),
+                           allowed=set(_catalog().features))
     rid = uuid.uuid4().hex[:12]
     RESULTS[rid] = {"session": session_id, "target": target, "metric": metric, "combos": combos}
     return {"result_id": rid, "items": [c.compact(metric) for c in combos],
