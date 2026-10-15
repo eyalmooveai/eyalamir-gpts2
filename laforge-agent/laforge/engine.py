@@ -10,8 +10,9 @@ DATASETS = {
     "quanata_ma": {
         "targets": ("frequency",),   # accident counts only; no severity for this dataset
         "unit": "road segment (5,558 units, Massachusetts)",
-        "pairs_table": "moove-archimedes-staging.bucket_in.quanata_accidents_MA_correlations",
-        "single_table": "moove-archimedes-staging.cache.quanata_accident_univariate_correlations_2",
+        # dataset.table only: the project is implicit (LAFORGE_BQ_PROJECT / client default)
+        "pairs_table": "bucket_in.quanata_accidents_MA_correlations",
+        "single_table": "cache.quanata_accident_univariate_correlations_2",
     },
 }
 

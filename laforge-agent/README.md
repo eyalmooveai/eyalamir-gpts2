@@ -19,7 +19,7 @@ pytest
 | Variable | Meaning |
 |---|---|
 | `LAFORGE_CATALOG` | Path to the feature catalog JSON (a list of names, or name -> definition) |
-| `LAFORGE_BQ_PROJECT` | Billing project for read-only BigQuery queries (hosted mode) |
+| `LAFORGE_BQ_PROJECT` | Project for read-only BigQuery queries (hosted mode). Table names are `dataset.table`, so this must be the project that holds the Forge result datasets |
 | `LAFORGE_SNAPSHOT_DIR` | Folder of Parquet snapshots (offline mode; no network) |
 | `LAFORGE_OUT_DIR` | Where recipe files are written (default `laforge_out`) |
 | `LAFORGE_TRANSPORT` | `stdio` (default) or `streamable-http` |
