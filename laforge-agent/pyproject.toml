@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laforge"
+version = "0.1.0"
+description = "LaForge: feature-combination discovery as an MCP tool server"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2,<2"]  # v2 renamed FastMCP; migrate deliberately
+
+[project.optional-dependencies]
+bigquery = ["google-cloud-bigquery", "db-dtypes", "pandas", "pyarrow"]
+offline = ["duckdb", "pandas", "pyarrow"]
+dev = ["pytest"]
+
+[project.scripts]
+laforge-server = "laforge.server:main"
+
+[tool.setuptools.packages.find]
+include = ["laforge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

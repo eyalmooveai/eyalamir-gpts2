@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "laforge": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm",
+               "-v", "/path/to/snapshot:/data:ro",
+               "-v", "/path/to/out:/out",
+               "laforge:0.1"]
+    }
+  }
+}
