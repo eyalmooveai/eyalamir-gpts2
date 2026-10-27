@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Sample road segments at random (weighted by length) within a functional-class
 range, find the real-world posted speed limit for each one by reading a Street
-View sign - walking back up to a few segments against the direction of travel
-when the sampled segment itself has none - and report how often OSM, HERE, and
-our own inferred speed limit actually match that ground truth.
+View sign - walking up to a few segments in BOTH directions of travel when the
+sampled segment itself has none - and report how often OSM, HERE, and our own
+inferred speed limit actually match that ground truth.
 
 This is a PRECISION/ACCURACY EVAL, not a mismatch-finder: find_bad_speed_limit.py
 (and the Evaluator built on it) deliberately picks segments where sources
@@ -19,12 +19,12 @@ reimplement the Street View / Vision OCR mechanics:
   - _process_one_candidate() is the exact same "walk this segment's positions,
     look for a sign, OCR it" unit of work the Evaluator and Sign Checker use.
   - fetch_candidate_by_id() is the exact same "look up one here_segment_id's
-    full row" used when walking back to a predecessor segment.
+    full row" used when walking to a neighboring segment in either direction.
   - The global Street View throttle (_streetview_throttle_lock) already
     serializes every worker thread's calls regardless of --concurrency, same
     as batch_evaluator.py relies on.
 
-Walking back across segments (new - nothing in this app's existing code has a
+Walking across segments (new - nothing in this app's existing code has a
 notion of segment-to-segment topology): calc_out's own speed_limits_*_details
 tables have no from/to-node or adjacency column at all (confirmed live via
 INFORMATION_SCHEMA). The real HERE street-network topology lives in a
@@ -32,21 +32,30 @@ DIFFERENT, currently-unused-by-this-app dataset: `maps.road_segments_<STATE>`
 carries `start_node_ref`/`end_node_ref` HERE node IDs per segment (joinable to
 calc_out's `here_segment_id` via its own `id` column, same
 "here:cm:segment:<digits>" format - confirmed by a live round-trip lookup).
-"The segment(s) immediately before segment X" is found by a self-join:
-predecessor.end_node_ref = X.start_node_ref - i.e. segments that feed INTO
-X's start node. At a branching intersection with more than one predecessor,
-this picks the one with the same street_name as X first (continuing the same
-road), falling back to the one with the same functional_class, then just the
-first one found - logged as a note either way, since this is a heuristic, not
-a certainty.
 
-IMPORTANT CAVEAT, inherited from the rest of this app (see run_pipeline's own
-docstring in find_bad_speed_limit.py): HERE's digitized line direction for a
-segment isn't guaranteed to match real/legal direction of travel. This script
-assumes it does (start_node -> end_node is "forward") when deciding which
-direction is "back" - the same simplifying assumption the Evaluator/Sign
-Checker already make for "left"/"right" side probing. There is no more
-precise per-segment signal available in this project's data to do better.
+HERE's digitized line direction for a segment isn't guaranteed to match
+real/legal direction of travel (see run_pipeline's own docstring in
+find_bad_speed_limit.py) - so rather than assume one direction is "forward"
+and only walk that way, this script checks the sampled segment itself first
+(a hit there answers for both directions of travel - our sign-detection has
+no way to attribute a sign found directly on the segment to one approach
+direction over the other), and only if that finds nothing does it walk BOTH
+directions independently, up to --max-walk-back segments each, reporting the
+first sign found in each direction separately:
+  - "backward": predecessor.end_node_ref = X.start_node_ref (segments that
+    feed INTO X's digitized start - the approach for someone traveling in
+    the segment's own digitized direction).
+  - "forward": successor.start_node_ref = X.end_node_ref (segments leading
+    OUT of X's digitized end - the approach for someone traveling the
+    OPPOSITE of the segment's digitized direction).
+These two directions can and sometimes do carry different posted limits
+(the report below counts how often that happens among segments where both
+were found) - that's a real property of the road, not a bug in the walk.
+At a branching intersection with more than one neighbor in a given
+direction, this picks the one with the same street_name as the current
+segment first (continuing the same road), falling back to the one with the
+same functional_class, then just the first one found - logged as a note
+either way, since this is a heuristic, not a certainty.
 
 Also note: BigQuery's RAND() has no seed parameter, so re-running this script
 against the same inputs will draw a different sample each time - this is a
@@ -95,7 +104,6 @@ from find_bad_speed_limit import (
     STATE_RE,
     SIDE_MODES,
     StreetViewAuthError,
-    _jsonable_row,
     _validate_identifier,
     fetch_candidate_by_id,
     get_api_call_counts,
@@ -197,64 +205,141 @@ def _lookup_segment_topology(project: str, state: str, segment_ids: list[str]) -
     return {r["here_segment_id"]: dict(r.items()) for r in rows}
 
 
-def _find_predecessor_segments(project: str, state: str, start_node_ref: str, *, exclude_segment_id: str) -> list[dict]:
-    """Segments whose end_node_ref feeds INTO `start_node_ref` - i.e.
-    segments that come immediately BEFORE a segment starting there, under
-    this script's documented "digitized direction = direction of travel"
-    assumption."""
-    if not start_node_ref:
+def _find_neighbor_segments(project: str, state: str, node_ref: Optional[str], *, exclude_segment_id: str, match_column: str) -> list[dict]:
+    """Segments adjacent to `node_ref` in the direction `match_column`
+    implies: match_column="end_node_ref" finds PREDECESSORS (segments that
+    feed INTO node_ref - the "backward" direction below); match_column=
+    "start_node_ref" finds SUCCESSORS (segments leading OUT of node_ref -
+    "forward"). match_column is always one of those two fixed literals from
+    this module's own code, never user input, so it's safe to interpolate."""
+    if not node_ref:
         return []
+    assert match_column in ("start_node_ref", "end_node_ref")
     table = _maps_table_for_state(state)
     client = bigquery.Client(project=project)
     query = f"""
         SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class
         FROM `{project}.{MAPS_DATASET}.{table}`
-        WHERE end_node_ref = @node AND id != @exclude_id
+        WHERE {match_column} = @node AND id != @exclude_id
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("node", "STRING", start_node_ref),
+        bigquery.ScalarQueryParameter("node", "STRING", node_ref),
         bigquery.ScalarQueryParameter("exclude_id", "STRING", exclude_segment_id),
     ])
     return [dict(r.items()) for r in client.query(query, job_config=job_config).result()]
 
 
-def _pick_predecessor(predecessors: list[dict], *, street_name: Optional[str], functional_class: Optional[int]) -> Optional[dict]:
-    """At a branching intersection (more than one segment feeds the same
-    node), prefer the one continuing the same named road, then the one with
-    the same functional_class, else just the first candidate - a heuristic,
-    not a guarantee (see module docstring)."""
-    if not predecessors:
+def _pick_neighbor(neighbors: list[dict], *, street_name: Optional[str], functional_class: Optional[int]) -> Optional[dict]:
+    """At a branching intersection (more than one segment adjacent to the
+    same node), prefer the one continuing the same named road, then the one
+    with the same functional_class, else just the first candidate - a
+    heuristic, not a guarantee (see module docstring)."""
+    if not neighbors:
         return None
     if street_name:
-        same_name = [p for p in predecessors if p.get("street_name") == street_name]
+        same_name = [p for p in neighbors if p.get("street_name") == street_name]
         if same_name:
             return same_name[0]
     if functional_class is not None:
-        same_fc = [p for p in predecessors if p.get("functional_class") == functional_class]
+        same_fc = [p for p in neighbors if p.get("functional_class") == functional_class]
         if same_fc:
             return same_fc[0]
-    return predecessors[0]
+    return neighbors[0]
 
 
-def _walk_back_chain(project: str, state: str, start_topo: dict, max_walk_back: int) -> list[dict]:
-    """[start segment's topology row, predecessor 1, predecessor 2, ...], up
-    to max_walk_back predecessors. Stops early at a dead end (no predecessor
-    found) or if a segment already in the chain would be revisited (guards
+# direction -> (which node field of the CURRENT segment to branch from, which
+# column of a CANDIDATE neighbor must match that node). "backward" walks
+# against the segment's own digitized direction (predecessors); "forward"
+# walks with it (successors). See module docstring for why both are walked
+# rather than assuming one is the real direction of travel.
+_DIRECTION_NODE_FIELDS = {
+    "backward": ("start_node_ref", "end_node_ref"),
+    "forward": ("end_node_ref", "start_node_ref"),
+}
+
+
+def _walk_chain(project: str, state: str, start_topo: dict, max_steps: int, direction: str) -> list[dict]:
+    """Up to `max_steps` neighbor topology rows in `direction`, NOT
+    including start_topo itself. Stops early at a dead end (no neighbor
+    found) or if a segment already walked would be revisited (guards
     against an accidental loop in the graph)."""
-    chain = [start_topo]
+    own_node_field, neighbor_match_column = _DIRECTION_NODE_FIELDS[direction]
+    chain: list[dict] = []
     visited = {start_topo["here_segment_id"]}
     current = start_topo
-    while len(chain) <= max_walk_back:
-        preds = _find_predecessor_segments(
-            project, state, current.get("start_node_ref"), exclude_segment_id=current["here_segment_id"],
+    while len(chain) < max_steps:
+        neighbors = _find_neighbor_segments(
+            project, state, current.get(own_node_field), exclude_segment_id=current["here_segment_id"], match_column=neighbor_match_column,
         )
-        nxt = _pick_predecessor(preds, street_name=current.get("street_name"), functional_class=current.get("functional_class"))
+        nxt = _pick_neighbor(neighbors, street_name=current.get("street_name"), functional_class=current.get("functional_class"))
         if not nxt or nxt["here_segment_id"] in visited:
             break
         chain.append(nxt)
         visited.add(nxt["here_segment_id"])
         current = nxt
     return chain
+
+
+def _check_segment_for_sign(
+    step_index: int, n: int, row, *, api_key: str, vision_client, sample_out_root: Path,
+    walk_segment: bool, walk_segment_spacing_m: float, side_mode: str, side_offset_m: float, auto_side_offset: bool,
+    headings: tuple[int, ...], headings_relative: bool, fov: int, log,
+):
+    """Thin, shared wrapper around _process_one_candidate - the exact same
+    "walk this segment's positions, look for a sign, OCR it" logic the
+    Evaluator/Sign Checker use, reused unchanged for every segment this
+    script ever checks (the sampled one or a walked neighbor)."""
+    return _process_one_candidate(
+        step_index, n, row, api_key=api_key, vision_client=vision_client, out_root=sample_out_root,
+        walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+        side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+        headings=headings, headings_relative=headings_relative, fov=fov,
+        log=log, progress=lambda fraction, message: None,
+    )
+
+
+def _empty_direction_result(note: str, steps_available: int) -> dict:
+    return {
+        "found": False, "ground_truth_mph": None, "sign_lat": None, "sign_lon": None,
+        "sign_evidence": None, "streetview_capture_date": None, "annotated_image": None,
+        "matched_segment_id": None, "steps_walked": steps_available, "note": note,
+    }
+
+
+def _walk_direction_for_sign(
+    chain: list[dict], *, project: str, dataset: str, table: str, direction: str, tag: str,
+    api_key: str, vision_client, sample_out_root: Path,
+    walk_segment: bool, walk_segment_spacing_m: float, side_mode: str, side_offset_m: float, auto_side_offset: bool,
+    headings: tuple[int, ...], headings_relative: bool, fov: int, log,
+) -> dict:
+    """Walks one direction's chain of neighbor segments, stopping at the
+    first readable sign. Returns a dict shaped for this script's own result/
+    CSV - never the raw CandidateAttempt/Match objects find_bad_speed_limit.py
+    uses internally, since a direction's outcome here also needs to carry
+    which segment actually had the sign and how many steps it took."""
+    if not chain:
+        return _empty_direction_result(f"no {direction} neighbor segments found", 0)
+    for step_index, step_topo in enumerate(chain, start=1):
+        step_seg_id = step_topo["here_segment_id"]
+        rows = fetch_candidate_by_id(project, dataset, table, step_seg_id)
+        if not rows:
+            log(f"{tag} [{direction}] step {step_index} ({step_seg_id}): not found in {dataset}.{table} - skipping.")
+            continue
+        attempt, match = _check_segment_for_sign(
+            step_index, len(chain), rows[0], api_key=api_key, vision_client=vision_client, sample_out_root=sample_out_root,
+            walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+            side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+            headings=headings, headings_relative=headings_relative, fov=fov, log=log,
+        )
+        if match:
+            sign = match.image_details[match.matched_image_index]
+            return {
+                "found": True, "ground_truth_mph": match.reading.speed_mph,
+                "sign_lat": sign.lat, "sign_lon": sign.lon, "sign_evidence": match.reading.evidence,
+                "streetview_capture_date": sign.capture_date, "annotated_image": str(match.annotated_image),
+                "matched_segment_id": step_seg_id, "steps_walked": step_index, "note": "",
+            }
+    return _empty_direction_result(f"no readable sign in {len(chain)} {direction} segment(s)", len(chain))
 
 
 def _process_sampled_segment(
@@ -266,91 +351,88 @@ def _process_sampled_segment(
     headings: tuple[int, ...], headings_relative: bool, fov: int,
     log=lambda msg: None,
 ) -> dict:
-    """Runs the full per-sample pipeline: check the sampled segment itself
-    for a sign, and if none is found, walk back up to max_walk_back segments
-    (against the assumed direction of travel) trying each one in turn, same
-    per-segment "walk positions, check Street View, OCR" logic the Evaluator
-    uses (_process_one_candidate) at every step. Returns one flat result
-    dict - never raises for an ordinary "no sign anywhere in the chain"
-    outcome, only for a real error (caller decides how to handle that)."""
+    """Runs the full per-sample pipeline. First checks the sampled segment
+    itself - a hit there answers for BOTH directions of travel, since this
+    app's sign-detection can't attribute a sign found directly on a segment
+    to one approach direction over the other. Only if that finds nothing
+    does it walk forward and backward independently (see module docstring
+    for why both, not one assumed "forward"), up to max_walk_back segments
+    each, reporting the first sign found in each direction separately.
+    Never raises for an ordinary "no sign anywhere" outcome, only for a
+    real error (the caller decides how to handle that)."""
     seg_id = sampled_row["here_segment_id"]
-    tag = f"[{i + 1}/{n}]"
+    tag = f"[{i + 1}/{n}] {seg_id}"
     sample_out_root = out_root / safe_segment_dirname(seg_id)
+
+    base_result = {
+        "segment_id": seg_id,
+        "state": state.upper(),
+        "street_name": sampled_row.get("street_name"),
+        "functional_class": sampled_row.get("functional_class"),
+        "centroid_lat": sampled_row.get("centroid_lat"),
+        "centroid_lon": sampled_row.get("centroid_lon"),
+        "speed_limit_osm_mph": sampled_row.get("speed_limit_osm_mph"),
+        "speed_limit_here_mph": sampled_row.get("speed_limit_here_mph"),
+        "speed_limit_infer_mph": sampled_row.get("speed_limit_infer_mph"),
+        "speed_limit_infer_mph_corrected": sampled_row.get("speed_limit_infer_mph_corrected"),
+        "speed_AVG_mph": sampled_row.get("speed_AVG_mph"),
+        "freeflow_mph": sampled_row.get("freeflow_mph"),
+    }
+
+    attempt0, match0 = _check_segment_for_sign(
+        0, 1, sampled_row, api_key=api_key, vision_client=vision_client, sample_out_root=sample_out_root,
+        walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+        side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+        headings=headings, headings_relative=headings_relative, fov=fov, log=log,
+    )
+    if match0:
+        sign = match0.image_details[match0.matched_image_index]
+        log(f"{tag}: sign found directly on the sampled segment - {match0.reading.speed_mph} mph (applies to both directions).")
+        return {
+            **base_result,
+            "found_on_segment": True, "ground_truth_mph": match0.reading.speed_mph,
+            "sign_lat": sign.lat, "sign_lon": sign.lon, "sign_evidence": match0.reading.evidence,
+            "streetview_capture_date": sign.capture_date, "annotated_image": str(match0.annotated_image),
+            "forward": None, "backward": None,
+            "segments_tried": [seg_id], "status": "match_on_segment", "note": "",
+        }
 
     topo_by_id = _lookup_segment_topology(project, state, [seg_id])
     start_topo = topo_by_id.get(seg_id)
+    segments_tried = [seg_id]
     if start_topo is None:
-        log(f"{tag} {seg_id}: not found in maps.road_segments_{state.upper()} - checking this segment only, no walk-back.")
-        chain_topo = [{
-            "here_segment_id": seg_id, "street_name": sampled_row.get("street_name"),
-            "functional_class": sampled_row.get("functional_class"), "start_node_ref": None, "end_node_ref": None,
-        }]
+        log(f"{tag}: no sign on the segment itself, and not found in maps.road_segments_{state.upper()} - cannot walk either direction.")
+        directions = {d: _empty_direction_result("no topology row - could not walk", 0) for d in ("forward", "backward")}
     else:
-        chain_topo = _walk_back_chain(project, state, start_topo, max_walk_back)
-        log(f"{tag} {seg_id}: walk-back chain has {len(chain_topo)} segment(s) "
-            f"({', '.join(s['here_segment_id'] for s in chain_topo)}).")
+        directions = {}
+        for direction in ("forward", "backward"):
+            chain = _walk_chain(project, state, start_topo, max_walk_back, direction)
+            log(f"{tag} [{direction}]: {len(chain)} neighbor segment(s) to check"
+                + (f" ({', '.join(s['here_segment_id'] for s in chain)})" if chain else ""))
+            directions[direction] = _walk_direction_for_sign(
+                chain, project=project, dataset=dataset, table=table, direction=direction, tag=tag,
+                api_key=api_key, vision_client=vision_client, sample_out_root=sample_out_root,
+                walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+                side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+                headings=headings, headings_relative=headings_relative, fov=fov, log=log,
+            )
+            segments_tried.extend(s["here_segment_id"] for s in chain)
 
-    attempts_detail = []  # [(segment_id, status, note), ...] - every step tried, not just the winner
-    match = None
-    matched_step_index = None
-    matched_segment_id = None
-
-    for step_index, step_topo in enumerate(chain_topo):
-        step_seg_id = step_topo["here_segment_id"]
-        if step_index == 0:
-            step_row = sampled_row  # already have the full row (incl. geom_geojson) from the sampling query
-        else:
-            rows = fetch_candidate_by_id(project, dataset, table, step_seg_id)
-            if not rows:
-                log(f"{tag}   step {step_index} ({step_seg_id}): not found in {dataset}.{table} - skipping this step.")
-                attempts_detail.append((step_seg_id, "not_in_table", ""))
-                continue
-            step_row = rows[0]
-
-        attempt, step_match = _process_one_candidate(
-            step_index, len(chain_topo), step_row,
-            api_key=api_key, vision_client=vision_client, out_root=sample_out_root,
-            walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
-            side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
-            headings=headings, headings_relative=headings_relative, fov=fov,
-            log=log, progress=lambda fraction, message: None,
-        )
-        attempts_detail.append((step_seg_id, attempt.status, attempt.note))
-        if step_match:
-            match = step_match
-            matched_step_index = step_index
-            matched_segment_id = step_seg_id
-            break
-
-    sampled_dict = _jsonable_row(sampled_row)
-    found = match is not None
-    sign_detail = match.image_details[match.matched_image_index] if found else None
-
+    found_forward = directions["forward"]["found"]
+    found_backward = directions["backward"]["found"]
+    status = (
+        "match_both" if found_forward and found_backward else
+        "match_forward_only" if found_forward else
+        "match_backward_only" if found_backward else
+        "no_sign"
+    )
     return {
-        "segment_id": seg_id,
-        "state": state.upper(),
-        "street_name": sampled_dict.get("street_name"),
-        "functional_class": sampled_dict.get("functional_class"),
-        "centroid_lat": sampled_dict.get("centroid_lat"),
-        "centroid_lon": sampled_dict.get("centroid_lon"),
-        "speed_limit_osm_mph": sampled_dict.get("speed_limit_osm_mph"),
-        "speed_limit_here_mph": sampled_dict.get("speed_limit_here_mph"),
-        "speed_limit_infer_mph": sampled_dict.get("speed_limit_infer_mph"),
-        "speed_limit_infer_mph_corrected": sampled_dict.get("speed_limit_infer_mph_corrected"),
-        "speed_AVG_mph": sampled_dict.get("speed_AVG_mph"),
-        "freeflow_mph": sampled_dict.get("freeflow_mph"),
-        "found_sign": found,
-        "ground_truth_mph": match.reading.speed_mph if found else None,
-        "sign_lat": sign_detail.lat if sign_detail else None,
-        "sign_lon": sign_detail.lon if sign_detail else None,
-        "sign_evidence": match.reading.evidence if found else None,
-        "streetview_capture_date": sign_detail.capture_date if sign_detail else None,
-        "annotated_image": str(match.annotated_image) if found else None,
-        "matched_segment_id": matched_segment_id,
-        "steps_walked_back": matched_step_index if found else (len(attempts_detail) - 1),
-        "segments_tried": [sid for sid, _, _ in attempts_detail],
-        "status": "match" if found else "no_sign",
-        "note": "; ".join(f"{sid}:{status}" for sid, status, _ in attempts_detail if status != "match"),
+        **base_result,
+        "found_on_segment": False, "ground_truth_mph": None,
+        "sign_lat": None, "sign_lon": None, "sign_evidence": None, "streetview_capture_date": None, "annotated_image": None,
+        "forward": directions["forward"], "backward": directions["backward"],
+        "segments_tried": segments_tried, "status": status,
+        "note": f"on-segment attempt: {attempt0.status}",
     }
 
 
@@ -359,25 +441,39 @@ def _streetview_url(lat, lon) -> str:
 
 
 CSV_FIELDNAMES = [
-    "segment_id", "state", "street_name", "functional_class",
-    "status", "found_sign", "ground_truth_mph",
+    "segment_id", "state", "street_name", "functional_class", "status",
     "speed_limit_osm_mph", "speed_limit_here_mph", "speed_limit_infer_mph", "speed_limit_infer_mph_corrected",
-    "speed_AVG_mph", "freeflow_mph",
-    "centroid_lat", "centroid_lon", "sign_lat", "sign_lon", "streetview_url",
-    "matched_segment_id", "steps_walked_back", "segments_tried",
-    "streetview_capture_date", "annotated_image", "sign_evidence", "note",
+    "speed_AVG_mph", "freeflow_mph", "centroid_lat", "centroid_lon",
+    "found_on_segment", "ground_truth_mph", "sign_lat", "sign_lon", "streetview_url",
+    "forward_found", "forward_ground_truth_mph", "forward_matched_segment_id", "forward_steps_walked",
+    "backward_found", "backward_ground_truth_mph", "backward_matched_segment_id", "backward_steps_walked",
+    "segments_tried", "note",
 ]
 
 
 def write_results_csv(path: Path, results: list[dict]) -> None:
+    """One row per sampled segment - forward/backward readings flattened
+    into their own columns rather than one row per direction, so the CSV
+    stays easy to skim; the JSON alongside it has the full per-direction
+    detail (sign_evidence, annotated_image, etc.) for anything deeper."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         writer = csv_module.DictWriter(f, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         for r in results:
+            fwd = r.get("forward") or {}
+            bwd = r.get("backward") or {}
             row = dict(r)
             row["streetview_url"] = _streetview_url(r.get("sign_lat") or r.get("centroid_lat"), r.get("sign_lon") or r.get("centroid_lon"))
             row["segments_tried"] = ",".join(r.get("segments_tried") or [])
+            row["forward_found"] = fwd.get("found")
+            row["forward_ground_truth_mph"] = fwd.get("ground_truth_mph")
+            row["forward_matched_segment_id"] = fwd.get("matched_segment_id")
+            row["forward_steps_walked"] = fwd.get("steps_walked")
+            row["backward_found"] = bwd.get("found")
+            row["backward_ground_truth_mph"] = bwd.get("ground_truth_mph")
+            row["backward_matched_segment_id"] = bwd.get("matched_segment_id")
+            row["backward_steps_walked"] = bwd.get("steps_walked")
             writer.writerow(row)
 
 
@@ -416,23 +512,64 @@ def _source_stats(found_results: list[dict], column: Optional[str], tolerance_mp
     }
 
 
+def _observations(results: list[dict]) -> list[dict]:
+    """Flattens each sampled segment into 0-2 ground-truth observations for
+    the precision stats below: ONE shared observation when the sign was
+    found directly on the sampled segment (our detection can't attribute
+    that to one approach direction, so it answers for both and isn't
+    double-counted), or up to one observation per direction (forward/
+    backward) when the segment itself had none and a walk in that
+    direction found something. Every observation from a given segment
+    carries that same segment's OSM/HERE/model values - only the resolved
+    ground_truth_mph differs between a segment's forward and backward
+    observations."""
+    obs = []
+    for r in results:
+        if r.get("found_on_segment"):
+            obs.append(r)
+            continue
+        for direction in ("forward", "backward"):
+            d = r.get(direction) or {}
+            if d.get("found"):
+                obs.append({**r, "ground_truth_mph": d["ground_truth_mph"]})
+    return obs
+
+
 def compute_precision_stats(results: list[dict], tolerance_mph: float) -> dict:
-    found = [r for r in results if r.get("found_sign")]
+    segments_with_any = [
+        r for r in results
+        if r.get("found_on_segment") or (r.get("forward") or {}).get("found") or (r.get("backward") or {}).get("found")
+    ]
+    both_found = [
+        r for r in results
+        if not r.get("found_on_segment") and (r.get("forward") or {}).get("found") and (r.get("backward") or {}).get("found")
+    ]
+    disagreeing = [r for r in both_found if r["forward"]["ground_truth_mph"] != r["backward"]["ground_truth_mph"]]
+    obs = _observations(results)
     return {
         "sample_size": len(results),
-        "signs_found": len(found),
-        "sign_find_rate": (len(found) / len(results)) if results else None,
-        "osm": _source_stats(found, "speed_limit_osm_mph", tolerance_mph),
-        "here": _source_stats(found, "speed_limit_here_mph", tolerance_mph),
-        "model": _source_stats(found, None, tolerance_mph),
+        "segments_with_any_sign": len(segments_with_any),
+        "segment_sign_find_rate": (len(segments_with_any) / len(results)) if results else None,
+        "observations": len(obs),
+        "segments_with_both_directions_found": len(both_found),
+        "direction_disagreement_count": len(disagreeing),
+        "direction_disagreement_rate": (len(disagreeing) / len(both_found)) if both_found else None,
+        "osm": _source_stats(obs, "speed_limit_osm_mph", tolerance_mph),
+        "here": _source_stats(obs, "speed_limit_here_mph", tolerance_mph),
+        "model": _source_stats(obs, None, tolerance_mph),
     }
 
 
 def print_report(stats: dict, api_calls: dict) -> None:
     print("\n=== Precision sample report ===")
-    print(f"Sample size: {stats['sample_size']}")
-    print(f"Signs found: {stats['signs_found']} "
-          f"({stats['sign_find_rate'] * 100:.1f}% of sample)" if stats["sign_find_rate"] is not None else "")
+    print(f"Sample size: {stats['sample_size']} segment(s)")
+    if stats["segment_sign_find_rate"] is not None:
+        print(f"Segments with at least one sign found: {stats['segments_with_any_sign']} ({stats['segment_sign_find_rate'] * 100:.1f}%)")
+    print(f"Directional observations compared below: {stats['observations']}")
+    if stats["segments_with_both_directions_found"]:
+        print(f"Segments where BOTH directions were found: {stats['segments_with_both_directions_found']} "
+              f"(disagreed on the posted limit: {stats['direction_disagreement_count']}, "
+              f"{stats['direction_disagreement_rate'] * 100:.1f}%)")
     print(f"Street View calls: {api_calls['streetview']}  Vision OCR calls: {api_calls['vision']}")
     print(f"\n{'Source':<8}{'n':>6}{'Exact match':>14}{'Within tol.':>14}{'Mean |err|':>12}{'Median |err|':>14}")
     for label in ("osm", "here", "model"):
@@ -452,8 +589,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--functional-class-lt", type=int, required=True, help="Only sample segments with functional_class < this value, e.g. 3")
     p.add_argument("--sample-size", type=int, required=True, help=f"How many segments to sample (hard ceiling: {MAX_SAMPLE_SIZE})")
     p.add_argument("--max-walk-back", type=int, default=DEFAULT_MAX_WALK_BACK,
-                   help=f"How many segments to walk back (against the assumed direction of travel) looking for a "
-                        f"sign before giving up on a sampled segment (default: {DEFAULT_MAX_WALK_BACK})")
+                   help=f"If a sampled segment has no sign of its own, how many segments to walk in EACH direction "
+                        f"(forward and backward - see module docstring for why both) looking for one, before "
+                        f"giving up on that direction (default: {DEFAULT_MAX_WALK_BACK})")
     p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY,
                    help=f"How many sampled segments to process concurrently (default: {DEFAULT_CONCURRENCY}, max {MAX_CONCURRENCY}) "
                         f"- Street View calls are still globally throttled regardless of this value")
@@ -531,7 +669,7 @@ def main() -> int:
         print("No segments matched the sampling criteria (check --state/--functional-class-lt/--table).", file=sys.stderr)
         return 1
     print(f"Sampled {len(sampled_rows)} segment(s). Looking for speed-limit signs "
-          f"(walking back up to {max_walk_back} segment(s) when a sampled segment has none)...\n")
+          f"(walking up to {max_walk_back} segment(s) in each direction when a sampled segment has none)...\n")
 
     vision_client = vision.ImageAnnotatorClient()
     reset_api_call_counts()
@@ -558,11 +696,21 @@ def main() -> int:
                 except Exception as e:
                     result = {
                         "segment_id": sampled_rows[i]["here_segment_id"], "status": "error",
-                        "found_sign": False, "ground_truth_mph": None, "note": f"{type(e).__name__}: {e}",
+                        "found_on_segment": False, "forward": None, "backward": None, "ground_truth_mph": None,
+                        "note": f"{type(e).__name__}: {e}",
                     }
                 results.append(result)
-                outcome = f"{result['status']}" + (f" ({result.get('ground_truth_mph')} mph)" if result.get("found_sign") else "")
-                print(f"  [{len(results)}/{n}] {result.get('segment_id')}: {outcome}")
+                if result.get("found_on_segment"):
+                    detail = f"{result['ground_truth_mph']} mph (both directions)"
+                else:
+                    fwd, bwd = result.get("forward") or {}, result.get("backward") or {}
+                    bits = []
+                    if fwd.get("found"):
+                        bits.append(f"forward={fwd['ground_truth_mph']} mph")
+                    if bwd.get("found"):
+                        bits.append(f"backward={bwd['ground_truth_mph']} mph")
+                    detail = ", ".join(bits) if bits else "no sign"
+                print(f"  [{len(results)}/{n}] {result.get('segment_id')}: {result['status']} ({detail})")
     except StreetViewAuthError as e:
         print(f"\nERROR: {e}\nThis means the API key/billing/API-enablement is broken, not that there's no "
               f"imagery. Check GOOGLE_MAPS_API_KEY and that billing/Street View Static API are enabled.", file=sys.stderr)
