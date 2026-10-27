@@ -139,6 +139,7 @@ MAX_SAMPLE_SIZE = 500
 
 def sample_segments_weighted_by_length(
     project: str, dataset: str, table: str, *, state: str, functional_class_lt: int, sample_size: int,
+    client: "bigquery.Client",
 ) -> list[bigquery.table.Row]:
     """Picks `sample_size` segments uniformly at random, weighted by each
     segment's own length - true probability-proportional-to-size sampling in
@@ -154,8 +155,16 @@ def sample_segments_weighted_by_length(
     standard SQL) resolves an ORDER BY name against the SELECT list first.
     speed_limit_here_mph is rounded here for the same reason every other
     query in this app rounds it (see CLAUDE.md) - it's stored as a precise,
-    noisy km/h->mph conversion, not a clean posted-sign value."""
-    client = bigquery.Client(project=project)
+    noisy km/h->mph conversion, not a clean posted-sign value.
+
+    Takes an already-constructed `client` rather than making its own - see
+    run_precision_sample()'s own note on why: this module can issue dozens
+    of BigQuery calls per sampled segment across several concurrent worker
+    threads, and a fresh bigquery.Client() per call was confirmed (a real
+    macOS crash, "multi-threaded process forked ... crashed on child side
+    of fork pre-exec") to multiply how often a concurrent credential/mTLS
+    subprocess check races against gRPC's own background threads - one
+    shared, reused client cuts that down by roughly the same factor."""
     query = f"""
         SELECT
           * EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph) AS speed_limit_here_mph),
@@ -182,7 +191,7 @@ def _maps_table_for_state(state: str) -> str:
     return table
 
 
-def _lookup_segment_topology(project: str, state: str, segment_ids: list[str]) -> dict[str, dict]:
+def _lookup_segment_topology(project: str, state: str, segment_ids: list[str], *, client: "bigquery.Client") -> dict[str, dict]:
     """start_node_ref/end_node_ref/street_name/functional_class for a batch
     of here_segment_id values, from maps.road_segments_<STATE> - the HERE
     street-network topology table calc_out itself doesn't carry (see module
@@ -190,11 +199,11 @@ def _lookup_segment_topology(project: str, state: str, segment_ids: list[str]) -
     the result just wasn't found in this state's topology table (e.g. it's
     right at a state border, or the two datasets' coverage doesn't line up
     perfectly) - callers treat that as "can't walk back from here," not an
-    error."""
+    error. Takes an already-constructed `client` - see
+    sample_segments_weighted_by_length's docstring for why."""
     if not segment_ids:
         return {}
     table = _maps_table_for_state(state)
-    client = bigquery.Client(project=project)
     query = f"""
         SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class
         FROM `{project}.{MAPS_DATASET}.{table}`
@@ -205,18 +214,21 @@ def _lookup_segment_topology(project: str, state: str, segment_ids: list[str]) -
     return {r["here_segment_id"]: dict(r.items()) for r in rows}
 
 
-def _find_neighbor_segments(project: str, state: str, node_ref: Optional[str], *, exclude_segment_id: str, match_column: str) -> list[dict]:
+def _find_neighbor_segments(
+    project: str, state: str, node_ref: Optional[str], *, exclude_segment_id: str, match_column: str, client: "bigquery.Client",
+) -> list[dict]:
     """Segments adjacent to `node_ref` in the direction `match_column`
     implies: match_column="end_node_ref" finds PREDECESSORS (segments that
     feed INTO node_ref - the "backward" direction below); match_column=
     "start_node_ref" finds SUCCESSORS (segments leading OUT of node_ref -
     "forward"). match_column is always one of those two fixed literals from
-    this module's own code, never user input, so it's safe to interpolate."""
+    this module's own code, never user input, so it's safe to interpolate.
+    Takes an already-constructed `client` - see
+    sample_segments_weighted_by_length's docstring for why."""
     if not node_ref:
         return []
     assert match_column in ("start_node_ref", "end_node_ref")
     table = _maps_table_for_state(state)
-    client = bigquery.Client(project=project)
     query = f"""
         SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class
         FROM `{project}.{MAPS_DATASET}.{table}`
@@ -258,11 +270,12 @@ _DIRECTION_NODE_FIELDS = {
 }
 
 
-def _walk_chain(project: str, state: str, start_topo: dict, max_steps: int, direction: str) -> list[dict]:
+def _walk_chain(project: str, state: str, start_topo: dict, max_steps: int, direction: str, *, client: "bigquery.Client") -> list[dict]:
     """Up to `max_steps` neighbor topology rows in `direction`, NOT
     including start_topo itself. Stops early at a dead end (no neighbor
     found) or if a segment already walked would be revisited (guards
-    against an accidental loop in the graph)."""
+    against an accidental loop in the graph). Takes an already-constructed
+    `client` - see sample_segments_weighted_by_length's docstring for why."""
     own_node_field, neighbor_match_column = _DIRECTION_NODE_FIELDS[direction]
     chain: list[dict] = []
     visited = {start_topo["here_segment_id"]}
@@ -270,6 +283,7 @@ def _walk_chain(project: str, state: str, start_topo: dict, max_steps: int, dire
     while len(chain) < max_steps:
         neighbors = _find_neighbor_segments(
             project, state, current.get(own_node_field), exclude_segment_id=current["here_segment_id"], match_column=neighbor_match_column,
+            client=client,
         )
         nxt = _pick_neighbor(neighbors, street_name=current.get("street_name"), functional_class=current.get("functional_class"))
         if not nxt or nxt["here_segment_id"] in visited:
@@ -345,7 +359,7 @@ def _walk_direction_for_sign(
 def _process_sampled_segment(
     i: int, n: int, sampled_row: bigquery.table.Row, *,
     project: str, dataset: str, table: str, state: str, max_walk_back: int,
-    api_key: str, vision_client, out_root: Path,
+    api_key: str, vision_client, bq_client: "bigquery.Client", out_root: Path,
     walk_segment: bool, walk_segment_spacing_m: float,
     side_mode: str, side_offset_m: float, auto_side_offset: bool,
     headings: tuple[int, ...], headings_relative: bool, fov: int,
@@ -397,7 +411,7 @@ def _process_sampled_segment(
             "segments_tried": [seg_id], "status": "match_on_segment", "note": "",
         }
 
-    topo_by_id = _lookup_segment_topology(project, state, [seg_id])
+    topo_by_id = _lookup_segment_topology(project, state, [seg_id], client=bq_client)
     start_topo = topo_by_id.get(seg_id)
     segments_tried = [seg_id]
     if start_topo is None:
@@ -406,7 +420,7 @@ def _process_sampled_segment(
     else:
         directions = {}
         for direction in ("forward", "backward"):
-            chain = _walk_chain(project, state, start_topo, max_walk_back, direction)
+            chain = _walk_chain(project, state, start_topo, max_walk_back, direction, client=bq_client)
             log(f"{tag} [{direction}]: {len(chain)} neighbor segment(s) to check"
                 + (f" ({', '.join(s['here_segment_id'] for s in chain)})" if chain else ""))
             directions[direction] = _walk_direction_for_sign(
@@ -451,6 +465,28 @@ CSV_FIELDNAMES = [
 ]
 
 
+def _result_row_for_export(r: dict) -> dict:
+    """Flat, export-ready view of one segment's result, keyed exactly by
+    CSV_FIELDNAMES - the single source of truth for how the nested
+    forward/backward dicts become their own columns, shared by
+    write_results_csv() (CSV for a human) and save_results_to_bigquery()
+    (JSON rows for the calc_tmp archive table), so the two never drift."""
+    fwd = r.get("forward") or {}
+    bwd = r.get("backward") or {}
+    row = dict(r)
+    row["streetview_url"] = _streetview_url(r.get("sign_lat") or r.get("centroid_lat"), r.get("sign_lon") or r.get("centroid_lon"))
+    row["segments_tried"] = ",".join(r.get("segments_tried") or [])
+    row["forward_found"] = fwd.get("found")
+    row["forward_ground_truth_mph"] = fwd.get("ground_truth_mph")
+    row["forward_matched_segment_id"] = fwd.get("matched_segment_id")
+    row["forward_steps_walked"] = fwd.get("steps_walked")
+    row["backward_found"] = bwd.get("found")
+    row["backward_ground_truth_mph"] = bwd.get("ground_truth_mph")
+    row["backward_matched_segment_id"] = bwd.get("matched_segment_id")
+    row["backward_steps_walked"] = bwd.get("steps_walked")
+    return {k: row.get(k) for k in CSV_FIELDNAMES}
+
+
 def write_results_csv(path: Path, results: list[dict]) -> None:
     """One row per sampled segment - forward/backward readings flattened
     into their own columns rather than one row per direction, so the CSV
@@ -461,20 +497,7 @@ def write_results_csv(path: Path, results: list[dict]) -> None:
         writer = csv_module.DictWriter(f, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         for r in results:
-            fwd = r.get("forward") or {}
-            bwd = r.get("backward") or {}
-            row = dict(r)
-            row["streetview_url"] = _streetview_url(r.get("sign_lat") or r.get("centroid_lat"), r.get("sign_lon") or r.get("centroid_lon"))
-            row["segments_tried"] = ",".join(r.get("segments_tried") or [])
-            row["forward_found"] = fwd.get("found")
-            row["forward_ground_truth_mph"] = fwd.get("ground_truth_mph")
-            row["forward_matched_segment_id"] = fwd.get("matched_segment_id")
-            row["forward_steps_walked"] = fwd.get("steps_walked")
-            row["backward_found"] = bwd.get("found")
-            row["backward_ground_truth_mph"] = bwd.get("ground_truth_mph")
-            row["backward_matched_segment_id"] = bwd.get("matched_segment_id")
-            row["backward_steps_walked"] = bwd.get("steps_walked")
-            writer.writerow(row)
+            writer.writerow(_result_row_for_export(r))
 
 
 def _source_value(result: dict, column: Optional[str]) -> Optional[float]:
@@ -636,6 +659,22 @@ OBSERVATION_CSV_FIELDNAMES = [
 ]
 
 
+def _observation_row_for_export(o: dict) -> dict:
+    """Flat, export-ready view of one observation, keyed exactly by
+    OBSERVATION_CSV_FIELDNAMES - shared by write_observations_csv() and
+    save_results_to_bigquery() for the same one-source-of-truth reason as
+    _result_row_for_export() above."""
+    truth = o["ground_truth_mph"]
+    model_mph = _source_value(o, None)
+    row = dict(o)
+    row["model_mph"] = model_mph
+    row["osm_abs_diff"] = abs(o["speed_limit_osm_mph"] - truth) if o.get("speed_limit_osm_mph") is not None else None
+    row["here_abs_diff"] = abs(o["speed_limit_here_mph"] - truth) if o.get("speed_limit_here_mph") is not None else None
+    row["model_abs_diff"] = abs(model_mph - truth) if model_mph is not None else None
+    row["streetview_url"] = _streetview_url(o.get("sign_lat"), o.get("sign_lon"))
+    return {k: row.get(k) for k in OBSERVATION_CSV_FIELDNAMES}
+
+
 def write_observations_csv(path: Path, observations: list[dict]) -> None:
     """One row per segment-direction that actually found a real sign - the
     exact table _source_stats() computes its numbers from, made directly
@@ -647,15 +686,64 @@ def write_observations_csv(path: Path, observations: list[dict]) -> None:
         writer = csv_module.DictWriter(f, fieldnames=OBSERVATION_CSV_FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         for o in observations:
-            truth = o["ground_truth_mph"]
-            model_mph = _source_value(o, None)
-            row = dict(o)
-            row["model_mph"] = model_mph
-            row["osm_abs_diff"] = abs(o["speed_limit_osm_mph"] - truth) if o.get("speed_limit_osm_mph") is not None else ""
-            row["here_abs_diff"] = abs(o["speed_limit_here_mph"] - truth) if o.get("speed_limit_here_mph") is not None else ""
-            row["model_abs_diff"] = abs(model_mph - truth) if model_mph is not None else ""
-            row["streetview_url"] = _streetview_url(o.get("sign_lat"), o.get("sign_lon"))
+            row = _observation_row_for_export(o)
+            # CSV wants "" for a missing abs-diff, not a literal "None" string.
+            for key in ("osm_abs_diff", "here_abs_diff", "model_abs_diff"):
+                if row[key] is None:
+                    row[key] = ""
             writer.writerow(row)
+
+
+def save_results_to_bigquery(
+    project: str, run_id: str, config: dict, results: list[dict], observations: list[dict], *,
+    client: "bigquery.Client", log=lambda msg: None,
+) -> None:
+    """Always called at the end of a run (CLI or web) - appends this run's
+    segment-level results and segment-direction observations into two
+    fixed, cross-run tables in `calc_tmp` (a scratch/staging dataset, not
+    this app's own calc_out/calc_archive): calc_tmp.precision_sample_results
+    and calc_tmp.precision_sample_observations. Every row carries run_id
+    (the same <STATE>_<timestamp> label the output directory/filenames use)
+    plus this run's config, so multiple runs over time accumulate into one
+    queryable history instead of each run living in its own table.
+
+    Both row shapes are already flat (see _result_row_for_export/
+    _observation_row_for_export - the exact same shape as the CSV exports),
+    so there's no nested-STRUCT schema-drift risk across appends. Schema is
+    autodetected from the first load to each table (CREATE_IF_NEEDED) and
+    ALLOW_FIELD_ADDITION is set so a future new column doesn't break the
+    append - but autodetect from JSON can still misjudge a column's type if
+    every row in a given batch happens to have it null; this is a scratch
+    dataset, so that's an accepted, documented limitation rather than
+    something this function works around with an explicit schema. Takes an
+    already-constructed `client` - see
+    sample_segments_weighted_by_length's docstring for why."""
+    meta = {
+        "run_id": run_id, "generated_at": config["generated_at"],
+        "project": config["project"], "dataset": config["dataset"], "table": config["table"],
+        "state": config["state"], "functional_class_lt": config["functional_class_lt"],
+        "sample_size_requested": config["sample_size_requested"], "sample_size_actual": config["sample_size_actual"],
+    }
+    result_rows = [{**meta, **_result_row_for_export(r)} for r in results]
+    _append_rows_to_bigquery(client, f"{project}.calc_tmp.precision_sample_results", result_rows, log=log)
+    observation_rows = [{**meta, **_observation_row_for_export(o)} for o in observations]
+    _append_rows_to_bigquery(client, f"{project}.calc_tmp.precision_sample_observations", observation_rows, log=log)
+
+
+def _append_rows_to_bigquery(client: "bigquery.Client", table_ref: str, rows: list[dict], log=lambda msg: None) -> None:
+    if not rows:
+        log(f"  No rows to append to {table_ref} - skipping.")
+        return
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        autodetect=True,
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
+        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+    )
+    job = client.load_table_from_json(rows, table_ref, job_config=job_config)
+    job.result()
+    log(f"  Appended {len(rows)} row(s) to {table_ref}.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -698,6 +786,180 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+class SamplingError(ValueError):
+    """Raised for any ordinary "bad input/no results" condition in
+    run_precision_sample() - a caller (the CLI's main() or a Flask route)
+    can catch this one type for a clean user-facing message, same as the
+    pre-existing StreetViewAuthError/NoUsableApiKey for the auth case."""
+
+
+def run_precision_sample(
+    *, project: str, dataset: str, table: str, state: str, functional_class_lt: int, sample_size: int,
+    max_walk_back: int = DEFAULT_MAX_WALK_BACK, concurrency: int = DEFAULT_CONCURRENCY,
+    tolerance_mph: float = 0.0,
+    walk_segment: bool = False, walk_segment_spacing_m: float = 15.0,
+    side_mode: str = "center", side_offset_m: float = 20.0, auto_side_offset: bool = False,
+    headings: tuple[int, ...] = DEFAULT_HEADINGS, headings_relative: bool = False, fov: int = DEFAULT_FOV,
+    api_key: str, out_root: Path,
+    out_json_path: Optional[Path] = None, out_csv_path: Optional[Path] = None, out_observations_csv_path: Optional[Path] = None,
+    on_event=lambda event, **kw: None, log=lambda msg: None,
+) -> dict:
+    """The full pipeline (sample -> walk/check every segment -> stats ->
+    write outputs -> always save to BigQuery), factored out of main() so
+    both the CLI and a Flask background job can call it directly instead
+    of main() being the only entry point. Raises SamplingError for a bad/
+    empty-result input, and StreetViewAuthError/NoUsableApiKey unchanged
+    for a broken key/billing (the caller decides how each should surface -
+    main() turns both into a clean stderr message + exit code; a web job
+    records the message on the job's own status instead).
+
+    on_event(event, **kwargs) is called for progress reporting, same shape
+    model_library.compare_models()'s own callback convention uses:
+      - "sampling": about to run the sampling query
+      - "start", total=n: n segments sampled, about to start checking them
+      - "segment_done", index=i, total=n, result=dict: one segment finished
+      - "saving_to_bigquery": about to append to calc_tmp
+      - "done", payload=dict: the full return value, right before returning
+    log(msg) is passed straight through to _process_sampled_segment() for
+    its own internal per-step tracing (silent by default, same as before -
+    main() passes log=print to preserve the CLI's old verbose output)."""
+    _validate_identifier(project, PROJECT_RE, "project")
+    _validate_identifier(dataset, DATASET_RE, "dataset")
+    _validate_identifier(table, TABLE_RE, "table")
+    _validate_identifier(state.upper(), STATE_RE, "state")
+    if not (MIN_FOV <= fov <= MAX_FOV):
+        raise SamplingError(f"fov must be between {MIN_FOV} and {MAX_FOV}.")
+    if sample_size < 1:
+        raise SamplingError("sample_size must be at least 1.")
+    sample_size = min(sample_size, MAX_SAMPLE_SIZE)
+    concurrency = max(1, min(concurrency, MAX_CONCURRENCY))
+    max_walk_back = max(0, max_walk_back)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # One shared BigQuery client for the whole run - NOT one per call. This
+    # script can issue dozens of BigQuery calls per sampled segment
+    # (topology lookup + up to 2 directions * max_walk_back neighbor
+    # lookups), across `concurrency` worker threads at once; a fresh
+    # bigquery.Client() per call was confirmed (via a real crash report) to
+    # multiply how often a concurrent credential/mTLS subprocess check
+    # races against gRPC's own background threads into a macOS fork-safety
+    # crash ("multi-threaded process forked ... crashed on child side of
+    # fork pre-exec"). bigquery.Client is documented safe for concurrent
+    # use from multiple threads, so sharing one here is not a correctness
+    # risk, just far fewer client/channel constructions.
+    bq_client = bigquery.Client(project=project)
+
+    on_event("sampling")
+    try:
+        sampled_rows = sample_segments_weighted_by_length(
+            project, dataset, table, state=state, functional_class_lt=functional_class_lt, sample_size=sample_size,
+            client=bq_client,
+        )
+    except Exception as e:
+        raise SamplingError(f"Sampling query failed: {type(e).__name__}: {e}") from e
+    if not sampled_rows:
+        raise SamplingError("No segments matched the sampling criteria (check state/functional_class_lt/table).")
+
+    vision_client = vision.ImageAnnotatorClient()
+    reset_api_call_counts()
+    results: list[dict] = []
+    n = len(sampled_rows)
+    on_event("start", total=n)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {
+            pool.submit(
+                _process_sampled_segment, i, n, row,
+                project=project, dataset=dataset, table=table, state=state,
+                max_walk_back=max_walk_back, api_key=api_key, vision_client=vision_client, bq_client=bq_client, out_root=out_root,
+                walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+                side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+                headings=headings, headings_relative=headings_relative, fov=fov,
+                log=log,
+            ): i
+            for i, row in enumerate(sampled_rows)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                result = fut.result()
+            except (StreetViewAuthError, NoUsableApiKey):
+                # A broken API key/billing/auth error isn't specific to
+                # this one segment - every other worker is about to hit
+                # the exact same thing. Cancel whatever hasn't started
+                # yet and re-raise to the caller instead of quietly
+                # logging up to `sample_size` identical "error" results
+                # while burning through the rest of the sample.
+                for other_fut in futures:
+                    other_fut.cancel()
+                raise
+            except Exception as e:
+                result = {
+                    "segment_id": sampled_rows[i]["here_segment_id"], "status": "error",
+                    "found_on_segment": False, "forward": None, "backward": None, "ground_truth_mph": None,
+                    "note": f"{type(e).__name__}: {e}",
+                }
+            results.append(result)
+            on_event("segment_done", index=len(results), total=n, result=result)
+
+    obs = _observations(results)
+    stats = compute_precision_stats(results, obs, tolerance_mph=tolerance_mph)
+    api_calls = get_api_call_counts()
+    run_id = f"{state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    config = {
+        "project": project, "dataset": dataset, "table": table, "state": state.upper(),
+        "functional_class_lt": functional_class_lt,
+        "sample_size_requested": sample_size, "sample_size_actual": len(sampled_rows),
+        "max_walk_back": max_walk_back, "tolerance_mph": tolerance_mph, "concurrency": concurrency,
+        "walk_segment": walk_segment, "walk_segment_spacing_m": walk_segment_spacing_m,
+        "side_mode": side_mode, "side_offset_m": side_offset_m, "auto_side_offset": auto_side_offset,
+        "headings": list(headings), "headings_relative": headings_relative, "fov": fov,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    payload = {"run_id": run_id, "config": config, "api_calls": api_calls, "results": results, "observations": obs, "stats": stats}
+
+    out_json_path = out_json_path or (out_root / "results.json")
+    out_csv_path = out_csv_path or (out_root / "results.csv")
+    out_observations_csv_path = out_observations_csv_path or (out_root / "observations.csv")
+    out_json_path.write_text(json.dumps(payload, indent=2, default=str))
+    write_results_csv(out_csv_path, results)
+    write_observations_csv(out_observations_csv_path, obs)
+    payload["output_files"] = {"json": str(out_json_path), "csv": str(out_csv_path), "observations_csv": str(out_observations_csv_path)}
+
+    on_event("saving_to_bigquery")
+    try:
+        save_results_to_bigquery(project, run_id, config, results, obs, client=bq_client, log=log)
+        payload["bigquery_saved"] = True
+    except Exception as e:
+        log(f"WARNING: failed to save results to BigQuery: {type(e).__name__}: {e}")
+        payload["bigquery_saved"] = False
+        payload["bigquery_error"] = f"{type(e).__name__}: {e}"
+
+    on_event("done", payload=payload)
+    return payload
+
+
+def _format_segment_outcome(result: dict) -> str:
+    """The same per-segment one-line detail main() has always printed -
+    factored out so the CLI's on_event callback can reuse it verbatim."""
+    if result["status"] == "error":
+        # A worker actually raised - don't let this read as an ordinary
+        # "checked thoroughly, found nothing" outcome (real bug caught in
+        # practice: this used to fall through to the "no sign" branch
+        # below, silently hiding the real exception message that's still
+        # saved in result["note"] either way).
+        return result.get("note", "unknown error")
+    if result.get("found_on_segment"):
+        return f"{result['ground_truth_mph']} mph (both directions)"
+    fwd, bwd = result.get("forward") or {}, result.get("backward") or {}
+    bits = []
+    if fwd.get("found"):
+        bits.append(f"forward={fwd['ground_truth_mph']} mph")
+    if bwd.get("found"):
+        bits.append(f"backward={bwd['ground_truth_mph']} mph")
+    return ", ".join(bits) if bits else "no sign"
+
+
 def main() -> int:
     args = parse_args()
 
@@ -708,108 +970,38 @@ def main() -> int:
               f"GOOGLE_MAPS_API_KEY=... to {args.keys_file}.", file=sys.stderr)
         return 1
 
-    try:
-        _validate_identifier(args.project, PROJECT_RE, "project")
-        _validate_identifier(args.dataset, DATASET_RE, "dataset")
-        _validate_identifier(args.table, TABLE_RE, "table")
-        _validate_identifier(args.state.upper(), STATE_RE, "state")
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    if not (MIN_FOV <= args.fov <= MAX_FOV):
-        print(f"ERROR: --fov must be between {MIN_FOV} and {MAX_FOV}.", file=sys.stderr)
-        return 1
-    if args.sample_size < 1:
-        print("ERROR: --sample-size must be at least 1.", file=sys.stderr)
-        return 1
-    sample_size = min(args.sample_size, MAX_SAMPLE_SIZE)
-    if sample_size < args.sample_size:
+    if args.sample_size > MAX_SAMPLE_SIZE:
         print(f"Note: --sample-size {args.sample_size} exceeds the hard ceiling of {MAX_SAMPLE_SIZE} - clamped.")
-    concurrency = max(1, min(args.concurrency, MAX_CONCURRENCY))
-    max_walk_back = max(0, args.max_walk_back)
 
     run_label = f"{args.state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     out_root = Path(args.out_dir) / run_label
-    out_root.mkdir(parents=True, exist_ok=True)
-    out_json_path = args.out_json or (out_root / "results.json")
-    out_csv_path = args.out_csv or (out_root / "results.csv")
-    out_observations_csv_path = args.out_observations_csv or (out_root / "observations.csv")
 
-    print(f"Sampling {sample_size} segment(s) from `{args.project}.{args.dataset}.{args.table}` "
-          f"(state={args.state.upper()}, functional_class<{args.functional_class_lt}), weighted by segment length...")
+    def on_event(event, **kw):
+        if event == "sampling":
+            print(f"Sampling {min(args.sample_size, MAX_SAMPLE_SIZE)} segment(s) from `{args.project}.{args.dataset}.{args.table}` "
+                  f"(state={args.state.upper()}, functional_class<{args.functional_class_lt}), weighted by segment length...")
+        elif event == "start":
+            print(f"Sampled {kw['total']} segment(s). Looking for speed-limit signs "
+                  f"(walking up to {max(0, args.max_walk_back)} segment(s) in each direction when a sampled segment has none)...\n")
+        elif event == "segment_done":
+            result = kw["result"]
+            print(f"  [{kw['index']}/{kw['total']}] {result.get('segment_id')}: {result['status']} ({_format_segment_outcome(result)})")
+
     try:
-        sampled_rows = sample_segments_weighted_by_length(
-            args.project, args.dataset, args.table,
-            state=args.state, functional_class_lt=args.functional_class_lt, sample_size=sample_size,
+        payload = run_precision_sample(
+            project=args.project, dataset=args.dataset, table=args.table, state=args.state,
+            functional_class_lt=args.functional_class_lt, sample_size=args.sample_size,
+            max_walk_back=args.max_walk_back, concurrency=args.concurrency, tolerance_mph=args.tolerance_mph,
+            walk_segment=args.walk_segment, walk_segment_spacing_m=args.walk_segment_spacing_m,
+            side_mode=args.side_mode, side_offset_m=args.side_offset_m, auto_side_offset=args.auto_side_offset,
+            headings=args.headings, headings_relative=args.headings_relative, fov=args.fov,
+            api_key=api_key, out_root=out_root,
+            out_json_path=args.out_json, out_csv_path=args.out_csv, out_observations_csv_path=args.out_observations_csv,
+            on_event=on_event, log=print,
         )
-    except Exception as e:
-        print(f"ERROR: Sampling query failed: {type(e).__name__}: {e}", file=sys.stderr)
+    except SamplingError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    if not sampled_rows:
-        print("No segments matched the sampling criteria (check --state/--functional-class-lt/--table).", file=sys.stderr)
-        return 1
-    print(f"Sampled {len(sampled_rows)} segment(s). Looking for speed-limit signs "
-          f"(walking up to {max_walk_back} segment(s) in each direction when a sampled segment has none)...\n")
-
-    vision_client = vision.ImageAnnotatorClient()
-    reset_api_call_counts()
-    results: list[dict] = []
-    n = len(sampled_rows)
-    try:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {
-                pool.submit(
-                    _process_sampled_segment, i, n, row,
-                    project=args.project, dataset=args.dataset, table=args.table, state=args.state,
-                    max_walk_back=max_walk_back, api_key=api_key, vision_client=vision_client, out_root=out_root,
-                    walk_segment=args.walk_segment, walk_segment_spacing_m=args.walk_segment_spacing_m,
-                    side_mode=args.side_mode, side_offset_m=args.side_offset_m, auto_side_offset=args.auto_side_offset,
-                    headings=args.headings, headings_relative=args.headings_relative, fov=args.fov,
-                    log=lambda msg: None,
-                ): i
-                for i, row in enumerate(sampled_rows)
-            }
-            for fut in as_completed(futures):
-                i = futures[fut]
-                try:
-                    result = fut.result()
-                except (StreetViewAuthError, NoUsableApiKey):
-                    # A broken API key/billing/auth error isn't specific to
-                    # this one segment - every other worker is about to hit
-                    # the exact same thing. Cancel whatever hasn't started
-                    # yet and re-raise to the outer handler below instead of
-                    # quietly logging up to `sample_size` identical "error"
-                    # results while burning through the rest of the sample.
-                    for other_fut in futures:
-                        other_fut.cancel()
-                    raise
-                except Exception as e:
-                    result = {
-                        "segment_id": sampled_rows[i]["here_segment_id"], "status": "error",
-                        "found_on_segment": False, "forward": None, "backward": None, "ground_truth_mph": None,
-                        "note": f"{type(e).__name__}: {e}",
-                    }
-                results.append(result)
-                if result["status"] == "error":
-                    # A worker actually raised - don't let this read as an
-                    # ordinary "checked thoroughly, found nothing" outcome
-                    # (real bug caught in practice: this used to fall through
-                    # to the "no sign" branch below, silently hiding the
-                    # real exception message that's still saved in
-                    # result["note"] either way).
-                    detail = result.get("note", "unknown error")
-                elif result.get("found_on_segment"):
-                    detail = f"{result['ground_truth_mph']} mph (both directions)"
-                else:
-                    fwd, bwd = result.get("forward") or {}, result.get("backward") or {}
-                    bits = []
-                    if fwd.get("found"):
-                        bits.append(f"forward={fwd['ground_truth_mph']} mph")
-                    if bwd.get("found"):
-                        bits.append(f"backward={bwd['ground_truth_mph']} mph")
-                    detail = ", ".join(bits) if bits else "no sign"
-                print(f"  [{len(results)}/{n}] {result.get('segment_id')}: {result['status']} ({detail})")
     except StreetViewAuthError as e:
         print(f"\nERROR: {e}\nThis means the API key/billing/API-enablement is broken, not that there's no "
               f"imagery. Check GOOGLE_MAPS_API_KEY and that billing/Street View Static API are enabled.", file=sys.stderr)
@@ -818,36 +1010,16 @@ def main() -> int:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
 
-    obs = _observations(results)
-    stats = compute_precision_stats(results, obs, tolerance_mph=args.tolerance_mph)
-    api_calls = get_api_call_counts()
-
-    payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "config": {
-            "project": args.project, "dataset": args.dataset, "table": args.table, "state": args.state.upper(),
-            "functional_class_lt": args.functional_class_lt,
-            "sample_size_requested": args.sample_size, "sample_size_actual": len(sampled_rows),
-            "max_walk_back": max_walk_back, "tolerance_mph": args.tolerance_mph, "concurrency": concurrency,
-            "walk_segment": args.walk_segment, "walk_segment_spacing_m": args.walk_segment_spacing_m,
-            "side_mode": args.side_mode, "side_offset_m": args.side_offset_m, "auto_side_offset": args.auto_side_offset,
-            "headings": list(args.headings), "headings_relative": args.headings_relative, "fov": args.fov,
-        },
-        "api_calls": api_calls,
-        "results": results,
-        "observations": obs,
-        "stats": stats,
-    }
-    out_json_path.write_text(json.dumps(payload, indent=2, default=str))
-    write_results_csv(out_csv_path, results)
-    write_observations_csv(out_observations_csv_path, obs)
-
-    print_report(stats, api_calls)
-    print_observations_table(obs)
-    print(f"\nFull results: {out_json_path}")
-    print(f"CSV (per segment): {out_csv_path}")
-    print(f"CSV (per segment-direction observation, the table above): {out_observations_csv_path}")
+    print_report(payload["stats"], payload["api_calls"])
+    print_observations_table(payload["observations"])
+    print(f"\nFull results: {payload['output_files']['json']}")
+    print(f"CSV (per segment): {payload['output_files']['csv']}")
+    print(f"CSV (per segment-direction observation, the table above): {payload['output_files']['observations_csv']}")
     print(f"Images: {out_root}")
+    if payload.get("bigquery_saved"):
+        print(f"Saved to BigQuery: calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id={payload['run_id']})")
+    else:
+        print(f"WARNING: could not save to BigQuery: {payload.get('bigquery_error')}", file=sys.stderr)
     return 0
 
 

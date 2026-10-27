@@ -54,6 +54,7 @@ from find_bad_speed_limit import (
     _validate_identifier,
     fetch_candidates,
     gcs_cache_pull,
+    get_api_call_counts,
     load_keys_file,
     parse_headings,
     run_pipeline,
@@ -89,6 +90,11 @@ from model_library import (
     list_periods,
     list_states,
     list_tags,
+)
+from precision_sample import (
+    MAX_SAMPLE_SIZE as PRECISION_MAX_SAMPLE_SIZE,
+    SamplingError as PrecisionSamplingError,
+    run_precision_sample,
 )
 
 # The Archimedes hub's model catalog - only "Speed Limits" has a built tool
@@ -211,6 +217,20 @@ BATCH_CANCEL_EVENTS_LOCK = threading.Lock()
 COMPARE_JOBS: dict[str, dict] = {}
 COMPARE_JOBS_LOCK = threading.Lock()
 MAX_COMPARE_JOBS = 20
+
+# Precision sample's own job store (same pattern again) - run_precision_sample()
+# can take many minutes (one Street View/Vision round trip per sampled
+# segment, up to 1 + 2*max_walk_back of them) and spends real money, so the
+# Quality page's top-of-page card starts it in a background thread and
+# polls /speed-limits/precision-sample/status/<job_id> instead of blocking
+# the request. Each job's own output directory (results.json/.csv/
+# observations.csv + Street View images) lives under here, named by job_id,
+# so the download routes below can find it after the job completes without
+# needing a second lookup table.
+PRECISION_JOBS: dict[str, dict] = {}
+PRECISION_JOBS_LOCK = threading.Lock()
+MAX_PRECISION_JOBS = 10  # lower than the other job stores - each one is a real-money run, not a cheap query
+PRECISION_OUT_DIR = OUT_DIR / "_precision_jobs"
 
 
 def _image_url(path: Path) -> str:
@@ -642,6 +662,73 @@ def _run_compare_job(job_id: str, column: str, entries: list) -> None:
     _update_compare_job(job_id, status="done", pairs=[p.to_json() for p in result.pairs])
 
 
+def _new_precision_job(state: str, functional_class_lt: int, sample_size: int) -> str:
+    job_id = uuid.uuid4().hex
+    with PRECISION_JOBS_LOCK:
+        PRECISION_JOBS[job_id] = {
+            "status": "running",  # "running" | "done" | "error"
+            "error": None,
+            "state": state, "functional_class_lt": functional_class_lt, "sample_size": sample_size,
+            "segments_done": 0, "segments_total": sample_size, "current_segment_id": None,
+            "api_calls": {"streetview": 0, "vision": 0},
+            "payload": None,
+            "out_root": str(PRECISION_OUT_DIR / job_id),
+        }
+        while len(PRECISION_JOBS) > MAX_PRECISION_JOBS:
+            del PRECISION_JOBS[next(iter(PRECISION_JOBS))]
+    return job_id
+
+
+def _update_precision_job(job_id: str, **kwargs) -> None:
+    with PRECISION_JOBS_LOCK:
+        if job_id in PRECISION_JOBS:
+            PRECISION_JOBS[job_id].update(kwargs)
+
+
+def _get_precision_job(job_id: str) -> dict | None:
+    with PRECISION_JOBS_LOCK:
+        job = PRECISION_JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt: int, sample_size: int, api_key: str) -> None:
+    """Runs run_precision_sample() in a background thread, translating its
+    on_event callback into updates on this job's PRECISION_JOBS record -
+    same pattern as _run_quality_job/_run_compare_job above. API-call
+    counts are read from find_bad_speed_limit's own process-wide counters
+    (get_api_call_counts) on every segment_done event - the same
+    established convention batch_evaluator.py's live progress already uses
+    (see this app's CLAUDE.md), not a second counting mechanism."""
+    out_root = Path(PRECISION_OUT_DIR / job_id)
+
+    def on_event(event: str, **kw) -> None:
+        if event == "segment_done":
+            result = kw["result"]
+            _update_precision_job(
+                job_id, segments_done=kw["index"], segments_total=kw["total"],
+                current_segment_id=result.get("segment_id"), api_calls=get_api_call_counts(),
+            )
+
+    try:
+        payload = run_precision_sample(
+            project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=table, state=state,
+            functional_class_lt=functional_class_lt, sample_size=sample_size,
+            api_key=api_key, out_root=out_root, on_event=on_event, log=print,
+            # Tuned per real pilot runs (see precision_sample.py's own CLI
+            # defaults in run_precision_sample.sh) - a single camera-forward,
+            # 15-degrees-right heading and 10m stepping along each segment's
+            # full length, not just its centroid.
+            headings=(15,), headings_relative=True, walk_segment=True, walk_segment_spacing_m=10.0,
+        )
+    except (PrecisionSamplingError, StreetViewAuthError, NoUsableApiKey) as e:
+        _update_precision_job(job_id, status="error", error=str(e))
+        return
+    except Exception as e:
+        _update_precision_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
+        return
+    _update_precision_job(job_id, status="done", payload=payload, api_calls=payload["api_calls"])
+
+
 @app.route("/", methods=["GET"])
 def hub():
     """The hub page: MooveAI's model catalog. Kept to just that - the
@@ -764,6 +851,80 @@ def agent_page():
     )
 
 
+@app.route("/speed-limits/precision-sample", methods=["POST"])
+def speed_limits_precision_sample_start():
+    """Starts the precision-sample pilot (precision_sample.py) as a
+    background job from the card at the top of the Quality page - see
+    _run_precision_job for why this can't just run inline (minutes of
+    real Street View/Vision spend). Exposes exactly the 3 parameters the
+    card asks for (state, functional_class_lt, sample_size); every other
+    run_precision_sample() parameter uses the same tuned defaults
+    run_precision_sample.sh pins for the CLI pilot."""
+    data = request.get_json(silent=True) or {}
+    state = (data.get("state") or "").strip().upper()
+    try:
+        functional_class_lt = int(data.get("functional_class_lt"))
+        sample_size = int(data.get("sample_size"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "functional_class_lt and sample_size must be integers."}), 400
+    if not STATE_RE.match(state):
+        return jsonify({"error": "state must be a 2-letter code, e.g. CO."}), 400
+    if not (1 <= sample_size <= PRECISION_MAX_SAMPLE_SIZE):
+        return jsonify({"error": f"sample_size must be between 1 and {PRECISION_MAX_SAMPLE_SIZE}."}), 400
+
+    load_keys_file(DEFAULT_KEYS_FILE)
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if not api_key or api_key == "your-key-here":
+        return jsonify({"error": "No usable GOOGLE_MAPS_API_KEY configured on this server."}), 500
+
+    try:
+        table = table_name(state, DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    job_id = _new_precision_job(state, functional_class_lt, sample_size)
+    thread = threading.Thread(
+        target=_run_precision_job, args=(job_id, table, state, functional_class_lt, sample_size, api_key), daemon=True,
+    )
+    thread.start()
+    return jsonify({"job_id": job_id}), 202
+
+
+@app.route("/speed-limits/precision-sample/status/<job_id>")
+def speed_limits_precision_sample_status(job_id):
+    job = _get_precision_job(job_id)
+    if not job:
+        return jsonify({"status": "error", "error": "Unknown or expired precision-sample job."}), 404
+    return jsonify(job)
+
+
+@app.route("/speed-limits/precision-sample/<job_id>/<kind>")
+def speed_limits_precision_sample_download(job_id, kind):
+    """Download one of the 3 output files for a completed precision-sample
+    job - same plain Response+Content-Disposition pattern as evaluator_csv()
+    above, not send_from_directory (these aren't meant to be browsed by
+    raw path, and the mimetype differs per file)."""
+    job = _get_precision_job(job_id)
+    if not job or job["status"] != "done":
+        return render_template("error.html", message="No output files available for this precision-sample run yet.", log=[])
+    out_root = Path(job["out_root"])
+    files = {
+        "results.json": ("application/json", out_root / "results.json"),
+        "results.csv": ("text/csv", out_root / "results.csv"),
+        "observations.csv": ("text/csv", out_root / "observations.csv"),
+    }
+    if kind not in files:
+        return render_template("error.html", message="Unknown output file.", log=[])
+    mimetype, path = files[kind]
+    if not path.exists():
+        return render_template("error.html", message="Output file not found.", log=[])
+    return Response(
+        path.read_text(),
+        mimetype=mimetype,
+        headers={"Content-Disposition": f'attachment; filename="precision_sample_{job_id}_{kind}"'},
+    )
+
+
 @app.route("/speed-limits", methods=["GET"])
 def speed_limits_quality():
     table_options, selected_option, error = _table_options_and_default(request.args.get("table", "").strip())
@@ -859,6 +1020,7 @@ def speed_limits_quality():
         warning=warning,
         quality_metric_choices=[{"key": m["key"], "name": m["name"], "description": m["description"]} for m in QUALITY_METRICS],
         preview_max_segments=PREVIEW_MAX_SEGMENTS,
+        precision_max_sample_size=PRECISION_MAX_SAMPLE_SIZE,
     )
 
 

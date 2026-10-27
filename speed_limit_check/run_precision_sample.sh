@@ -25,6 +25,18 @@ git checkout "$BRANCH"
 git pull origin "$BRANCH"
 
 cd "$REPO_DIR/speed_limit_check"
+# Works around a real macOS crash hit during testing ("multi-threaded
+# process forked ... crashed on child side of fork pre-exec"): on a
+# corporate Mac with Google Endpoint Verification / Certificate-Based
+# Access installed, google-auth shells out to its cert-provider helper on
+# (almost) every BigQuery/Vision client creation, and that subprocess call
+# can race against gRPC's own background threads hard enough to abort the
+# whole process. This disables that mTLS/cert-provider check entirely
+# (harmless here - this script doesn't need client-certificate auth),
+# which is the documented fix. precision_sample.py was also changed to
+# share one BigQuery client per run instead of creating dozens, which
+# cuts how often this path is hit regardless of this flag.
+export GOOGLE_API_USE_CLIENT_CERTIFICATE="${GOOGLE_API_USE_CLIENT_CERTIFICATE:-false}"
 python3 precision_sample.py \
   --table speed_limits_CO_2026_08_details \
   --state CO \

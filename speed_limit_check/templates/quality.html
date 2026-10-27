@@ -9,6 +9,38 @@
 {% block content %}
 
 <div class="card">
+  <span class="eyebrow">Precision sample (pilot)</span>
+  <h3 style="margin:0 0 4px;">How often do OSM, HERE, and our model match the real posted sign?</h3>
+  <p class="section-intro">Samples real road segments at random (weighted by length), reads the actual speed-limit sign off Street View imagery (walking up to a few segments in each direction when the sampled one has none), and reports how often OSM, HERE, and our own inferred speed limit match that ground truth. Spends real Street View/Vision API cost - always saves its output to <code>calc_tmp.precision_sample_results</code> / <code>calc_tmp.precision_sample_observations</code> in BigQuery in addition to what's shown here.</p>
+  <form id="precision-sample-form" onsubmit="return false;">
+    <div class="row-2">
+      <div>
+        <label for="precision-state">State</label>
+        <input type="text" id="precision-state" maxlength="2" value="CO" style="text-transform:uppercase;" list="state-list">
+      </div>
+      <div>
+        <label for="precision-fc">Functional class &lt;</label>
+        <input type="number" id="precision-fc" value="3" min="0" max="8">
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label for="precision-sample-size">Sample size</label>
+        <input type="number" id="precision-sample-size" value="20" min="1" max="{{ precision_max_sample_size }}">
+      </div>
+      <div style="display:flex; align-items:flex-end;">
+        <button type="button" class="btn-secondary" id="precision-sample-run-btn" onclick="runPrecisionSample()" style="margin-bottom:12px;">Run precision sample</button>
+      </div>
+    </div>
+  </form>
+  <div id="precision-sample-progress" style="display:none; margin-top:10px;">
+    <p id="precision-sample-progress-text" style="color:var(--muted); font-size:0.85rem; margin:0 0 6px;"></p>
+    <div class="progress-indeterminate"></div>
+  </div>
+  <div id="precision-sample-results" style="display:none; margin-top:14px;"></div>
+</div>
+
+<div class="card">
   <span class="eyebrow">Get started</span>
   <h3 style="margin:0 0 4px;">Filters</h3>
   <p class="section-intro">Pick a table and an inferred field, narrow it down if you like, then run the metrics below. Only Table and Inferred field usually need changing - everything else has a sensible default.</p>
@@ -133,6 +165,120 @@
     </div>
   </div>
 </div>
+
+<script>
+(function () {
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function fmtMph(v) {
+    return (v === null || typeof v === 'undefined') ? 'n/a' : Math.round(v);
+  }
+
+  function pctOrNa(v) {
+    return (v === null || typeof v === 'undefined') ? 'n/a' : (v * 100).toFixed(1) + '%';
+  }
+
+  function resetPrecisionSampleUi() {
+    document.getElementById('precision-sample-run-btn').disabled = false;
+    document.getElementById('precision-sample-progress').style.display = 'none';
+  }
+
+  function showPrecisionError(msg) {
+    resetPrecisionSampleUi();
+    const el = document.getElementById('precision-sample-results');
+    el.style.display = 'block';
+    el.innerHTML = `<span class="badge err">Error</span><pre class="log">${escapeHtml(msg)}</pre>`;
+  }
+
+  function pollPrecisionSample(jobId) {
+    fetch('/speed-limits/precision-sample/status/' + jobId)
+      .then(r => r.json())
+      .then(job => {
+        if (job.status === 'error') { showPrecisionError(job.error || 'unknown error'); return; }
+        if (job.status === 'done') { renderPrecisionResults(jobId, job.payload); return; }
+        const progressText = document.getElementById('precision-sample-progress-text');
+        progressText.textContent =
+          `Checking segment ${job.segments_done}/${job.segments_total}` +
+          (job.current_segment_id ? ` (${job.current_segment_id})` : '') +
+          ` · Street View calls: ${job.api_calls.streetview} · Vision calls: ${job.api_calls.vision}`;
+        setTimeout(() => pollPrecisionSample(jobId), 1500);
+      })
+      .catch(err => setTimeout(() => pollPrecisionSample(jobId), 3000));
+  }
+
+  function sourceRowHtml(label, s) {
+    return `<tr><td>${label}</td><td>${s.n_compared}</td><td>${pctOrNa(s.exact_match_rate)}</td>`
+      + `<td>${pctOrNa(s.within_tolerance_rate)}</td>`
+      + `<td>${s.mean_abs_error_mph !== null ? s.mean_abs_error_mph.toFixed(2) : 'n/a'}</td>`
+      + `<td>${s.median_abs_error_mph !== null ? s.median_abs_error_mph.toFixed(2) : 'n/a'}</td></tr>`;
+  }
+
+  function renderPrecisionResults(jobId, payload) {
+    resetPrecisionSampleUi();
+    const stats = payload.stats;
+    const obs = payload.observations || [];
+    const obsRows = obs.map(o => {
+      const modelMph = (o.speed_limit_infer_mph_corrected !== null && typeof o.speed_limit_infer_mph_corrected !== 'undefined')
+        ? o.speed_limit_infer_mph_corrected : o.speed_limit_infer_mph;
+      const svUrl = (o.sign_lat !== null && o.sign_lon !== null) ? `https://www.google.com/maps?q=&layer=c&cbll=${o.sign_lat},${o.sign_lon}` : null;
+      const segLabel = svUrl ? `<a href="${svUrl}" target="_blank" rel="noopener">${escapeHtml(o.segment_id)}</a>` : escapeHtml(o.segment_id);
+      return `<tr><td>${segLabel}</td><td>${escapeHtml(o.direction)}</td><td>${fmtMph(o.ground_truth_mph)}</td>`
+        + `<td>${fmtMph(o.speed_limit_osm_mph)}</td><td>${fmtMph(o.speed_limit_here_mph)}</td><td>${fmtMph(modelMph)}</td></tr>`;
+    }).join('');
+
+    const el = document.getElementById('precision-sample-results');
+    el.style.display = 'block';
+    el.innerHTML = `
+      <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
+      <table>
+        <thead><tr><th>Source</th><th>n</th><th>Exact match</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
+        <tbody>${sourceRowHtml('OSM', stats.osm)}${sourceRowHtml('HERE', stats.here)}${sourceRowHtml('Model', stats.model)}</tbody>
+      </table>
+      <p style="margin:14px 0 6px;">Segment-direction observations (every source's value next to the real sign reading):</p>
+      <table>
+        <thead><tr><th>Segment</th><th>Direction</th><th>Truth</th><th>OSM</th><th>HERE</th><th>Model</th></tr></thead>
+        <tbody>${obsRows || '<tr><td colspan="6">No signs found in this sample.</td></tr>'}</tbody>
+      </table>
+      <p style="margin:14px 0 0;">
+        <a href="/speed-limits/precision-sample/${jobId}/results.json">Download results.json</a> &middot;
+        <a href="/speed-limits/precision-sample/${jobId}/results.csv">Download results.csv</a> &middot;
+        <a href="/speed-limits/precision-sample/${jobId}/observations.csv">Download observations.csv</a>
+      </p>
+      <p style="color:var(--muted); font-size:0.8rem; margin:8px 0 0;">${
+        payload.bigquery_saved
+          ? `Saved to BigQuery: calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id=${escapeHtml(payload.run_id)}).`
+          : `Could not save to BigQuery: ${escapeHtml(payload.bigquery_error || 'unknown error')}.`
+      }</p>
+    `;
+  }
+
+  window.runPrecisionSample = function () {
+    const state = document.getElementById('precision-state').value.trim().toUpperCase();
+    const functional_class_lt = parseInt(document.getElementById('precision-fc').value, 10);
+    const sample_size = parseInt(document.getElementById('precision-sample-size').value, 10);
+    if (!/^[A-Z]{2}$/.test(state)) { showPrecisionError('State must be a 2-letter code, e.g. CO.'); return; }
+    if (!Number.isFinite(functional_class_lt) || !Number.isFinite(sample_size)) { showPrecisionError('Functional class and sample size must be numbers.'); return; }
+
+    document.getElementById('precision-sample-run-btn').disabled = true;
+    document.getElementById('precision-sample-results').style.display = 'none';
+    document.getElementById('precision-sample-progress').style.display = 'block';
+    document.getElementById('precision-sample-progress-text').textContent = 'Sampling segments...';
+
+    fetch('/speed-limits/precision-sample', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({state, functional_class_lt, sample_size}),
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || data.error) { showPrecisionError(data.error || 'unknown error'); return; }
+        pollPrecisionSample(data.job_id);
+      })
+      .catch(err => showPrecisionError(err.message));
+  };
+})();
+</script>
 
 {% if job_id %}
 <script>
