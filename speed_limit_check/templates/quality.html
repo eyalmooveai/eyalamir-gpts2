@@ -11,7 +11,7 @@
 <div class="card">
   <span class="eyebrow">Precision sample (pilot)</span>
   <h3 style="margin:0 0 4px;">How often do OSM, HERE, and our model match the real posted sign?</h3>
-  <p class="section-intro">Samples real road segments at random (weighted by length), reads the actual speed-limit sign off Street View imagery (walking up to a few segments in each direction when the sampled one has none), and reports how often OSM, HERE, and our own inferred speed limit match that ground truth. Spends real Street View/Vision API cost - always saves its output to <code>calc_tmp.precision_sample_results</code> / <code>calc_tmp.precision_sample_observations</code> in BigQuery in addition to what's shown here.</p>
+  <p class="section-intro">Samples at random (weighted by length) among segments where OSM, HERE, and our inferred speed limit don't all three agree, reads the actual speed-limit sign off Street View imagery (walking up to a few segments in each direction when the sampled one has none), and reports how often each source matches that ground truth - plus an inferred OVERALL precision for each source across the whole domain, assuming agreement means correct. Spends real Street View/Vision API cost - always saves its output to <code>calc_tmp.precision_sample_results</code> / <code>calc_tmp.precision_sample_observations</code> in BigQuery in addition to what's shown here.</p>
   <form id="precision-sample-form" onsubmit="return false;">
     <div class="row-2">
       <div>
@@ -215,6 +215,29 @@
       + `<td>${s.median_abs_error_mph !== null ? s.median_abs_error_mph.toFixed(2) : 'n/a'}</td></tr>`;
   }
 
+  function inferredPrecisionHtml(payload) {
+    if (payload.population_error) {
+      return `<p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Inferred overall precision not computed: ${escapeHtml(payload.population_error)}</p>`;
+    }
+    const pop = payload.population, inferred = payload.inferred_precision;
+    if (!pop || !inferred) return '';
+    const total = pop.agree_count + pop.disagree_count;
+    const agreePct = total ? (pop.agree_count / total * 100).toFixed(1) : 'n/a';
+    const rows = ['osm', 'here', 'model'].map(key => {
+      const label = key === 'osm' ? 'OSM' : key === 'here' ? 'HERE' : 'Model';
+      const val = inferred[key];
+      return `<tr><td>${label}</td><td>${val !== null ? (val * 100).toFixed(1) + '%' : 'n/a'}</td></tr>`;
+    }).join('');
+    return `
+      <p style="margin:14px 0 6px;">Inferred overall precision (assumes a segment where OSM/HERE/Model already agree is in fact correct - see <code>precision_sample.py</code>'s module docstring):</p>
+      <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain: ${total} segment(s) with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded.</p>
+      <table>
+        <thead><tr><th>Source</th><th>Inferred precision</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
   function renderPrecisionResults(jobId, payload) {
     resetPrecisionSampleUi();
     const stats = payload.stats;
@@ -236,6 +259,7 @@
         <thead><tr><th>Source</th><th>n</th><th>Exact match</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
         <tbody>${sourceRowHtml('OSM', stats.osm)}${sourceRowHtml('HERE', stats.here)}${sourceRowHtml('Model', stats.model)}</tbody>
       </table>
+      ${inferredPrecisionHtml(payload)}
       <p style="margin:14px 0 6px;">Segment-direction observations (every source's value next to the real sign reading):</p>
       <table>
         <thead><tr><th>Segment</th><th>Direction</th><th>Truth</th><th>OSM</th><th>HERE</th><th>Model</th></tr></thead>

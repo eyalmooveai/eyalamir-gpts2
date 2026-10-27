@@ -1,18 +1,45 @@
 #!/usr/bin/env python3
-"""Sample road segments at random (weighted by length) within a functional-class
-range, find the real-world posted speed limit for each one by reading a Street
-View sign - walking up to a few segments in BOTH directions of travel when the
-sampled segment itself has none - and report how often OSM, HERE, and our own
-inferred speed limit actually match that ground truth.
+"""Sample road segments at random (weighted by length) among those where OSM,
+HERE, and our own inferred ("Moove") speed limit do NOT all three agree,
+within a functional-class range, find the real-world posted speed limit for
+each one by reading a Street View sign - walking up to a few segments in BOTH
+directions of travel when the sampled segment itself has none - and report
+how often OSM, HERE, and our own inferred speed limit actually match that
+ground truth. Also infers each source's OVERALL precision across the FULL
+domain (not just the disagreeing segments actually sampled), under an
+explicit, stated assumption - see "Inferring overall precision" below.
 
-This is a PRECISION/ACCURACY EVAL, not a mismatch-finder: find_bad_speed_limit.py
-(and the Evaluator built on it) deliberately picks segments where sources
-*disagree*, which is exactly the wrong sampling frame for measuring how often a
-source is *right* - that needs a sample that doesn't already know the answer.
-This script instead samples segments the same unbiased way a survey would:
-uniformly at random across the table's domain, weighted by each segment's own
-length (ST_LENGTH(geom), in meters) so a long highway segment isn't counted the
-same as a 20m connector - then reads the real sign.
+This is a PRECISION/ACCURACY EVAL, not a mismatch-*finder* in find_bad_speed_limit.py's
+sense: that module (and the Evaluator built on it) picks candidates to CHECK
+by a narrower rule - HERE and OSM must already agree with EACH OTHER, and the
+inferred value must then differ from that agreed value by at least a
+configurable threshold (see CRITERIA_DEFS's here_osm_agree/infer_vs_here) -
+tuned to surface likely model errors, not to measure a rate. This script's own
+sampling frame is any pairwise disagreement among OSM/HERE/Moove (no magnitude
+threshold) - a different, larger population - and within THAT population it
+still samples uniformly at random, weighted by each segment's own length
+(ST_LENGTH(geom), in meters) so a long highway segment isn't counted the same
+as a 20m connector, rather than just taking the biggest disagreements first.
+
+Inferring overall precision (explicit, directed design - not something this
+script can verify, only assume): segments where OSM/HERE/Moove already all
+three agree are NEVER sampled (there's nothing to adjudicate), so on their
+own, this script's stats describe precision *conditioned on disagreement*,
+not blanket network-wide accuracy. To get the latter, run_precision_sample()
+also queries the domain's agree/disagree population split (population_agreement_counts())
+and combines it with this run's own empirically-measured disagreement-only
+precision (compute_precision_stats()'s exact_match_rate) via the law of total
+probability, UNDER THE ASSUMPTION that whenever all three sources already
+agree, they are in fact right:
+    P(source correct) = P(all agree)*1 + P(disagree)*P(source correct | disagreement)
+(see infer_overall_precision()). This assumption is a real, stated leap, not
+a measured fact - it cannot detect the case where OSM/HERE/Moove are
+correlated-wrong together (e.g. a shared stale upstream classification) while
+still agreeing with each other. If that blind spot ever needs to be checked
+directly, it needs an unconditional sample across the FULL domain (agreement
+included), which would mean dropping the disagreement condition from
+sample_segments_weighted_by_length()'s WHERE clause for that one run - not a
+permanent change to this script's own default sampling frame.
 
 Built on top of find_bad_speed_limit.py's existing pipeline - it does NOT
 reimplement the Street View / Vision OCR mechanics:
@@ -141,7 +168,12 @@ def sample_segments_weighted_by_length(
     project: str, dataset: str, table: str, *, state: str, functional_class_lt: int, sample_size: int,
     client: "bigquery.Client",
 ) -> list[bigquery.table.Row]:
-    """Picks `sample_size` segments uniformly at random, weighted by each
+    """Picks `sample_size` segments uniformly at random FROM AMONG THOSE WHERE
+    OSM, HERE, and Moove's inferred value do NOT all three agree (any pairwise
+    disagreement, no magnitude threshold - see module docstring for why this
+    is a different, narrower frame than find_bad_speed_limit.py's own
+    candidate criteria, and for how this combines with the "if all agree,
+    assume correct" assumption to infer overall precision), weighted by each
     segment's own length - true probability-proportional-to-size sampling in
     one pass, via the Efraimidis-Spirakis weighted-reservoir-sampling trick:
     for weight w_i, draw key_i = ln(u_i) / w_i for u_i ~ Uniform(0,1) (u_i is
@@ -155,7 +187,16 @@ def sample_segments_weighted_by_length(
     standard SQL) resolves an ORDER BY name against the SELECT list first.
     speed_limit_here_mph is rounded here for the same reason every other
     query in this app rounds it (see CLAUDE.md) - it's stored as a precise,
-    noisy km/h->mph conversion, not a clean posted-sign value.
+    noisy km/h->mph conversion, not a clean posted-sign value; the agreement
+    check uses that same rounded value so a segment isn't counted as
+    "disagreeing" purely from HERE's km/h->mph conversion noise. Moove's own
+    value prefers speed_limit_infer_mph_corrected, falling back to
+    speed_limit_infer_mph when the corrected column is null - the same
+    precedence _source_value(..., None) uses for the "model" column
+    everywhere else in this module, kept in sync deliberately. A segment
+    missing any of the three values can't be said to agree OR disagree (SQL's
+    NULL comparisons are NULL, not TRUE/FALSE) and so is naturally excluded -
+    same population population_agreement_counts() reports as "missing".
 
     Takes an already-constructed `client` rather than making its own - see
     run_precision_sample()'s own note on why: this module can issue dozens
@@ -174,6 +215,10 @@ def sample_segments_weighted_by_length(
           LN(RAND()) / GREATEST(ST_LENGTH(geom), 1.0) AS _sample_key
         FROM `{project}.{dataset}.{table}`
         WHERE functional_class < @fc_lt AND state = @state
+          AND NOT (
+            speed_limit_osm_mph = ROUND(speed_limit_here_mph)
+            AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph)
+          )
         ORDER BY _sample_key DESC
         LIMIT @sample_size
     """
@@ -183,6 +228,71 @@ def sample_segments_weighted_by_length(
         bigquery.ScalarQueryParameter("sample_size", "INT64", sample_size),
     ])
     return list(client.query(query, job_config=job_config).result())
+
+
+def population_agreement_counts(
+    project: str, dataset: str, table: str, *, state: str, functional_class_lt: int, client: "bigquery.Client",
+) -> dict:
+    """One cheap COUNT query (metadata-scale, no imagery/API cost) over the
+    SAME domain sample_segments_weighted_by_length() samples from
+    (functional_class < fc_lt, state) - classifies every segment into
+    "agree" (OSM, HERE, and Moove all three equal - same agreement check as
+    the sampling query's own WHERE clause), "disagree" (the sampling query's
+    actual population - at least one pairwise difference), or "missing" (any
+    of the three values is null, so agreement can't be judged either way).
+    This is what turns this run's own disagreement-only empirical precision
+    into an inferred OVERALL-domain precision - see infer_overall_precision()
+    and the module docstring's "Inferring overall precision" section for the
+    formula and the explicit assumption it rests on."""
+    query = f"""
+        SELECT
+          COUNTIF(speed_limit_osm_mph IS NULL OR speed_limit_here_mph IS NULL
+                  OR COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NULL) AS missing_count,
+          COUNTIF(speed_limit_osm_mph IS NOT NULL AND speed_limit_here_mph IS NOT NULL
+                  AND COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL
+                  AND speed_limit_osm_mph = ROUND(speed_limit_here_mph)
+                  AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph)) AS agree_count,
+          COUNTIF(speed_limit_osm_mph IS NOT NULL AND speed_limit_here_mph IS NOT NULL
+                  AND COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL
+                  AND NOT (speed_limit_osm_mph = ROUND(speed_limit_here_mph)
+                           AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph))) AS disagree_count
+        FROM `{project}.{dataset}.{table}`
+        WHERE functional_class < @fc_lt AND state = @state
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("fc_lt", "INT64", functional_class_lt),
+        bigquery.ScalarQueryParameter("state", "STRING", state.upper()),
+    ])
+    row = next(iter(client.query(query, job_config=job_config).result()))
+    return {"missing_count": row["missing_count"], "agree_count": row["agree_count"], "disagree_count": row["disagree_count"]}
+
+
+def infer_overall_precision(population: dict, stats: dict) -> dict:
+    """Combines population_agreement_counts()'s domain-wide agree/disagree
+    split with this run's own empirically-measured disagreement-only
+    precision (compute_precision_stats()'s per-source exact_match_rate) into
+    an inferred OVERALL precision for each source across the FULL domain -
+    under the explicit, stated assumption that a segment where OSM/HERE/Moove
+    already all agree is in fact correct (see module docstring - this is a
+    real assumption, never verified by this script itself). Law of total
+    probability over the two-population split:
+        P(source correct) = P(all agree)*1 + P(disagree)*P(source correct | disagreement)
+    "missing" segments (can't be judged either way) are excluded from the
+    denominator, same as every per-source comparison elsewhere in this module
+    already excludes a missing value rather than guessing. Returns None for
+    a source whose disagreement-sample exact_match_rate is itself None (no
+    comparable observations found in this run)."""
+    agree, disagree = population["agree_count"], population["disagree_count"]
+    total = agree + disagree
+    if total == 0:
+        return {"osm": None, "here": None, "model": None}
+    agree_frac = agree / total
+    disagree_frac = disagree / total
+    result = {}
+    for label in ("osm", "here", "model"):
+        rate = stats[label]["exact_match_rate"]
+        result[label] = (agree_frac * 1.0 + disagree_frac * rate) if rate is not None else None
+    return result
 
 
 def _maps_table_for_state(state: str) -> str:
@@ -608,7 +718,7 @@ def compute_precision_stats(results: list[dict], obs: list[dict], tolerance_mph:
     }
 
 
-def print_report(stats: dict, api_calls: dict) -> None:
+def print_report(stats: dict, api_calls: dict, population: Optional[dict] = None, inferred_precision: Optional[dict] = None, population_error: Optional[str] = None) -> None:
     print("\n=== Precision sample report ===")
     print(f"Sample size: {stats['sample_size']} segment(s)")
     if stats["segment_sign_find_rate"] is not None:
@@ -627,6 +737,22 @@ def print_report(stats: dict, api_calls: dict) -> None:
         mean_err = f"{s['mean_abs_error_mph']:.2f}" if s["mean_abs_error_mph"] is not None else "n/a"
         median_err = f"{s['median_abs_error_mph']:.2f}" if s["median_abs_error_mph"] is not None else "n/a"
         print(f"{label:<8}{s['n_compared']:>6}{exact_pct:>14}{tol_pct:>14}{mean_err:>12}{median_err:>14}")
+
+    print("\n=== Inferred overall precision (assumes agreement = correct) ===")
+    if population_error:
+        print(f"Could not compute: {population_error}")
+    elif population and inferred_precision:
+        total = population["agree_count"] + population["disagree_count"]
+        agree_pct = (population["agree_count"] / total * 100) if total else 0.0
+        print(f"Domain: {total} segment(s) with all 3 values present ({population['agree_count']} agree, "
+              f"{population['disagree_count']} disagree, {agree_pct:.1f}% agree) "
+              f"- {population['missing_count']} more missing a value, excluded.")
+        print("Assumes a segment where OSM/HERE/Moove already agree is in fact correct - see module docstring.")
+        for label in ("osm", "here", "model"):
+            pct = f"{inferred_precision[label] * 100:.1f}%" if inferred_precision[label] is not None else "n/a (no disagreement observations to anchor the estimate)"
+            print(f"  {label:<8}{pct}")
+    else:
+        print("Not computed.")
 
 
 def _fmt_mph(value: Optional[float]) -> str:
@@ -905,6 +1031,18 @@ def run_precision_sample(
     obs = _observations(results)
     stats = compute_precision_stats(results, obs, tolerance_mph=tolerance_mph)
     api_calls = get_api_call_counts()
+
+    on_event("population")
+    try:
+        population = population_agreement_counts(project, dataset, table, state=state, functional_class_lt=functional_class_lt, client=bq_client)
+        inferred_precision = infer_overall_precision(population, stats)
+        population_error = None
+    except Exception as e:
+        population = None
+        inferred_precision = None
+        population_error = f"{type(e).__name__}: {e}"
+        log(f"WARNING: could not compute the domain agree/disagree population split: {population_error}")
+
     run_id = f"{state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     config = {
         "project": project, "dataset": dataset, "table": table, "state": state.upper(),
@@ -916,7 +1054,10 @@ def run_precision_sample(
         "headings": list(headings), "headings_relative": headings_relative, "fov": fov,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    payload = {"run_id": run_id, "config": config, "api_calls": api_calls, "results": results, "observations": obs, "stats": stats}
+    payload = {
+        "run_id": run_id, "config": config, "api_calls": api_calls, "results": results, "observations": obs, "stats": stats,
+        "population": population, "inferred_precision": inferred_precision, "population_error": population_error,
+    }
 
     out_json_path = out_json_path or (out_root / "results.json")
     out_csv_path = out_csv_path or (out_root / "results.csv")
@@ -986,6 +1127,8 @@ def main() -> int:
         elif event == "segment_done":
             result = kw["result"]
             print(f"  [{kw['index']}/{kw['total']}] {result.get('segment_id')}: {result['status']} ({_format_segment_outcome(result)})")
+        elif event == "population":
+            print("\nComputing the domain's agree/disagree population split (for the inferred overall precision below)...")
 
     try:
         payload = run_precision_sample(
@@ -1010,7 +1153,7 @@ def main() -> int:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
 
-    print_report(payload["stats"], payload["api_calls"])
+    print_report(payload["stats"], payload["api_calls"], payload.get("population"), payload.get("inferred_precision"), payload.get("population_error"))
     print_observations_table(payload["observations"])
     print(f"\nFull results: {payload['output_files']['json']}")
     print(f"CSV (per segment): {payload['output_files']['csv']}")
