@@ -512,30 +512,56 @@ def _source_stats(found_results: list[dict], column: Optional[str], tolerance_mp
     }
 
 
+def _observation_row(r: dict, *, direction: str, ground_truth_mph: float, matched_segment_id, steps_walked, sign_lat, sign_lon) -> dict:
+    """One self-contained segment-direction row - every source's value
+    alongside the real sign reading, suitable for direct display/export
+    (print_observations_table/write_observations_csv) as well as the
+    precision stats (_source_stats only ever reads ground_truth_mph plus
+    the speed_limit_* columns, all present here)."""
+    return {
+        "segment_id": r["segment_id"], "direction": direction,
+        "street_name": r.get("street_name"), "functional_class": r.get("functional_class"),
+        "ground_truth_mph": ground_truth_mph,
+        "matched_segment_id": matched_segment_id, "steps_walked": steps_walked,
+        "sign_lat": sign_lat, "sign_lon": sign_lon,
+        "speed_limit_osm_mph": r.get("speed_limit_osm_mph"),
+        "speed_limit_here_mph": r.get("speed_limit_here_mph"),
+        "speed_limit_infer_mph": r.get("speed_limit_infer_mph"),
+        "speed_limit_infer_mph_corrected": r.get("speed_limit_infer_mph_corrected"),
+        "speed_AVG_mph": r.get("speed_AVG_mph"), "freeflow_mph": r.get("freeflow_mph"),
+    }
+
+
 def _observations(results: list[dict]) -> list[dict]:
-    """Flattens each sampled segment into 0-2 ground-truth observations for
-    the precision stats below: ONE shared observation when the sign was
-    found directly on the sampled segment (our detection can't attribute
-    that to one approach direction, so it answers for both and isn't
-    double-counted), or up to one observation per direction (forward/
-    backward) when the segment itself had none and a walk in that
-    direction found something. Every observation from a given segment
-    carries that same segment's OSM/HERE/model values - only the resolved
-    ground_truth_mph differs between a segment's forward and backward
-    observations."""
+    """Flattens each sampled segment into 0-2 ground-truth observations:
+    ONE shared observation (direction="both") when the sign was found
+    directly on the sampled segment (our detection can't attribute that to
+    one approach direction, so it answers for both and isn't double-
+    counted), or up to one observation per direction (forward/backward)
+    when the segment itself had none and a walk in that direction found
+    something. This is the actual table the precision stats are computed
+    from - also what print_observations_table()/write_observations_csv()
+    show/export directly, one row per segment-direction with a real sign."""
     obs = []
     for r in results:
         if r.get("found_on_segment"):
-            obs.append(r)
+            obs.append(_observation_row(
+                r, direction="both", ground_truth_mph=r["ground_truth_mph"],
+                matched_segment_id=r["segment_id"], steps_walked=0, sign_lat=r.get("sign_lat"), sign_lon=r.get("sign_lon"),
+            ))
             continue
         for direction in ("forward", "backward"):
             d = r.get(direction) or {}
             if d.get("found"):
-                obs.append({**r, "ground_truth_mph": d["ground_truth_mph"]})
+                obs.append(_observation_row(
+                    r, direction=direction, ground_truth_mph=d["ground_truth_mph"],
+                    matched_segment_id=d.get("matched_segment_id"), steps_walked=d.get("steps_walked"),
+                    sign_lat=d.get("sign_lat"), sign_lon=d.get("sign_lon"),
+                ))
     return obs
 
 
-def compute_precision_stats(results: list[dict], tolerance_mph: float) -> dict:
+def compute_precision_stats(results: list[dict], obs: list[dict], tolerance_mph: float) -> dict:
     segments_with_any = [
         r for r in results
         if r.get("found_on_segment") or (r.get("forward") or {}).get("found") or (r.get("backward") or {}).get("found")
@@ -545,7 +571,6 @@ def compute_precision_stats(results: list[dict], tolerance_mph: float) -> dict:
         if not r.get("found_on_segment") and (r.get("forward") or {}).get("found") and (r.get("backward") or {}).get("found")
     ]
     disagreeing = [r for r in both_found if r["forward"]["ground_truth_mph"] != r["backward"]["ground_truth_mph"]]
-    obs = _observations(results)
     return {
         "sample_size": len(results),
         "segments_with_any_sign": len(segments_with_any),
@@ -581,6 +606,58 @@ def print_report(stats: dict, api_calls: dict) -> None:
         print(f"{label:<8}{s['n_compared']:>6}{exact_pct:>14}{tol_pct:>14}{mean_err:>12}{median_err:>14}")
 
 
+def _fmt_mph(value: Optional[float]) -> str:
+    return f"{value:.0f}" if value is not None else "n/a"
+
+
+def print_observations_table(observations: list[dict]) -> None:
+    """The detail table behind the summary stats above - one row per
+    segment-direction that actually found a real sign, with all three
+    sources' values side by side so each can be eyeballed directly rather
+    than only seen as an aggregate percentage."""
+    if not observations:
+        print("\n(no segment-direction observations with a real sign found)")
+        return
+    print(f"\n{'Segment':<28}{'Dir':<9}{'Truth':>6}{'OSM':>6}{'HERE':>6}{'Model':>6}")
+    for o in observations:
+        model_mph = _source_value(o, None)
+        print(
+            f"{o['segment_id']:<28}{o['direction']:<9}"
+            f"{_fmt_mph(o['ground_truth_mph']):>6}{_fmt_mph(o.get('speed_limit_osm_mph')):>6}"
+            f"{_fmt_mph(o.get('speed_limit_here_mph')):>6}{_fmt_mph(model_mph):>6}"
+        )
+
+
+OBSERVATION_CSV_FIELDNAMES = [
+    "segment_id", "direction", "street_name", "functional_class",
+    "ground_truth_mph", "speed_limit_osm_mph", "speed_limit_here_mph", "model_mph",
+    "osm_abs_diff", "here_abs_diff", "model_abs_diff",
+    "matched_segment_id", "steps_walked", "sign_lat", "sign_lon", "streetview_url",
+]
+
+
+def write_observations_csv(path: Path, observations: list[dict]) -> None:
+    """One row per segment-direction that actually found a real sign - the
+    exact table _source_stats() computes its numbers from, made directly
+    inspectable (every source's value AND its abs-diff from the real sign,
+    side by side) instead of needing to reconstruct it from the per-segment
+    CSV's separate forward_/backward_ columns by hand."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv_module.DictWriter(f, fieldnames=OBSERVATION_CSV_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for o in observations:
+            truth = o["ground_truth_mph"]
+            model_mph = _source_value(o, None)
+            row = dict(o)
+            row["model_mph"] = model_mph
+            row["osm_abs_diff"] = abs(o["speed_limit_osm_mph"] - truth) if o.get("speed_limit_osm_mph") is not None else ""
+            row["here_abs_diff"] = abs(o["speed_limit_here_mph"] - truth) if o.get("speed_limit_here_mph") is not None else ""
+            row["model_abs_diff"] = abs(model_mph - truth) if model_mph is not None else ""
+            row["streetview_url"] = _streetview_url(o.get("sign_lat"), o.get("sign_lon"))
+            writer.writerow(row)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--table", required=True, help="Table name (not dataset-qualified), e.g. speed_limits_CO_2026_08_details")
@@ -603,6 +680,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", default="precision_sample_output", help="Directory to write Street View images and results into (default: ./precision_sample_output)")
     p.add_argument("--out-json", default=None, type=Path, help="Path for the full JSON results+stats file (default: <out-dir>/<run>/results.json)")
     p.add_argument("--out-csv", default=None, type=Path, help="Path for the flat per-segment CSV (default: <out-dir>/<run>/results.csv)")
+    p.add_argument("--out-observations-csv", default=None, type=Path,
+                   help="Path for the one-row-per-segment-direction CSV (every source's value + abs-diff from the "
+                        "real sign, for just the observations with a sign found) - default: <out-dir>/<run>/observations.csv")
     p.add_argument("--walk-segment", action="store_true",
                    help="At each segment checked (sampled or walked-back), sample several positions along its full "
                         "length instead of just its centroid - same flag/meaning as find_bad_speed_limit.py")
@@ -654,6 +734,7 @@ def main() -> int:
     out_root.mkdir(parents=True, exist_ok=True)
     out_json_path = args.out_json or (out_root / "results.json")
     out_csv_path = args.out_csv or (out_root / "results.csv")
+    out_observations_csv_path = args.out_observations_csv or (out_root / "observations.csv")
 
     print(f"Sampling {sample_size} segment(s) from `{args.project}.{args.dataset}.{args.table}` "
           f"(state={args.state.upper()}, functional_class<{args.functional_class_lt}), weighted by segment length...")
@@ -693,6 +774,16 @@ def main() -> int:
                 i = futures[fut]
                 try:
                     result = fut.result()
+                except (StreetViewAuthError, NoUsableApiKey):
+                    # A broken API key/billing/auth error isn't specific to
+                    # this one segment - every other worker is about to hit
+                    # the exact same thing. Cancel whatever hasn't started
+                    # yet and re-raise to the outer handler below instead of
+                    # quietly logging up to `sample_size` identical "error"
+                    # results while burning through the rest of the sample.
+                    for other_fut in futures:
+                        other_fut.cancel()
+                    raise
                 except Exception as e:
                     result = {
                         "segment_id": sampled_rows[i]["here_segment_id"], "status": "error",
@@ -700,7 +791,15 @@ def main() -> int:
                         "note": f"{type(e).__name__}: {e}",
                     }
                 results.append(result)
-                if result.get("found_on_segment"):
+                if result["status"] == "error":
+                    # A worker actually raised - don't let this read as an
+                    # ordinary "checked thoroughly, found nothing" outcome
+                    # (real bug caught in practice: this used to fall through
+                    # to the "no sign" branch below, silently hiding the
+                    # real exception message that's still saved in
+                    # result["note"] either way).
+                    detail = result.get("note", "unknown error")
+                elif result.get("found_on_segment"):
                     detail = f"{result['ground_truth_mph']} mph (both directions)"
                 else:
                     fwd, bwd = result.get("forward") or {}, result.get("backward") or {}
@@ -719,7 +818,8 @@ def main() -> int:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
 
-    stats = compute_precision_stats(results, tolerance_mph=args.tolerance_mph)
+    obs = _observations(results)
+    stats = compute_precision_stats(results, obs, tolerance_mph=args.tolerance_mph)
     api_calls = get_api_call_counts()
 
     payload = {
@@ -735,14 +835,18 @@ def main() -> int:
         },
         "api_calls": api_calls,
         "results": results,
+        "observations": obs,
         "stats": stats,
     }
     out_json_path.write_text(json.dumps(payload, indent=2, default=str))
     write_results_csv(out_csv_path, results)
+    write_observations_csv(out_observations_csv_path, obs)
 
     print_report(stats, api_calls)
+    print_observations_table(obs)
     print(f"\nFull results: {out_json_path}")
-    print(f"CSV: {out_csv_path}")
+    print(f"CSV (per segment): {out_csv_path}")
+    print(f"CSV (per segment-direction observation, the table above): {out_observations_csv_path}")
     print(f"Images: {out_root}")
     return 0
 

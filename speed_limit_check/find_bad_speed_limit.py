@@ -831,15 +831,27 @@ def streetview_coverage(lat: float, lon: float, api_key: str, log=lambda msg: No
     every subsequent position. So UNKNOWN_ERROR is retried a few times and
     then, like ZERO_RESULTS, treated as "no coverage here" rather than
     aborting the whole run - mirroring how a transient 5xx from the image
-    endpoint is handled in fetch_streetview_images."""
+    endpoint is handled in fetch_streetview_images.
+
+    A network-level failure (read timeout, connection reset, DNS hiccup -
+    requests.exceptions.RequestException, raised before any HTTP response
+    even comes back) gets the exact same treatment, funneled into the same
+    UNKNOWN_ERROR retry-then-give-up path below - confirmed to actually
+    happen in practice (a real 'Read timed out' against maps.googleapis.com
+    killed one candidate's whole check under precision_sample.py's denser
+    per-segment call volume, before this was added)."""
     status = None
     meta = {}
     for attempt in range(STREETVIEW_API_RETRIES):
         _throttle_streetview_call()
-        resp = requests.get(STREETVIEW_METADATA_URL, params={"location": f"{lat},{lon}", "key": api_key}, timeout=30)
-        resp.raise_for_status()
-        meta = resp.json()
-        status = meta.get("status")
+        try:
+            resp = requests.get(STREETVIEW_METADATA_URL, params={"location": f"{lat},{lon}", "key": api_key}, timeout=30)
+            resp.raise_for_status()
+            meta = resp.json()
+            status = meta.get("status")
+        except requests.exceptions.RequestException as e:
+            log(f"    Street View metadata request failed ({type(e).__name__}: {e}).")
+            status = "UNKNOWN_ERROR"
         if status != "UNKNOWN_ERROR":
             break
         if attempt < STREETVIEW_API_RETRIES - 1:
@@ -879,7 +891,12 @@ def fetch_streetview_images(
     A transient 5xx from Google's own server (as opposed to a 4xx from a
     bad key/request) is retried a few times and then just skipped, logging
     a warning - one flaky image shouldn't abort an otherwise-successful
-    walk over dozens of positions."""
+    walk over dozens of positions. A network-level failure (read timeout,
+    connection reset - requests.exceptions.RequestException, before any
+    HTTP response comes back) gets the same retry-then-skip treatment,
+    keeping `resp` as None rather than letting the exception propagate and
+    abort the whole candidate - confirmed to actually happen in practice
+    under precision_sample.py's denser per-segment call volume."""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for heading in headings:
@@ -893,15 +910,22 @@ def fetch_streetview_images(
         resp = None
         for attempt in range(STREETVIEW_API_RETRIES):
             _throttle_streetview_call()
-            resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
+            try:
+                resp = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
+            except requests.exceptions.RequestException as e:
+                log(f"    {path.name}: Street View image request failed ({type(e).__name__}: {e}).")
+                resp = None
+                if attempt < STREETVIEW_API_RETRIES - 1:
+                    time.sleep(2**attempt)
+                continue
             if resp.status_code < 500:
                 break
             if attempt < STREETVIEW_API_RETRIES - 1:
                 log(f"    {path.name}: Street View image API returned {resp.status_code}, retrying...")
                 time.sleep(2**attempt)
-        if resp.status_code >= 500:
+        if resp is None or resp.status_code >= 500:
             log(f"    {path.name}: Street View image API still failing after {STREETVIEW_API_RETRIES} tries "
-                f"({resp.status_code}) - skipping this heading.")
+                f"({resp.status_code if resp is not None else 'network error'}) - skipping this heading.")
             continue
         resp.raise_for_status()
         path.write_bytes(resp.content)
