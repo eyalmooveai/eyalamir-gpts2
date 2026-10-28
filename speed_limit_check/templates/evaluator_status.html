@@ -32,6 +32,9 @@
   <p style="margin:14px 0 0;">
     <a id="ev-csv-link" class="btn-secondary" style="text-decoration:none; display:inline-block; {% if status.run_status == 'running' %}opacity:0.45; pointer-events:none;{% endif %}" href="/speed-limits-evaluator/{{ batch_id }}/csv">Download CSV</a>
     <button id="ev-cancel-btn" type="button" onclick="evCancel()" style="{% if status.run_status != 'running' %}display:none;{% endif %} margin-left:8px;">Cancel run</button>
+    <form id="ev-resume-form" method="post" action="/speed-limits-evaluator/{{ batch_id }}/resume" style="display:{{ 'inline' if (status.run_status in ('error', 'cancelled') and status.done_count < status.total_count) else 'none' }};">
+      <button type="submit" class="btn-secondary" style="margin-left:8px;">Resume ({{ status.done_count }}/{{ status.total_count }} already done, no re-billing)</button>
+    </form>
   </p>
 </div>
 
@@ -231,6 +234,7 @@
 
     renderMap(data.results);
 
+    const resumeForm = document.getElementById('ev-resume-form');
     if (data.run_status !== 'running') {
       running = false;
       document.getElementById('ev-progress-bar').style.display = 'none';
@@ -238,6 +242,11 @@
       const csvLink = document.getElementById('ev-csv-link');
       csvLink.style.opacity = '1';
       csvLink.style.pointerEvents = 'auto';
+      resumeForm.style.display = (
+        (data.run_status === 'error' || data.run_status === 'cancelled') && data.done_count < data.total_count
+      ) ? 'inline' : 'none';
+    } else {
+      resumeForm.style.display = 'none';
     }
   }
 

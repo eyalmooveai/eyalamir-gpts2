@@ -149,6 +149,7 @@ from find_bad_speed_limit import (
     reset_api_call_counts,
     safe_segment_dirname,
     _process_one_candidate,
+    wait_for_gcs_uploads,
 )
 
 # calc_out's own table names are validated via find_bad_speed_limit.table_name()
@@ -421,16 +422,19 @@ def _walk_chain(project: str, state: str, start_topo: dict, max_steps: int, dire
 
 
 def _check_segment_for_sign(
-    step_index: int, n: int, row, *, api_key: str, vision_client, sample_out_root: Path,
+    step_index: int, n: int, row, *, api_key: str, vision_client, bq_client: "bigquery.Client", project: str, sample_out_root: Path,
     walk_segment: bool, walk_segment_spacing_m: float, side_mode: str, side_offset_m: float, auto_side_offset: bool,
     headings: tuple[int, ...], headings_relative: bool, fov: int, log,
 ):
     """Thin, shared wrapper around _process_one_candidate - the exact same
     "walk this segment's positions, look for a sign, OCR it" logic the
     Evaluator/Sign Checker use, reused unchanged for every segment this
-    script ever checks (the sampled one or a walked neighbor)."""
+    script ever checks (the sampled one or a walked neighbor). Passes the
+    same shared bq_client this whole run already uses through to
+    _process_one_candidate's own record_sign_detection call - never a
+    fresh bigquery.Client() per segment."""
     return _process_one_candidate(
-        step_index, n, row, api_key=api_key, vision_client=vision_client, out_root=sample_out_root,
+        step_index, n, row, api_key=api_key, vision_client=vision_client, bq_client=bq_client, project=project, out_root=sample_out_root,
         walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
         side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
         headings=headings, headings_relative=headings_relative, fov=fov,
@@ -448,7 +452,7 @@ def _empty_direction_result(note: str, steps_available: int) -> dict:
 
 def _walk_direction_for_sign(
     chain: list[dict], *, project: str, dataset: str, table: str, direction: str, tag: str,
-    api_key: str, vision_client, sample_out_root: Path,
+    api_key: str, vision_client, bq_client: "bigquery.Client", sample_out_root: Path,
     walk_segment: bool, walk_segment_spacing_m: float, side_mode: str, side_offset_m: float, auto_side_offset: bool,
     headings: tuple[int, ...], headings_relative: bool, fov: int, log,
 ) -> dict:
@@ -466,7 +470,7 @@ def _walk_direction_for_sign(
             log(f"{tag} [{direction}] step {step_index} ({step_seg_id}): not found in {dataset}.{table} - skipping.")
             continue
         attempt, match = _check_segment_for_sign(
-            step_index, len(chain), rows[0], api_key=api_key, vision_client=vision_client, sample_out_root=sample_out_root,
+            step_index, len(chain), rows[0], api_key=api_key, vision_client=vision_client, bq_client=bq_client, project=project, sample_out_root=sample_out_root,
             walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
             side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
             headings=headings, headings_relative=headings_relative, fov=fov, log=log,
@@ -520,7 +524,7 @@ def _process_sampled_segment(
     }
 
     attempt0, match0 = _check_segment_for_sign(
-        0, 1, sampled_row, api_key=api_key, vision_client=vision_client, sample_out_root=sample_out_root,
+        0, 1, sampled_row, api_key=api_key, vision_client=vision_client, bq_client=bq_client, project=project, sample_out_root=sample_out_root,
         walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
         side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
         headings=headings, headings_relative=headings_relative, fov=fov, log=log,
@@ -551,7 +555,7 @@ def _process_sampled_segment(
                 + (f" ({', '.join(s['here_segment_id'] for s in chain)})" if chain else ""))
             directions[direction] = _walk_direction_for_sign(
                 chain, project=project, dataset=dataset, table=table, direction=direction, tag=tag,
-                api_key=api_key, vision_client=vision_client, sample_out_root=sample_out_root,
+                api_key=api_key, vision_client=vision_client, bq_client=bq_client, sample_out_root=sample_out_root,
                 walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
                 side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
                 headings=headings, headings_relative=headings_relative, fov=fov, log=log,
@@ -1156,6 +1160,7 @@ def run_precision_sample(
                 # so --resume-from can pick this exact point back up.
                 for other_fut in futures:
                     other_fut.cancel()
+                wait_for_gcs_uploads()
                 raise
             except Exception as e:
                 result = {
@@ -1166,6 +1171,12 @@ def run_precision_sample(
             results.append(result)
             on_event("segment_done", index=len(results), total=n, result=result)
             _write_checkpoint(checkpoint_path, config=config, sampled_rows=sampled_rows, results=results)
+
+    # Drain every still-in-flight async GCS image upload (gcs_cache_push
+    # inside _process_one_candidate) before computing/writing final
+    # outputs - "async" means not blocking the per-segment hot path, never
+    # "may still be running when this function returns its results".
+    wait_for_gcs_uploads()
 
     obs = _observations(results)
     stats = compute_precision_stats(results, obs, tolerance_mph=tolerance_mph)

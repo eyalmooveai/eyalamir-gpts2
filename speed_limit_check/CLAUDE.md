@@ -403,20 +403,62 @@
     settings) too, not just headline fields - needed for the "compare
     against a later run over the same streets" use case this was built
     for; don't strip that down to save space.
-  - **NOT resumable across an instance restart** - if the one Cloud Run
-    instance dies mid-batch (e.g. scaled to zero from idling), that
-    batch's background thread dies with it; status.json is left at its
-    last written snapshot, not silently continued elsewhere. Fixing the
-    "idle instance gets recycled mid-batch" half of this needs
-    `--min-instances=1` in `deploy.sh`/`gcloud run deploy` - **not
-    currently added**, since it's a standing-cost commitment (an always-on
-    instance) that wasn't explicitly signed off on. Ask before adding it,
-    don't add it silently just because a batch run would benefit.
+  - **Resumable, explicitly** - `batch_evaluator.run_batch(batch_id,
+    config, cancel_event, resume=True)` continues a prior batch under the
+    SAME `batch_id` (an instance restart mid-batch, a crash, a
+    user Cancel, or hitting the daily cost cap all leave one resumable)
+    instead of starting over, matching the same "always write
+    intermediate results, always resumable" standard already applied to
+    `precision_sample.py`. `config` is ignored on a resume - the prior
+    run's own persisted `status["config"]` is authoritative, same as
+    `precision_sample.run_precision_sample`'s own `resume_from` semantics
+    ("the checkpoint is always authoritative"). Every already-done
+    segment (any non-"error" result - "no_sign_read"/"no_coverage" are
+    legitimate finished outcomes, only a real "error" gets retried) is
+    carried over with zero new Street View/Vision calls;
+    `fetch_candidates()` is re-run (cheap - it's a single deterministic
+    query, confirmed no `RAND()` anywhere in it) rather than needing the
+    raw candidate rows persisted, since the same config always reproduces
+    the same candidate set/order. The prior run's `results.csv` rows for
+    carried-over segments are merged into the new CSV too (read back via
+    `csv.DictReader`, filtered to the carried segment ids) - a resumed
+    run's final CSV always covers every segment ever processed under this
+    id, not just the latest leg. `actual_streetview_calls`/
+    `actual_vision_calls`/`elapsed_seconds` add the prior run's own
+    totals as a baseline (`_finalize_usage`'s `baseline_*` args) rather
+    than resetting to 0, since `daily_spend_for_user`'s cap enforcement
+    and `run_history_stats()` both need the real cumulative cost across
+    every resume. Status.json itself is now written after EVERY completed
+    segment (not every 10th, as it used to be) - a crash/restart must
+    never lose more than the handful of segments actually in flight at
+    that moment (bounded by `config.concurrency`); this is cheap even at
+    this cadence since `gcs_cache_push` (inside `_write_status`) is
+    asynchronous. The daily-cap re-check itself (a real cross-batch scan
+    via `daily_spend_for_user`) deliberately stays on its original every-
+    10th-completion cadence - unlike the status write, that one is
+    actually expensive to run on every single segment under high
+    concurrency. Triggered from the status page's "Resume" button
+    (`evaluator_status.html`, shown whenever `run_status` is `error` or
+    `cancelled` with `done_count < total_count`) via `POST
+    /speed-limits-evaluator/<batch_id>/resume` (`app.py`'s
+    `evaluator_resume()`) - which reads only durable `read_status()`,
+    deliberately never `BATCH_CANCEL_EVENTS`, since that in-memory dict is
+    empty after exactly the kind of instance restart this exists to
+    recover from; gating resume on it being populated would defeat the
+    point. `--min-instances=1` in `deploy.sh`/`gcloud run deploy` would
+    still prevent the restart from happening in the first place, but
+    remains **not currently added** (a standing-cost commitment that
+    wasn't explicitly signed off on) - resume is what makes a restart
+    recoverable after the fact instead, not a replacement for ever
+    needing that flag.
   - **Cancellation** is in-memory only (`app.py`'s `BATCH_CANCEL_EVENTS`,
     a `threading.Event` per running batch) - works for stopping a batch
     that's actually running in the current process; cannot stop one
     that's "running" only because the process that started it died
-    without updating its status (same instance-restart gap as above).
+    without updating its status (same instance-restart gap as above) -
+    but that exact case is also exactly what "Resume" (above) now
+    recovers from, rather than leaving the batch stuck claiming to be
+    "running" forever.
   - **"Who ran it"** comes from the `X-Goog-Authenticated-User-Email`
     header IAP sets on every forwarded request (`app.py`'s
     `_requester_email()`) - reads as `"unknown"` for local dev, where
@@ -531,8 +573,9 @@
     with a plain error page if already at/over cap), and `run_batch()`
     checks it again right before writing its own first status (defense
     against two submissions racing past the app.py check) AND
-    periodically during the run (every 10 segments, same cadence as the
-    existing status/usage writes) - the instant the *real* total for that
+    periodically during the run (every 10 segments - see the Resumable
+    bullet above for why this cadence is now separate from status.json's
+    own per-segment write) - the instant the *real* total for that
     user crosses the cap, it self-cancels (`cancel_event.set()`, distinct
     from a user-triggered Cancel via `status["hit_daily_cap"]`) rather
     than running to completion. This is a soft real-time stop, not an
@@ -547,6 +590,53 @@
     estimate would exceed the user's remaining budget; it doesn't gate
     anything itself. `evaluator.html`'s launch page also shows the
     requester's spend-so-far-today next to the estimate.
+- **Every confirmed sign detection, across all three sign-checking
+  surfaces (Sign Checker, Evaluator, precision_sample.py), gets recorded
+  into `calc_out.signs`** - "wherever a sign is detected now add that
+  sign to a bq table" was explicit, including a specific column list
+  (sign UUID, image bucket address, lat/lon, here_segment_id, detection/
+  image datetime, sign_type, direction_of_travel, dimensions, height
+  above ground, background color, shape, reading, units, raw text). All
+  of it lives in the new `sign_registry.py` - **read its own module
+  docstring first**, it documents exactly which columns are real
+  (straight from the existing `Match`/`ImageDetail`/`SignReading`
+  objects), which are a deliberate geometric derivation (direction of
+  travel, from the matched image's own Street View capture heading - not
+  a Gemini guess), which are honest best-effort visual estimates (color,
+  shape, dimensions, height above ground - via one extra Gemini Vision
+  call per DETECTION, never per candidate image tried, per explicit
+  instruction: "do best effort but only on those signs already detected"),
+  and the real caveat this table has no choice but to carry (`lat`/`lon`
+  is the Street View CAMERA's position, not a triangulated sign location -
+  confirmed nothing in this codebase ever computes the latter).
+  `record_sign_detection()` is called from exactly one place -
+  `find_bad_speed_limit._process_one_candidate()`'s own match-found
+  block, the single code path all three surfaces already share (see the
+  Evaluator's own "Built by extracting..." note above) - so none of the
+  three callers needed their own copy of this wiring, just a `bq_client`
+  parameter threaded through `_process_one_candidate()` and each of its
+  three top-level callers (`run_pipeline`, `batch_evaluator._worker`/
+  `run_batch`, `precision_sample._check_segment_for_sign`/
+  `_process_sampled_segment`/`run_precision_sample`) - the same shared-
+  client-not-one-per-call discipline this session already established
+  for BigQuery (see precision_sample.py's own module docstring on the
+  real macOS fork-safety crash that motivated it). Follows this app's own
+  established "brand-new output table" convention - schema-autodetect-on-
+  first-load via `client.load_table_from_json(rows, table_ref,
+  job_config=bigquery.LoadJobConfig(autodetect=True, write_disposition=
+  WRITE_APPEND, create_disposition=CREATE_IF_NEEDED,
+  schema_update_options=[ALLOW_FIELD_ADDITION]))` - no DDL written or sent
+  anywhere in this module, per this repo's standing rule that a table is
+  never created by code Claude runs, only ever displayed for the user to
+  deploy themselves (`CREATE_IF_NEEDED` here only ever fires the first
+  time the USER's own deployed code actually runs against real data).
+  Best-effort and never raises either failure mode (a Gemini
+  classification failure, or the BigQuery write itself failing) - a
+  sign-recording problem must never block or fail the real pipeline
+  around it, same principle `gcs_cache_push` already established for
+  image backup. `Dockerfile`'s `COPY` line needs `sign_registry.py` - same
+  "don't forget the new module" mistake this file already warns about
+  more than once elsewhere.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

@@ -48,12 +48,15 @@ import re
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 import requests
 from google.cloud import bigquery, vision
 from PIL import Image, ImageDraw
+
+import sign_registry
 
 DEFAULT_PROJECT = "moove-platform-testing-data"
 DEFAULT_DATASET = "calc_out"
@@ -149,13 +152,31 @@ def _throttle_streetview_call() -> None:
 # deployment whose local disk doesn't survive restarts or isn't shared
 # across instances (Cloud Run) needs a persistent backing store so the
 # whole point of caching - not re-billing Street View/Vision for the same
-# image - still holds across those restarts. Uses the file's own path
-# (e.g. "output/NC_2026_08/<segment>/streetview_heading10.jpg") as its GCS
-# object name directly, so it's portable across machines as long as
-# --out-dir/OUT_DIR is left at its default "output".
+# image - still holds across those restarts.
 GCS_CACHE_BUCKET = os.environ.get("GCS_CACHE_BUCKET")
 
+# Every cached object lives under this fixed prefix (e.g. a local
+# "output/NC_2026_08/<segment>/streetview_heading10.jpg" becomes
+# "cache/spl/gsv/output/NC_2026_08/<segment>/streetview_heading10.jpg") -
+# "spl" for this app (speed limits), "gsv" for Google Street View, inside
+# the shared gs://archimedes-control bucket. The rest of the key still
+# mirrors the file's own local path, so it stays portable across
+# machines/out-dirs the same way it always has.
+GCS_CACHE_PREFIX = "cache/spl/gsv"
+
 _gcs_bucket_obj = None
+
+# Uploads (gcs_cache_push) run on this bounded background pool instead of
+# the calling thread - "asynchronous" means not blocking the per-image
+# Street View/OCR hot path on a network upload, not "fire and forget and
+# maybe it never happens": a short-lived caller (the CLI scripts) must
+# still call wait_for_gcs_uploads() once its own per-segment work is done,
+# so every image really does end up backed up before the process exits,
+# just without each one serializing the walk that fetched it. Bounded
+# (not one raw thread per push) so a 1000-segment Evaluator batch - each
+# segment fetching several images - can't spin up thousands of concurrent
+# upload threads/sockets at once.
+_GCS_UPLOAD_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gcs-upload")
 
 
 def _gcs_bucket():
@@ -170,6 +191,10 @@ def _gcs_bucket():
     return _gcs_bucket_obj
 
 
+def _gcs_object_key(path: Path) -> str:
+    return f"{GCS_CACHE_PREFIX}/{str(path).replace(os.sep, '/')}"
+
+
 def gcs_cache_pull(path: Path, log=lambda msg: None) -> bool:
     """If `path` doesn't already exist locally but GCS_CACHE_BUCKET is set
     and has a copy, downloads it to `path` first - lets an instance whose
@@ -177,13 +202,15 @@ def gcs_cache_pull(path: Path, log=lambda msg: None) -> bool:
     run already fetched/generated instead of re-fetching (and re-billing
     for) it. Returns whether `path` exists locally after this call. Any
     GCS error is logged and treated as a cache miss - caching is an
-    optimization, not a requirement, so this never raises."""
+    optimization, not a requirement, so this never raises. Synchronous,
+    deliberately - the caller needs the file before it can proceed, unlike
+    a push, which has nothing to wait for."""
     if path.exists():
         return True
     if not GCS_CACHE_BUCKET:
         return False
     try:
-        blob = _gcs_bucket().blob(str(path).replace(os.sep, "/"))
+        blob = _gcs_bucket().blob(_gcs_object_key(path))
         if not blob.exists():
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,16 +222,39 @@ def gcs_cache_pull(path: Path, log=lambda msg: None) -> bool:
         return False
 
 
-def gcs_cache_push(path: Path, log=lambda msg: None) -> None:
-    """Best-effort upload of a freshly-fetched/generated file at `path` to
-    the GCS cache (if configured), so a future instance can recover it via
-    gcs_cache_pull instead of re-fetching/regenerating it. Never raises."""
-    if not GCS_CACHE_BUCKET:
-        return
+def _gcs_cache_push_now(path: Path, log) -> None:
     try:
-        _gcs_bucket().blob(str(path).replace(os.sep, "/")).upload_from_filename(str(path))
+        _gcs_bucket().blob(_gcs_object_key(path)).upload_from_filename(str(path))
     except Exception as e:
         log(f"    {path.name}: failed to push to GCS cache ({e}) - continuing without it")
+
+
+def gcs_cache_push(path: Path, log=lambda msg: None) -> None:
+    """Best-effort, ASYNCHRONOUS upload of a freshly-fetched/generated file
+    at `path` to the GCS cache (if configured), so a future instance can
+    recover it via gcs_cache_pull instead of re-fetching/regenerating it.
+    Returns immediately - the actual upload runs on _GCS_UPLOAD_POOL in the
+    background, same as it always silently "never raises" on failure (now
+    logged from the background thread instead of the caller's). Callers
+    that need to know every push has actually finished (the CLI scripts,
+    right before they exit) must call wait_for_gcs_uploads() - see its own
+    docstring for why "async" doesn't mean "allowed to be dropped."""
+    if not GCS_CACHE_BUCKET:
+        return
+    _GCS_UPLOAD_POOL.submit(_gcs_cache_push_now, path, log)
+
+
+def wait_for_gcs_uploads(timeout: Optional[float] = None) -> None:
+    """Blocks until every gcs_cache_push() submitted so far has finished -
+    call this once a run's own per-segment work is done (a CLI script
+    right before it exits; a batch/precision-sample run right before it
+    reports itself complete) so "asynchronous" never means "some images
+    silently never made it to GCS because the process ended first." Safe
+    to call even when GCS_CACHE_BUCKET is unset (nothing was ever
+    submitted, returns immediately)."""
+    global _GCS_UPLOAD_POOL
+    _GCS_UPLOAD_POOL.shutdown(wait=True, cancel_futures=False)
+    _GCS_UPLOAD_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gcs-upload")
 
 SPEED_TOKEN_RE = re.compile(r"^speed$", re.IGNORECASE)
 LIMIT_TOKEN_RE = re.compile(r"^limit$", re.IGNORECASE)
@@ -1358,17 +1408,25 @@ def run_pipeline(
         message = "Segment not found in this table." if segment_id else "No road segments matched the selection criteria."
         log(message)
         progress(1.0, message)
+        wait_for_gcs_uploads()
         return result
     log(f"Found {len(candidates)} candidate segment(s).")
     progress(0.02, f"Found {len(candidates)} candidate segment(s).")
 
     vision_client = vision.ImageAnnotatorClient()
+    # Shared across every candidate in this run (and passed into
+    # sign_registry.record_sign_detection for each match) rather than a
+    # fresh bigquery.Client() per candidate/match - a fresh client per call
+    # was confirmed, this same session, to multiply a real macOS
+    # fork-safety crash risk (see precision_sample.py's own module
+    # docstring for the full story).
+    bq_client = bigquery.Client(project=project)
     n = len(candidates)
 
     for i, row in enumerate(candidates):
         attempt, match = _process_one_candidate(
             i, n, row,
-            api_key=api_key, vision_client=vision_client, out_root=out_root,
+            api_key=api_key, vision_client=vision_client, bq_client=bq_client, project=project, out_root=out_root,
             walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
             side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
             headings=headings, headings_relative=headings_relative, fov=fov,
@@ -1379,6 +1437,7 @@ def run_pipeline(
             result.matches.append(match)
             if not walk_all:
                 progress(1.0, f"Match found: {match.reading.speed_mph} mph.")
+                wait_for_gcs_uploads()
                 return result
             progress((i + 1) / n, f"[{i + 1}/{n}] Match found: {match.reading.speed_mph} mph. Continuing...")
 
@@ -1388,6 +1447,7 @@ def run_pipeline(
         message = "Exhausted all candidates without finding a readable speed limit sign."
     log(message)
     progress(1.0, message)
+    wait_for_gcs_uploads()
     return result
 
 
@@ -1398,6 +1458,8 @@ def _process_one_candidate(
     *,
     api_key: str,
     vision_client,
+    bq_client,
+    project: str = DEFAULT_PROJECT,
     out_root: Path,
     walk_segment: bool,
     walk_segment_spacing_m: float,
@@ -1601,6 +1663,19 @@ def _process_one_candidate(
     )
     match = Match(row=row_dict, reading=reading, annotated_image=annotated_path, image_details=image_details, matched_image_index=matched_index)
     log(f"Match found: {reading.speed_mph} mph on segment {seg_id}.")
+
+    # Record this detection into calc_out.signs - best effort, on the
+    # image behind THIS confirmed match only (never run over every
+    # candidate image tried), per explicit instruction. image_gcs_path is
+    # the same gs:// location gcs_cache_push just (asynchronously) sent
+    # the annotated image to, so the recorded row points at where the
+    # image actually ends up, not just its local path.
+    image_gcs_path = (
+        f"gs://{GCS_CACHE_BUCKET}/{_gcs_object_key(annotated_path)}" if GCS_CACHE_BUCKET
+        else str(annotated_path)
+    )
+    sign_registry.record_sign_detection(match, image_gcs_path=image_gcs_path, project=project, client=bq_client, log=log)
+
     return attempt, match
 
 
