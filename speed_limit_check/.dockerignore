@@ -1,4 +1,5 @@
 output/
+precision_sample_output/
 __pycache__/
 *.pyc
 .git/

@@ -11,6 +11,7 @@
 # every single deploy. Keep this in sync with .dockerignore - they serve
 # different stages but should exclude the same things.
 output/
+precision_sample_output/
 __pycache__/
 *.pyc
 .git/
