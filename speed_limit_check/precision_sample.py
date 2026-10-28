@@ -125,6 +125,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import bq_writer
 from google.cloud import bigquery, vision
 
 from find_bad_speed_limit import (
@@ -871,9 +872,9 @@ def save_results_to_bigquery(
         "sample_size_requested": config["sample_size_requested"], "sample_size_actual": config["sample_size_actual"],
     }
     result_rows = [{**meta, **_result_row_for_export(r)} for r in results]
-    _append_rows_to_bigquery(client, f"{project}.calc_tmp.precision_sample_results", result_rows, log=log)
+    bq_writer.submit(project, f"{project}.calc_tmp.precision_sample_results", result_rows, log=log)
     observation_rows = [{**meta, **_observation_row_for_export(o)} for o in observations]
-    _append_rows_to_bigquery(client, f"{project}.calc_tmp.precision_sample_observations", observation_rows, log=log)
+    bq_writer.submit(project, f"{project}.calc_tmp.precision_sample_observations", observation_rows, log=log)
 
 
 def _append_rows_to_bigquery(client: "bigquery.Client", table_ref: str, rows: list[dict], log=lambda msg: None) -> None:
@@ -1209,9 +1210,9 @@ def run_precision_sample(
     on_event("saving_to_bigquery")
     try:
         save_results_to_bigquery(project, run_id, config, results, obs, client=bq_client, log=log)
-        payload["bigquery_saved"] = True
+        payload["bigquery_saved"] = True  # queued: the load itself runs in the background and is retried on the next start if it fails
     except Exception as e:
-        log(f"WARNING: failed to save results to BigQuery: {type(e).__name__}: {e}")
+        log(f"WARNING: failed to queue results for BigQuery: {type(e).__name__}: {e}")
         payload["bigquery_saved"] = False
         payload["bigquery_error"] = f"{type(e).__name__}: {e}"
 
@@ -1242,6 +1243,7 @@ def _format_segment_outcome(result: dict) -> str:
 
 def main() -> int:
     args = parse_args()
+    bq_writer.replay_pending(print)
 
     load_keys_file(args.keys_file)
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
@@ -1316,7 +1318,7 @@ def main() -> int:
         print(f"Images: {out_root}")
     print(f"Checkpoint (for --resume-from, if this run itself ever needs to be continued): {out_root / _CHECKPOINT_FILENAME}")
     if payload.get("bigquery_saved"):
-        print(f"Saved to BigQuery: calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id={payload['run_id']})")
+        print(f"Queued for BigQuery (background, retried on next start if it fails): calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id={payload['run_id']})")
     else:
         print(f"WARNING: could not save to BigQuery: {payload.get('bigquery_error')}", file=sys.stderr)
     return 0

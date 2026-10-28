@@ -649,6 +649,14 @@
   bearing correction). Not yet in `precision_sample.py` or the web forms.
   Gemini calls are counted in `get_api_call_counts()["gemini"]` but not in
   the Evaluator's daily-cost-cap math.
+- **BigQuery result tables are written in the background and are always resumable** (`bq_writer.py`) -
+  `calc_out.signs` and `calc_tmp.precision_sample_results/observations` are appended via
+  `bq_writer.submit()`, which spools the rows to `output/_bq_spool/<id>.json` (mirrored to GCS) and
+  returns immediately; a background thread does the Gemini visual classification (signs only) and the
+  load, then deletes the spool file only on success. Nothing in a pipeline ever waits on BigQuery.
+  Each load uses the fixed job id `bqw_<id>`, so replaying a file that actually did load is a harmless
+  409. `bq_writer.replay_pending()` re-queues leftovers at app start and at the start of each CLI
+  `main()`. A failure is only a log line (`WARNING: background BigQuery write ...`).
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

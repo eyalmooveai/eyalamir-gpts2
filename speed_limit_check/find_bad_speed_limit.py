@@ -57,6 +57,7 @@ from google.cloud import bigquery, vision
 from PIL import Image, ImageDraw
 
 import adaptive_walk
+import bq_writer
 import gemini_client
 import sign_registry
 
@@ -1835,6 +1836,7 @@ def _process_one_candidate(
 
 def main() -> int:
     args = parse_args()
+    bq_writer.replay_pending(print)
 
     try:
         result = run_pipeline(

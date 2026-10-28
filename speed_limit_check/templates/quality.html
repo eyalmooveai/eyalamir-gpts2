@@ -272,8 +272,8 @@
       </p>
       <p style="color:var(--muted); font-size:0.8rem; margin:8px 0 0;">${
         payload.bigquery_saved
-          ? `Saved to BigQuery: calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id=${escapeHtml(payload.run_id)}).`
-          : `Could not save to BigQuery: ${escapeHtml(payload.bigquery_error || 'unknown error')}.`
+          ? `Queued for BigQuery (saved in the background, retried automatically if it fails): calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id=${escapeHtml(payload.run_id)}).`
+          : `Could not queue the BigQuery save: ${escapeHtml(payload.bigquery_error || 'unknown error')}.`
       }</p>
     `;
   }

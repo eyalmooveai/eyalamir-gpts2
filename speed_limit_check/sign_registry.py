@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Optional
 from google.cloud import bigquery
 from pydantic import BaseModel, Field
 
+import bq_writer
 import gemini_client
 
 if TYPE_CHECKING:
@@ -133,14 +134,17 @@ def classify_sign_visual_attributes(image_path: Path, project: str) -> dict:
     }
 
 
-def build_sign_row(match: "Match", *, image_gcs_path: str, project: str) -> dict:
+def build_sign_row(match: "Match", *, image_gcs_path: str, project: str, classify_visual: bool = True) -> dict:
     """Assembles one calc_out.signs row for a confirmed Match - see module
     docstring for the provenance/caveats of every field. `image_gcs_path`
     is passed in rather than computed here, since the caller already knows
     the deterministic GCS key the matching annotated image was (or is
     being, asynchronously) pushed to - see find_bad_speed_limit._gcs_object_key."""
     sign = match.image_details[match.matched_image_index]
-    visual = classify_sign_visual_attributes(match.annotated_image, project)
+    visual = (
+        classify_sign_visual_attributes(match.annotated_image, project) if classify_visual
+        else {"color": None, "shape": None, "dimensions_m": None, "height_above_ground_m": None}
+    )
     return {
         "sign_id": str(uuid.uuid4()),
         "here_segment_id": match.row.get("here_segment_id"),
@@ -164,26 +168,21 @@ def build_sign_row(match: "Match", *, image_gcs_path: str, project: str) -> dict
     }
 
 
-def record_sign_detection(match: "Match", *, image_gcs_path: str, project: str, client: "bigquery.Client", log=lambda msg: None) -> None:
-    """Builds and appends one row to `{project}.calc_out.signs` for a
-    confirmed Match. Best-effort and never raises - a BigQuery write
-    failure (or a Gemini classification failure upstream, already handled
-    in build_sign_row) is logged and otherwise ignored, exactly like
-    gcs_cache_push's own "never block the real pipeline over this"
-    contract, since this is a side effect of a match, not the match
-    itself."""
+def record_sign_detection(match: "Match", *, image_gcs_path: str, project: str, client: "bigquery.Client" = None, log=lambda msg: None) -> None:
+    """Queues one row for `{project}.calc_out.signs` for a confirmed Match
+    and returns immediately - never waits for Gemini or BigQuery. The row's
+    facts are spooled to disk right away (see bq_writer.py); the slow parts
+    (the Gemini visual classification, then the BigQuery load) happen on a
+    background thread, and anything that doesn't finish - a failed load, a
+    crash, an instance restart - is retried by bq_writer.replay_pending()
+    on the next start. `client` is accepted for call-site compatibility
+    only; bq_writer keeps its own shared per-project client. Never raises."""
     try:
-        row = build_sign_row(match, image_gcs_path=image_gcs_path, project=project)
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-            autodetect=True,
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
-            schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+        row = build_sign_row(match, image_gcs_path=image_gcs_path, project=project, classify_visual=False)
+        bq_writer.submit(
+            project, f"{project}.{SIGNS_DATASET}.{SIGNS_TABLE}", [row],
+            classify={"image": str(match.annotated_image), "project": project}, log=log,
         )
-        table_ref = f"{project}.{SIGNS_DATASET}.{SIGNS_TABLE}"
-        job = client.load_table_from_json([row], table_ref, job_config=job_config)
-        job.result()
-        log(f"    Recorded sign {row['sign_id']} ({row['sign_reading']} mph) to {table_ref}")
+        log(f"    Queued sign {row['sign_id']} ({row['sign_reading']} mph) for {SIGNS_DATASET}.{SIGNS_TABLE} (background)")
     except Exception as e:
-        log(f"    WARNING: failed to record sign detection to calc_out.signs ({type(e).__name__}: {e}) - continuing without it")
+        log(f"    WARNING: failed to queue sign detection for calc_out.signs ({type(e).__name__}: {e}) - continuing without it")

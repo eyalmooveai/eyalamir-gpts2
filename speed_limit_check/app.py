@@ -23,6 +23,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
+import bq_writer
 from batch_evaluator import (
     DAILY_COST_CAP_USD,
     MAX_SEGMENT_COUNT,
@@ -179,6 +180,10 @@ PREVIEW_MAX_SEGMENTS = 300
 load_keys_file(DEFAULT_KEYS_FILE)
 
 app = Flask(__name__)
+
+# Resume any BigQuery appends (calc_out.signs, calc_tmp.precision_sample_*) a previous instance/run left unfinished -
+# in the background, so startup never waits on BigQuery.
+threading.Thread(target=bq_writer.replay_pending, args=(print,), daemon=True, name="bq-replay").start()
 
 # In-memory job store. A single local user, one run at a time in practice,
 # so a plain dict + lock is enough - no need for a task queue/DB here.
