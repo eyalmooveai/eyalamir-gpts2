@@ -46,6 +46,7 @@ from typing import Optional
 
 from google.cloud import bigquery, vision
 
+from adaptive_walk import AdaptiveWalkConfig
 from find_bad_speed_limit import (
     DATASET_RE,
     GCS_CACHE_BUCKET,
@@ -138,6 +139,11 @@ class BatchConfig:
     auto_side_offset: bool = False
     headings: tuple = (0, 90, 180, 270)
     headings_relative: bool = False
+    # Adaptive step sizing (adaptive_walk.py) - when on, walk_segment_spacing_m is ignored for the walk.
+    adaptive_step: bool = False
+    adaptive_min_step_m: float = 10.0
+    adaptive_max_step_m: float = 100.0
+    adaptive_read_distance_m: float = 20.0
     fov: int = 90
     started_by: str = ""
 
@@ -478,6 +484,10 @@ def _worker(i: int, n: int, row, config: BatchConfig, api_key: str, vision_clien
             walk_segment=config.walk_segment, walk_segment_spacing_m=config.walk_segment_spacing_m,
             side_mode=config.side_mode, side_offset_m=config.side_offset_m, auto_side_offset=config.auto_side_offset,
             headings=config.headings, headings_relative=config.headings_relative, fov=config.fov,
+            adaptive_cfg=(
+                AdaptiveWalkConfig(config.adaptive_min_step_m, config.adaptive_max_step_m, config.adaptive_read_distance_m)
+                if config.adaptive_step else None
+            ),
             log=lambda msg: None, progress=lambda fraction, msg: None,
         )
         return i, attempt, match, None

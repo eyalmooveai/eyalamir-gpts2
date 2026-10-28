@@ -56,6 +56,8 @@ import requests
 from google.cloud import bigquery, vision
 from PIL import Image, ImageDraw
 
+import adaptive_walk
+import gemini_client
 import sign_registry
 
 DEFAULT_PROJECT = "moove-platform-testing-data"
@@ -109,13 +111,14 @@ _last_streetview_call_ts = 0.0
 # process, their counts would mix; not a concern under that existing
 # assumption, but worth knowing if it's ever violated.
 _api_call_counts_lock = threading.Lock()
-_api_call_counts = {"streetview": 0, "vision": 0}
+_api_call_counts = {"streetview": 0, "vision": 0, "gemini": 0}
 
 
 def reset_api_call_counts() -> None:
     with _api_call_counts_lock:
         _api_call_counts["streetview"] = 0
         _api_call_counts["vision"] = 0
+        _api_call_counts["gemini"] = 0
 
 
 def get_api_call_counts() -> dict:
@@ -385,6 +388,18 @@ def parse_args() -> argparse.Namespace:
         "the point count is derived from this and the segment's actual length, not a fixed count, so a short "
         "segment isn't under-sampled and a long one isn't wastefully over-sampled",
     )
+    p.add_argument(
+        "--adaptive-step",
+        action="store_true",
+        help="Walk each segment with dynamically chosen step sizes instead of --walk-segment-spacing-m: one Gemini "
+        "look at each stop's forward view jumps ahead (up to --adaptive-max-step-m) when the road is clearly empty, "
+        "and approaches a distant sign to ~--adaptive-read-distance-m before reading it. Needs Vertex AI credentials; "
+        "if Gemini fails at a stop it just takes the minimum step there.",
+    )
+    p.add_argument("--adaptive-min-step-m", type=float, default=10.0, help="Smallest adaptive step / fallback step (default: 10)")
+    p.add_argument("--adaptive-max-step-m", type=float, default=100.0, help="Largest adaptive step, on a clearly empty road (default: 100)")
+    p.add_argument("--adaptive-read-distance-m", type=float, default=20.0,
+                   help="How far short of a distant sign to stop so it is readable but not missed (default: 20)")
     p.add_argument(
         "--side-mode",
         choices=SIDE_MODES,
@@ -1240,6 +1255,7 @@ def run_pipeline(
     headings: tuple[int, ...] = DEFAULT_HEADINGS,
     headings_relative: bool = False,
     fov: int = DEFAULT_FOV,
+    adaptive_cfg: Optional[adaptive_walk.AdaptiveWalkConfig] = None,
     out_dir: Path = Path("output"),
     keys_file: Path = DEFAULT_KEYS_FILE,
     log=lambda msg: None,
@@ -1429,7 +1445,7 @@ def run_pipeline(
             api_key=api_key, vision_client=vision_client, bq_client=bq_client, project=project, out_root=out_root,
             walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
             side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
-            headings=headings, headings_relative=headings_relative, fov=fov,
+            headings=headings, headings_relative=headings_relative, fov=fov, adaptive_cfg=adaptive_cfg,
             log=log, progress=progress,
         )
         result.attempts.append(attempt)
@@ -1451,6 +1467,107 @@ def run_pipeline(
     return result
 
 
+def point_at_distance(coords: list[tuple[float, float]], distance_m: float) -> tuple[float, float, float]:
+    """The (lat, lon, bearing_deg) at `distance_m` along a [(lon, lat), ...]
+    line, clamped to its ends - the single-point counterpart of
+    sample_points_along_line, for a walk whose next position isn't known
+    until the previous one has been looked at (see adaptive_walk.py)."""
+    seg_lengths = [_haversine_m(coords[i], coords[i + 1]) for i in range(len(coords) - 1)]
+    remaining = max(0.0, distance_m)
+    for i, seg_len in enumerate(seg_lengths):
+        if remaining <= seg_len or i == len(seg_lengths) - 1:
+            t = min(remaining / seg_len, 1.0) if seg_len > 0 else 0.0
+            lon1, lat1 = coords[i]
+            lon2, lat2 = coords[i + 1]
+            return lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t, _bearing_deg(coords[i], coords[i + 1])
+        remaining -= seg_len
+    lon, lat = coords[0]
+    return lat, lon, 0.0
+
+
+def _lookahead_cache_path(image_path: Path) -> Path:
+    return image_path.with_name(image_path.name + ".lookahead.json")
+
+
+def _get_lookahead(image_path: Path, project: str, log=lambda msg: None) -> Optional[adaptive_walk.LookAhead]:
+    """One Gemini look-ahead on a forward-facing frame (see adaptive_walk.py),
+    cached to a `<image>.lookahead.json` sidecar exactly like the OCR result
+    is - the answer for a given image never changes, so a re-run never pays
+    for it twice. Returns None on any failure (no credentials, rate limit,
+    bad output): the caller then falls back to the minimum step, so a
+    Gemini problem can only make the walk slower, never skip road."""
+    cache_path = _lookahead_cache_path(image_path)
+    if gcs_cache_pull(cache_path, log=log):
+        try:
+            return adaptive_walk.LookAhead.model_validate_json(cache_path.read_text())
+        except (ValueError, OSError, UnicodeDecodeError):
+            pass  # corrupt cache file - fall through and re-ask
+    try:
+        _count_api_call("gemini")
+        look = gemini_client.call_structured_with_image(
+            adaptive_walk.LOOKAHEAD_SYSTEM_PROMPT, adaptive_walk.LOOKAHEAD_USER_TEXT, image_path, adaptive_walk.LookAhead,
+            project, max_output_tokens=512,
+        )
+    except Exception as e:  # noqa: BLE001 - any failure degrades to the fixed minimum step, never aborts the walk
+        log(f"    {image_path.name}: Gemini look-ahead failed ({type(e).__name__}: {e}) - using the minimum step.")
+        return None
+    try:
+        cache_path.write_text(look.model_dump_json())
+        gcs_cache_push(cache_path, log=log)
+    except OSError:
+        pass  # caching is an optimization, not a requirement
+    return look
+
+
+def _angle_diff_deg(a: float, b: float) -> float:
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+class _AdaptivePointFeed:
+    """Yields (lat, lon, point_prefix, side_label, index, bearing) positions
+    for one candidate's walk, one track (center/left/right) at a time -
+    the same tuple shape _process_one_candidate's fixed sample_points
+    list holds - except each next position is only computed AFTER the
+    caller reports how far to advance (set_advance), since that depends on
+    what the previous position's image showed. Same-panorama repeats (a
+    step so short Street View snaps back to the panorama just used)
+    double the advance instead of re-fetching the same picture."""
+
+    def __init__(self, coords, tracks: list[tuple[Optional[str], int]], offset_m: float, cfg: adaptive_walk.AdaptiveWalkConfig):
+        self.coords = coords
+        self.tracks = tracks  # [(side_label_or_None, perpendicular sign: 0 center / -1 left / +1 right), ...]
+        self.offset_m = offset_m
+        self.cfg = cfg
+        self.length_m = line_length_m(coords)
+        self.advance_m = cfg.min_step_m
+        self.last_pano_id: Optional[str] = None
+        self.stops = 0  # positions yielded so far, for progress estimates
+
+    def set_advance(self, meters: float) -> None:
+        self.advance_m = max(meters, 0.1)
+
+    def same_pano_again(self) -> None:
+        self.advance_m = min(max(self.advance_m * 2, self.cfg.min_step_m), self.cfg.max_step_m)
+
+    def estimated_stops(self) -> int:
+        return max(2, len(self.tracks) * (int(self.length_m / (2 * self.cfg.min_step_m)) + 2))
+
+    def __iter__(self):
+        for side_label, sign in self.tracks:
+            self.last_pano_id = None
+            s: Optional[float] = 0.0
+            idx = 0
+            while s is not None:
+                lat, lon, bearing = point_at_distance(self.coords, s)
+                if sign:
+                    lat, lon = _destination_point(lat, lon, bearing + sign * 90, self.offset_m)
+                self.advance_m = self.cfg.min_step_m
+                self.stops += 1
+                yield [lat, lon, f"at{s:.0f}m", side_label, idx, bearing]
+                s = adaptive_walk.next_position_m(s, self.advance_m, self.length_m, self.cfg.min_step_m)
+                idx += 1
+
+
 def _process_one_candidate(
     i: int,
     n: int,
@@ -1469,6 +1586,7 @@ def _process_one_candidate(
     headings: tuple[int, ...],
     headings_relative: bool,
     fov: int,
+    adaptive_cfg: Optional[adaptive_walk.AdaptiveWalkConfig] = None,
     log=lambda msg: None,
     progress=lambda fraction, message: None,
 ) -> tuple["CandidateAttempt", Optional["Match"]]:
@@ -1490,8 +1608,12 @@ def _process_one_candidate(
     seg_dir_root = out_root / safe_segment_dirname(seg_id)
     row_dict = _jsonable_row(row)
 
-    coords = line_coords_from_geojson(row.get("geom_geojson")) if (walk_segment or side_mode != "center" or headings_relative) else []
-    if walk_segment and coords:
+    coords = line_coords_from_geojson(row.get("geom_geojson")) if (adaptive_cfg is not None or walk_segment or side_mode != "center" or headings_relative) else []
+    adaptive = adaptive_cfg is not None and len(coords) >= 2
+    if adaptive:
+        base_points = [(lat, lon, overall_bearing(coords))]
+        walked = True
+    elif walk_segment and coords:
         point_count = points_for_spacing(coords, walk_segment_spacing_m)
         base_points = sample_points_along_line(coords, point_count)  # [(lat, lon, bearing), ...]
         walked = True
@@ -1534,7 +1656,19 @@ def _process_one_candidate(
             log(f"{tag} Auto side offset found nothing within range - using manual side offset {side_offset_m:.0f}m instead")
 
     sample_points = []  # [lat, lon, point_prefix_or_None, side_label_or_None, base_idx, bearing] - bearing may be corrected below
-    for p_idx, (p_lat, p_lon, p_bearing) in enumerate(base_points):
+    feed = None
+    if adaptive:
+        # Positions aren't known up front: each one's step depends on what the previous one's image showed.
+        feed = _AdaptivePointFeed(
+            coords,
+            [t for t in (
+                (("center" if include_sides else None), 0) if include_center else None,
+                ("left", -1) if include_left else None,
+                ("right", 1) if include_right else None,
+            ) if t],
+            effective_side_offset_m, adaptive_cfg,
+        )
+    for p_idx, (p_lat, p_lon, p_bearing) in enumerate([] if adaptive else base_points):
         point_prefix = f"point{p_idx}" if walked else None
         if include_center:
             sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
@@ -1547,7 +1681,9 @@ def _process_one_candidate(
 
     offset_desc = f"±{effective_side_offset_m:.0f}m" + (" auto" if include_sides and auto_side_offset and effective_side_offset_m != side_offset_m else "")
     mode_desc = []
-    if walked:
+    if adaptive:
+        mode_desc.append(f"adaptive walk over {feed.length_m:.0f}m (steps {adaptive_cfg.min_step_m:.0f}-{adaptive_cfg.max_step_m:.0f}m)")
+    elif walked:
         mode_desc.append(f"walking {len(base_points)} position(s)")
     if side_mode == "both":
         mode_desc.append(f"{offset_desc} both sides")
@@ -1564,8 +1700,11 @@ def _process_one_candidate(
 
     image_details: list[ImageDetail] = []
     reading = None
-    num_pts = len(sample_points)
+    num_pts = feed.estimated_stops() if adaptive else len(sample_points)
     point_span = span / num_pts
+
+    def progress_at(fraction: float, message: str) -> None:
+        progress(min(fraction, base + span), message)  # an adaptive walk's stop count is only an estimate
 
     # With headings_relative + a walked side, each offset point is only
     # a guess at where a separate, unmapped trunk might be - it isn't
@@ -1577,7 +1716,7 @@ def _process_one_candidate(
     # consecutive resolved panorama positions before any images are
     # captured, rather than reusing the centerline's bearing.
     coverage_by_point: dict[int, Optional[dict]] = {}
-    if headings_relative and include_sides and walked:
+    if headings_relative and include_sides and walked and not adaptive:
         progress(base, f"{tag} Resolving Street View coverage to determine each side's actual direction of travel...")
         for pt_i, sp in enumerate(sample_points):
             coverage_by_point[pt_i] = streetview_coverage(sp[0], sp[1], api_key, log=log)
@@ -1595,17 +1734,25 @@ def _process_one_candidate(
             for local_j, pt_i in enumerate(idxs):
                 sample_points[pt_i][5] = corrected[local_j]
 
-    for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx, p_bearing) in enumerate(sample_points):
+    for pt_i, (p_lat, p_lon, point_prefix, side_label, base_idx, p_bearing) in enumerate(feed if adaptive else sample_points):
         point_base = base + pt_i * point_span
-        label_bits = [b for b in (f"position {base_idx + 1}/{len(base_points)}" if walked else None, side_label) if b]
+        label_bits = [b for b in ((f"stop {base_idx + 1}" if adaptive else f"position {base_idx + 1}/{len(base_points)}") if walked else None, side_label) if b]
         ptag = f"{tag} {' '.join(label_bits)}" if label_bits else tag
-        progress(point_base, f"{ptag} Checking Street View coverage...")
+        progress_at(point_base, f"{ptag} Checking Street View coverage...")
 
         coverage = coverage_by_point[pt_i] if pt_i in coverage_by_point else streetview_coverage(p_lat, p_lon, api_key, log=log)
         if not coverage:
             log(f"  {ptag}: no Street View coverage here.")
-            progress(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
+            progress_at(point_base + point_span, f"{ptag} No Street View coverage, trying next position...")
             continue
+
+        if adaptive:
+            pano_id = coverage.get("pano_id")
+            if pano_id and pano_id == feed.last_pano_id:
+                log(f"  {ptag}: Street View snapped to the panorama already checked - stepping further.")
+                feed.same_pano_again()
+                continue
+            feed.last_pano_id = pano_id
 
         point_dir = seg_dir_root
         if point_prefix:
@@ -1618,11 +1765,11 @@ def _process_one_candidate(
             # between runs previously collided with a stale cache too.
             point_dir = point_dir / (f"{side_label}_{effective_side_offset_m:.0f}m" if side_label in ("left", "right") else side_label)
         actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
-        progress(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
+        progress_at(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
         image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, fov=fov, log=log)
 
         for k, image_path in enumerate(image_paths):
-            progress(
+            progress_at(
                 point_base + (0.4 + 0.5 * (k + 1) / len(image_paths)) * point_span,
                 f"{ptag} Running OCR on image {k + 1}/{len(image_paths)}...",
             )
@@ -1640,7 +1787,14 @@ def _process_one_candidate(
 
         if reading:
             break
-        progress(point_base + point_span, f"{ptag} No readable sign, trying next position...")
+        if adaptive:
+            # Gemini only picks the next position - every image above was still OCR'd as usual.
+            forward = [(_angle_diff_deg(h, p_bearing), pth) for pth in image_paths if (h := heading_from_filename(pth)) is not None]
+            look = _get_lookahead(min(forward, key=lambda t: t[0])[1], project, log=log) if forward else None
+            advance_m, why = adaptive_walk.plan_advance(look, adaptive_cfg)
+            feed.set_advance(advance_m)
+            log(f"    adaptive: {why} -> next stop {advance_m:.0f}m ahead")
+        progress_at(point_base + point_span, f"{ptag} No readable sign, trying next position...")
 
     if not image_details:
         log("  No Street View coverage at any checked position.")
@@ -1700,6 +1854,7 @@ def main() -> int:
             headings=args.headings,
             headings_relative=args.headings_relative,
             fov=args.fov,
+            adaptive_cfg=adaptive_walk.AdaptiveWalkConfig(args.adaptive_min_step_m, args.adaptive_max_step_m, args.adaptive_read_distance_m) if args.adaptive_step else None,
             out_dir=Path(args.out_dir),
             keys_file=args.keys_file,
             log=print,

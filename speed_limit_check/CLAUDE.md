@@ -637,6 +637,18 @@
   image backup. `Dockerfile`'s `COPY` line needs `sign_registry.py` - same
   "don't forget the new module" mistake this file already warns about
   more than once elsewhere.
+- **Adaptive step sizing (opt-in)** - `adaptive_walk.py` + `find_bad_speed_limit._process_one_candidate(adaptive_cfg=...)`
+  (CLI `--adaptive-step`, `BatchConfig.adaptive_step`). Instead of a fixed
+  `walk_segment_spacing_m`, one cached Gemini look (`LookAhead`: sign_ahead,
+  sign_distance_m, clear_distance_m, on the forward-most image at each stop)
+  picks the next stop: up to `max_step_m` (100) on a clearly empty road, an
+  approach to `read_distance_m` (20) short of a distant sign, else
+  `min_step_m` (10) - also the fallback whenever Gemini fails. Gemini only
+  chooses positions; every fetched image is still OCR'd as before. Cached in
+  `<image>.lookahead.json` like OCR. Uses the centerline bearing (no per-side
+  bearing correction). Not yet in `precision_sample.py` or the web forms.
+  Gemini calls are counted in `get_api_call_counts()["gemini"]` but not in
+  the Evaluator's daily-cost-cap math.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -
