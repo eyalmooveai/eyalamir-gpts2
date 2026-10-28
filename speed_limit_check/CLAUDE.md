@@ -657,6 +657,22 @@
   Each load uses the fixed job id `bqw_<id>`, so replaying a file that actually did load is a harmless
   409. `bq_writer.replay_pending()` re-queues leftovers at app start and at the start of each CLI
   `main()`. A failure is only a log line (`WARNING: background BigQuery write ...`).
+- **Precision-sample web runs survive an instance restart** - `app.py` persists each job's record to
+  `output/_precision_jobs/<job_id>/_job.json` (mirrored to GCS) on every update, and
+  `precision_sample._write_checkpoint` mirrors `_checkpoint.json` to GCS too. `_get_precision_job` falls
+  back to that durable copy; a record still saying "running" with no live thread is reported as
+  `interrupted` (+ `resumable` when a checkpoint exists) instead of the old "Unknown or expired
+  precision-sample job". `POST /speed-limits/precision-sample/<job_id>/resume` continues it under the same
+  id via `run_precision_sample(resume_from=...)`; `quality.html` remembers the last job id in
+  localStorage, re-attaches on page load, and shows a "Resume this run" button.
+- **Real-money runs check GCS + BigQuery before spending, and pause if either goes away** (`preflight.py`) -
+  `run_precision_sample` and `batch_evaluator.run_batch` call `preflight.preflight(project)` first (GCS
+  probe object write/read/delete when `GCS_CACHE_BUCKET` is set; BigQuery dry-run `SELECT 1`; a one-row
+  load into `calc_out._preflight_probe` and `calc_tmp._preflight_probe`, the only real test of write
+  access) and refuse to start with every problem named. A `HealthMonitor` thread then re-checks GCS +
+  BigQuery every 60s; 3 failures in a row stop new segments: precision raises `RunPaused` (job status
+  `paused`, resumable from its checkpoint), the Evaluator self-cancels with `paused_reason` (Resume
+  button). Not wired into the cheap single-run Sign Checker.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

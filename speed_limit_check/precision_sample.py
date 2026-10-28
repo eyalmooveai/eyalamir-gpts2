@@ -126,6 +126,7 @@ from pathlib import Path
 from typing import Optional
 
 import bq_writer
+import preflight
 from google.cloud import bigquery, vision
 
 from find_bad_speed_limit import (
@@ -144,6 +145,7 @@ from find_bad_speed_limit import (
     StreetViewAuthError,
     _validate_identifier,
     fetch_candidate_by_id,
+    gcs_cache_push,
     get_api_call_counts,
     load_keys_file,
     parse_headings,
@@ -967,6 +969,7 @@ def _write_checkpoint(path: Path, *, config: dict, sampled_rows: list[dict], res
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps({"config": config, "sampled_rows": sampled_rows, "results": results}, default=str))
     tmp_path.replace(path)
+    gcs_cache_push(path)  # async mirror, so a run on an instance that gets replaced can still be resumed from GCS
 
 
 def load_checkpoint(path: Path) -> dict:
@@ -1068,6 +1071,9 @@ def run_precision_sample(
     max_walk_back = max(0, max_walk_back)
     out_root.mkdir(parents=True, exist_ok=True)
 
+    # Before anything is sampled or paid for: GCS and BigQuery (read + write) must actually work.
+    preflight.preflight(project, log=log, on_step=lambda msg: on_event("preflight", message=msg))
+
     # One shared BigQuery client for the whole run - NOT one per call. This
     # script can issue dozens of BigQuery calls per sampled segment
     # (topology lookup + up to 2 directions * max_walk_back neighbor
@@ -1131,47 +1137,58 @@ def run_precision_sample(
         _write_checkpoint(checkpoint_path, config=config, sampled_rows=sampled_rows, results=results)
 
     pending = [(i, row) for i, row in enumerate(sampled_rows) if row["here_segment_id"] not in prior_results_by_id]
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {
-            pool.submit(
-                _process_sampled_segment, i, n, row,
-                project=project, dataset=dataset, table=table, state=state,
-                max_walk_back=max_walk_back, api_key=api_key, vision_client=vision_client, bq_client=bq_client, out_root=out_root,
-                walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
-                side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
-                headings=headings, headings_relative=headings_relative, fov=fov,
-                log=log,
-            ): (i, row)
-            for i, row in pending
-        }
-        for fut in as_completed(futures):
-            i, row = futures[fut]
-            try:
-                result = fut.result()
-            except (StreetViewAuthError, NoUsableApiKey):
-                # A broken API key/billing/auth error isn't specific to
-                # this one segment - every other worker is about to hit
-                # the exact same thing. Cancel whatever hasn't started
-                # yet and re-raise to the caller instead of quietly
-                # logging up to `sample_size` identical "error" results
-                # while burning through the rest of the sample. Whatever
-                # already finished (this segment's own siblings, plus
-                # anything carried over from a checkpoint) is still safely
-                # on disk via the checkpoint written after each one below,
-                # so --resume-from can pick this exact point back up.
+    monitor = preflight.HealthMonitor(project, log=log).start()
+    try:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(
+                    _process_sampled_segment, i, n, row,
+                    project=project, dataset=dataset, table=table, state=state,
+                    max_walk_back=max_walk_back, api_key=api_key, vision_client=vision_client, bq_client=bq_client, out_root=out_root,
+                    walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
+                    side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
+                    headings=headings, headings_relative=headings_relative, fov=fov,
+                    log=log,
+                ): (i, row)
+                for i, row in pending
+            }
+            for fut in as_completed(futures):
+                i, row = futures[fut]
+                try:
+                    result = fut.result()
+                except (StreetViewAuthError, NoUsableApiKey):
+                    # A broken API key/billing/auth error isn't specific to
+                    # this one segment - every other worker is about to hit
+                    # the exact same thing. Cancel whatever hasn't started
+                    # yet and re-raise to the caller instead of quietly
+                    # logging up to `sample_size` identical "error" results
+                    # while burning through the rest of the sample. Whatever
+                    # already finished (this segment's own siblings, plus
+                    # anything carried over from a checkpoint) is still safely
+                    # on disk via the checkpoint written after each one below,
+                    # so --resume-from can pick this exact point back up.
+                    for other_fut in futures:
+                        other_fut.cancel()
+                    wait_for_gcs_uploads()
+                    raise
+                except Exception as e:
+                    result = {
+                        "segment_id": row["here_segment_id"], "status": "error",
+                        "found_on_segment": False, "forward": None, "backward": None, "ground_truth_mph": None,
+                        "note": f"{type(e).__name__}: {e}",
+                    }
+                results.append(result)
+                on_event("segment_done", index=len(results), total=n, result=result)
+                _write_checkpoint(checkpoint_path, config=config, sampled_rows=sampled_rows, results=results)
+            if monitor.stop_event.is_set():
+                # GCS or BigQuery went away mid-run: stop spending. This result and everything before it is already in
+                # the checkpoint just written; segments still in flight finish on their own and are simply not recorded.
                 for other_fut in futures:
                     other_fut.cancel()
                 wait_for_gcs_uploads()
-                raise
-            except Exception as e:
-                result = {
-                    "segment_id": row["here_segment_id"], "status": "error",
-                    "found_on_segment": False, "forward": None, "backward": None, "ground_truth_mph": None,
-                    "note": f"{type(e).__name__}: {e}",
-                }
-            results.append(result)
-            on_event("segment_done", index=len(results), total=n, result=result)
-            _write_checkpoint(checkpoint_path, config=config, sampled_rows=sampled_rows, results=results)
+                raise preflight.RunPaused(f"Paused after {len(results)}/{n} segments: {monitor.reason}")
+    finally:
+        monitor.stop()
 
     # Drain every still-in-flight async GCS image upload (gcs_cache_push
     # inside _process_one_candidate) before computing/writing final

@@ -46,6 +46,7 @@ from typing import Optional
 
 from google.cloud import bigquery, vision
 
+import preflight
 from adaptive_walk import AdaptiveWalkConfig
 from find_bad_speed_limit import (
     DATASET_RE,
@@ -633,6 +634,20 @@ def run_batch(batch_id: str, config: Optional[BatchConfig], cancel_event: thread
 
     _write_status(batch_id, status)
 
+    # Before any candidate query or paid call: GCS and BigQuery (read + write) must actually work.
+    try:
+        def _preflight_step(msg: str) -> None:
+            status["message"] = msg
+            _write_status(batch_id, status)
+        preflight.preflight(config.project, on_step=_preflight_step)
+    except preflight.PreflightError as e:
+        status["run_status"] = "error"
+        status["error"] = str(e)
+        status["finished_at"] = _now_iso()
+        _write_status(batch_id, status)
+        return
+    monitor = preflight.HealthMonitor(config.project).start()
+
     try:
         load_keys_file(DEFAULT_KEYS_FILE)
         api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
@@ -751,6 +766,10 @@ def run_batch(batch_id: str, config: Optional[BatchConfig], cancel_event: thread
                     # flight when this fires still finish (see _worker's
                     # own cancel_event check) - bounded by
                     # config.concurrency, same as a user-triggered Cancel.
+                    if monitor.stop_event.is_set() and not cancel_event.is_set():
+                        cancel_event.set()
+                        status["paused_reason"] = monitor.reason
+                        _write_status(batch_id, status)
                     if status["done_count"] % 10 == 0 or status["done_count"] == n:
                         if not cancel_event.is_set() and daily_spend_for_user(config.started_by, status["started_at"][:10]) >= DAILY_COST_CAP_USD:
                             cancel_event.set()
@@ -767,6 +786,11 @@ def run_batch(batch_id: str, config: Optional[BatchConfig], cancel_event: thread
                 f"Stopped after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found) - "
                 f"reached the ${DAILY_COST_CAP_USD:,.0f}/day cost cap for {config.started_by}. "
                 f"Resumes after midnight UTC."
+            )
+        elif status["run_status"] == "cancelled" and status.get("paused_reason"):
+            status["message"] = (
+                f"Paused after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found): "
+                f"{status['paused_reason']}. Use Resume once it is available again."
             )
         elif status["run_status"] == "cancelled":
             status["message"] = f"Cancelled after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found)."
@@ -787,6 +811,7 @@ def run_batch(batch_id: str, config: Optional[BatchConfig], cancel_event: thread
         _finalize_usage(status, run_started_monotonic, baseline_elapsed, baseline_streetview, baseline_vision)
         _write_status(batch_id, status)
     finally:
+        monitor.stop()
         # Drains every still-in-flight async GCS image upload before this
         # background thread exits, done/cancelled/errored alike - without
         # this, a push still queued on _GCS_UPLOAD_POOL when the thread

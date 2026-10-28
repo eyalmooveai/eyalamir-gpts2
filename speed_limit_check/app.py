@@ -15,6 +15,7 @@ and the API keys/credentials this needs either way.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import re
 import threading
@@ -24,6 +25,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
 import bq_writer
+import preflight
 from batch_evaluator import (
     DAILY_COST_CAP_USD,
     MAX_SEGMENT_COUNT,
@@ -55,6 +57,7 @@ from find_bad_speed_limit import (
     _validate_identifier,
     fetch_candidates,
     gcs_cache_pull,
+    gcs_cache_push,
     get_api_call_counts,
     load_keys_file,
     parse_headings,
@@ -667,6 +670,52 @@ def _run_compare_job(job_id: str, column: str, entries: list) -> None:
     _update_compare_job(job_id, status="done", pairs=[p.to_json() for p in result.pairs])
 
 
+def _precision_job_file(job_id: str) -> Path:
+    return PRECISION_OUT_DIR / job_id / "_job.json"
+
+
+def _persist_precision_job(job_id: str, job: dict) -> None:
+    """Writes the job's record to disk (mirrored to GCS, asynchronously) so
+    its status/progress survives an instance restart - without this, a
+    restart mid-run left the page polling a job id this process had never
+    heard of ("Unknown or expired precision-sample job") with no way back."""
+    try:
+        path = _precision_job_file(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(job, default=str))
+        tmp.replace(path)
+        gcs_cache_push(path)
+    except Exception as e:  # noqa: BLE001 - persistence is best-effort, never fails the run
+        print(f"WARNING: could not persist precision job {job_id}: {type(e).__name__}: {e}")
+
+
+def _load_persisted_precision_job(job_id: str) -> dict | None:
+    """The durable copy of a job this process isn't running (e.g. started
+    by an instance that has since been replaced). A record still saying
+    "running" can't actually be running here, so it's reported as
+    "interrupted" and, when its checkpoint survived, resumable."""
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return None
+    path = _precision_job_file(job_id)
+    try:
+        gcs_cache_pull(path)
+        job = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    checkpoint = Path(job.get("out_root") or PRECISION_OUT_DIR / job_id) / "_checkpoint.json"
+    gcs_cache_pull(checkpoint)
+    job["resumable"] = checkpoint.exists()
+    if job.get("status") == "running":
+        job["status"] = "interrupted"
+        job["error"] = "The server restarted while this run was in progress." + (
+            " Its checkpoint was saved, so it can be resumed without repeating finished segments." if job["resumable"] else ""
+        )
+    elif job.get("status") == "error":
+        job["resumable"] = job["resumable"]
+    return job
+
+
 def _new_precision_job(state: str, functional_class_lt: int, sample_size: int) -> str:
     job_id = uuid.uuid4().hex
     with PRECISION_JOBS_LOCK:
@@ -674,6 +723,7 @@ def _new_precision_job(state: str, functional_class_lt: int, sample_size: int) -
             "status": "running",  # "running" | "done" | "error"
             "error": None,
             "state": state, "functional_class_lt": functional_class_lt, "sample_size": sample_size,
+            "message": "Starting...",
             "segments_done": 0, "segments_total": sample_size, "current_segment_id": None,
             "api_calls": {"streetview": 0, "vision": 0},
             "payload": None,
@@ -681,6 +731,7 @@ def _new_precision_job(state: str, functional_class_lt: int, sample_size: int) -
         }
         while len(PRECISION_JOBS) > MAX_PRECISION_JOBS:
             del PRECISION_JOBS[next(iter(PRECISION_JOBS))]
+        _persist_precision_job(job_id, PRECISION_JOBS[job_id])
     return job_id
 
 
@@ -688,15 +739,18 @@ def _update_precision_job(job_id: str, **kwargs) -> None:
     with PRECISION_JOBS_LOCK:
         if job_id in PRECISION_JOBS:
             PRECISION_JOBS[job_id].update(kwargs)
+            _persist_precision_job(job_id, PRECISION_JOBS[job_id])
 
 
 def _get_precision_job(job_id: str) -> dict | None:
     with PRECISION_JOBS_LOCK:
         job = PRECISION_JOBS.get(job_id)
-        return dict(job) if job else None
+        if job:
+            return dict(job)
+    return _load_persisted_precision_job(job_id)
 
 
-def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt: int, sample_size: int, api_key: str) -> None:
+def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt: int, sample_size: int, api_key: str, resume: bool = False) -> None:
     """Runs run_precision_sample() in a background thread, translating its
     on_event callback into updates on this job's PRECISION_JOBS record -
     same pattern as _run_quality_job/_run_compare_job above. API-call
@@ -707,6 +761,12 @@ def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt:
     out_root = Path(PRECISION_OUT_DIR / job_id)
 
     def on_event(event: str, **kw) -> None:
+        if event == "preflight":
+            _update_precision_job(job_id, message=kw["message"])
+        if event == "sampling":
+            _update_precision_job(job_id, message="Sampling segments from BigQuery...")
+        if event == "resuming":
+            _update_precision_job(job_id, segments_done=kw["already_done"], message="Resuming from the saved checkpoint...")
         if event == "segment_done":
             result = kw["result"]
             _update_precision_job(
@@ -719,13 +779,17 @@ def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt:
             project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=table, state=state,
             functional_class_lt=functional_class_lt, sample_size=sample_size,
             api_key=api_key, out_root=out_root, on_event=on_event, log=print,
+            resume_from=out_root if resume else None,
             # Tuned per real pilot runs (see precision_sample.py's own CLI
             # defaults in run_precision_sample.sh) - a single camera-forward,
             # 15-degrees-right heading and 10m stepping along each segment's
             # full length, not just its centroid.
             headings=(15,), headings_relative=True, walk_segment=True, walk_segment_spacing_m=10.0,
         )
-    except (PrecisionSamplingError, StreetViewAuthError, NoUsableApiKey) as e:
+    except preflight.RunPaused as e:
+        _update_precision_job(job_id, status="paused", error=str(e))
+        return
+    except (PrecisionSamplingError, StreetViewAuthError, NoUsableApiKey, preflight.PreflightError) as e:
         _update_precision_job(job_id, status="error", error=str(e))
         return
     except Exception as e:
@@ -892,6 +956,39 @@ def speed_limits_precision_sample_start():
         target=_run_precision_job, args=(job_id, table, state, functional_class_lt, sample_size, api_key), daemon=True,
     )
     thread.start()
+    return jsonify({"job_id": job_id}), 202
+
+
+@app.route("/speed-limits/precision-sample/<job_id>/resume", methods=["POST"])
+def speed_limits_precision_sample_resume(job_id):
+    """Continues an interrupted/failed precision-sample run from its saved
+    checkpoint (same job id) - every segment already finished is reused with
+    no new Street View/Vision calls. Reads only the durable record, never the
+    in-memory dict, since that is empty after exactly the restart this exists
+    to recover from."""
+    job = _get_precision_job(job_id)
+    if not job:
+        return jsonify({"error": "Unknown precision-sample job."}), 404
+    if job.get("status") not in ("interrupted", "paused", "error"):
+        return jsonify({"error": f"This run is {job.get('status')}, not resumable."}), 409
+    if not job.get("resumable"):
+        return jsonify({"error": "No checkpoint was saved for this run, so it cannot be resumed."}), 409
+    load_keys_file(DEFAULT_KEYS_FILE)
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if not api_key or api_key == "your-key-here":
+        return jsonify({"error": "No usable GOOGLE_MAPS_API_KEY configured on this server."}), 500
+    try:
+        table = table_name(job["state"], DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    with PRECISION_JOBS_LOCK:
+        PRECISION_JOBS[job_id] = {**job, "status": "running", "error": None, "payload": None}
+        PRECISION_JOBS[job_id].pop("resumable", None)
+        _persist_precision_job(job_id, PRECISION_JOBS[job_id])
+    threading.Thread(
+        target=_run_precision_job,
+        args=(job_id, table, job["state"], job["functional_class_lt"], job["sample_size"], api_key, True), daemon=True,
+    ).start()
     return jsonify({"job_id": job_id}), 202
 
 

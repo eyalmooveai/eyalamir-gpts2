@@ -192,13 +192,47 @@
     el.innerHTML = `<span class="badge err">Error</span><pre class="log">${escapeHtml(msg)}</pre>`;
   }
 
+  function rememberPrecisionJob(jobId) {
+    try { if (jobId) localStorage.setItem('archimedes-precision-job', jobId); else localStorage.removeItem('archimedes-precision-job'); } catch (e) {}
+  }
+
+  window.resumePrecisionSample = function (jobId) {
+    document.getElementById('precision-sample-run-btn').disabled = true;
+    document.getElementById('precision-sample-results').style.display = 'none';
+    document.getElementById('precision-sample-progress').style.display = 'block';
+    document.getElementById('precision-sample-progress-text').textContent = 'Resuming from the saved checkpoint...';
+    fetch('/speed-limits/precision-sample/' + jobId + '/resume', { method: 'POST' })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || data.error) { showPrecisionError(data.error || 'unknown error'); return; }
+        pollPrecisionSample(jobId);
+      })
+      .catch(err => showPrecisionError(err.message));
+  };
+
+  function showPrecisionInterrupted(jobId, job) {
+    resetPrecisionSampleUi();
+    const el = document.getElementById('precision-sample-results');
+    el.style.display = 'block';
+    el.innerHTML = `<span class="badge warn">${job.status === 'error' ? 'Error' : (job.status === 'paused' ? 'Paused' : 'Interrupted')}</span>`
+      + `<pre class="log">${escapeHtml(job.error || 'The run stopped before finishing.')}</pre>`
+      + `<p style="color:var(--muted); font-size:0.85rem;">${job.segments_done || 0}/${job.segments_total || '?'} segments were finished.</p>`
+      + (job.resumable ? `<button type="button" class="btn-secondary" onclick="resumePrecisionSample('${jobId}')">Resume this run</button>` : '');
+  }
+
   function pollPrecisionSample(jobId) {
+    rememberPrecisionJob(jobId);
     fetch('/speed-limits/precision-sample/status/' + jobId)
-      .then(r => r.json())
+      .then(r => r.status === 404 ? { status: 'gone' } : r.json())
       .then(job => {
+        if (job.status === 'gone') { rememberPrecisionJob(null); resetPrecisionSampleUi(); return; }
+        if (job.status === 'interrupted' || job.status === 'paused' || (job.status === 'error' && job.resumable)) { showPrecisionInterrupted(jobId, job); return; }
         if (job.status === 'error') { showPrecisionError(job.error || 'unknown error'); return; }
-        if (job.status === 'done') { renderPrecisionResults(jobId, job.payload); return; }
+        if (job.status === 'done') { rememberPrecisionJob(null); renderPrecisionResults(jobId, job.payload); return; }
+        document.getElementById('precision-sample-progress').style.display = 'block';
+        document.getElementById('precision-sample-run-btn').disabled = true;
         const progressText = document.getElementById('precision-sample-progress-text');
+        if (!job.segments_done && job.message) { progressText.textContent = job.message; setTimeout(() => pollPrecisionSample(jobId), 1000); return; }
         progressText.textContent =
           `Checking segment ${job.segments_done}/${job.segments_total}` +
           (job.current_segment_id ? ` (${job.current_segment_id})` : '') +
@@ -277,6 +311,11 @@
       }</p>
     `;
   }
+
+  try {
+    const lastJob = localStorage.getItem('archimedes-precision-job');
+    if (lastJob) pollPrecisionSample(lastJob);
+  } catch (e) {}
 
   window.runPrecisionSample = function () {
     const state = document.getElementById('precision-state').value.trim().toUpperCase();
