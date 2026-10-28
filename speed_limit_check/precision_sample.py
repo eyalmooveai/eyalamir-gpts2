@@ -93,6 +93,16 @@ archimedes.moove.ai Cloud Run service, not just a laptop):
     python precision_sample.py --table speed_limits_CO_2026_08_details --state CO \\
         --functional-class-lt 3 --sample-size 50
 
+Resuming an interrupted run (Ctrl+C, a crash, or an external quota wall -
+all three really happened during testing) without re-spending on segments
+already finished: every run writes an incremental checkpoint
+(<out-dir>/<run>/_checkpoint.json, updated after each segment) that
+--resume-from can pick back up, reusing already-done segments verbatim and
+(re)processing only what's left - no new BigQuery sampling query, no
+repeat Street View/Vision calls for segments that already got a real
+answer:
+    python precision_sample.py --resume-from precision_sample_output/CO_20261028T120000Z
+
 Keys/credentials: same as find_bad_speed_limit.py - GOOGLE_MAPS_API_KEY from
 the environment or --keys-file (default ~/Claude/MooveAI/keys.env); BigQuery
 and Vision use standard Application Default Credentials.
@@ -167,7 +177,7 @@ MAX_SAMPLE_SIZE = 500
 def sample_segments_weighted_by_length(
     project: str, dataset: str, table: str, *, state: str, functional_class_lt: int, sample_size: int,
     client: "bigquery.Client",
-) -> list[bigquery.table.Row]:
+) -> list[dict]:
     """Picks `sample_size` segments uniformly at random FROM AMONG THOSE WHERE
     OSM, HERE, and Moove's inferred value do NOT all three agree (any pairwise
     disagreement, no magnitude threshold - see module docstring for why this
@@ -198,6 +208,12 @@ def sample_segments_weighted_by_length(
     NULL comparisons are NULL, not TRUE/FALSE) and so is naturally excluded -
     same population population_agreement_counts() reports as "missing".
 
+    Returns plain dicts, not bigquery.table.Row - a Row isn't JSON-serializable,
+    and the sampled set needs to round-trip through the JSON checkpoint file
+    (see _write_checkpoint/load_checkpoint) so a --resume-from run doesn't
+    need to re-draw/re-query BigQuery for the segments a prior, interrupted
+    run already picked.
+
     Takes an already-constructed `client` rather than making its own - see
     run_precision_sample()'s own note on why: this module can issue dozens
     of BigQuery calls per sampled segment across several concurrent worker
@@ -227,7 +243,7 @@ def sample_segments_weighted_by_length(
         bigquery.ScalarQueryParameter("state", "STRING", state.upper()),
         bigquery.ScalarQueryParameter("sample_size", "INT64", sample_size),
     ])
-    return list(client.query(query, job_config=job_config).result())
+    return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
 
 
 def population_agreement_counts(
@@ -467,7 +483,7 @@ def _walk_direction_for_sign(
 
 
 def _process_sampled_segment(
-    i: int, n: int, sampled_row: bigquery.table.Row, *,
+    i: int, n: int, sampled_row: dict, *,
     project: str, dataset: str, table: str, state: str, max_walk_back: int,
     api_key: str, vision_client, bq_client: "bigquery.Client", out_root: Path,
     walk_segment: bool, walk_segment_spacing_m: float,
@@ -874,11 +890,22 @@ def _append_rows_to_bigquery(client: "bigquery.Client", table_ref: str, rows: li
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--table", required=True, help="Table name (not dataset-qualified), e.g. speed_limits_CO_2026_08_details")
-    p.add_argument("--state", required=True, help="Two-letter state code, e.g. CO - scopes the sample's domain AND "
-                   "selects which maps.road_segments_<STATE> topology table to walk back through")
-    p.add_argument("--functional-class-lt", type=int, required=True, help="Only sample segments with functional_class < this value, e.g. 3")
-    p.add_argument("--sample-size", type=int, required=True, help=f"How many segments to sample (hard ceiling: {MAX_SAMPLE_SIZE})")
+    p.add_argument("--table", default=None, help="Table name (not dataset-qualified), e.g. speed_limits_CO_2026_08_details - "
+                   "required unless --resume-from is given")
+    p.add_argument("--state", default=None, help="Two-letter state code, e.g. CO - scopes the sample's domain AND "
+                   "selects which maps.road_segments_<STATE> topology table to walk back through - "
+                   "required unless --resume-from is given")
+    p.add_argument("--functional-class-lt", type=int, default=None,
+                   help="Only sample segments with functional_class < this value, e.g. 3 - required unless --resume-from is given")
+    p.add_argument("--sample-size", type=int, default=None,
+                   help=f"How many segments to sample (hard ceiling: {MAX_SAMPLE_SIZE}) - required unless --resume-from is given")
+    p.add_argument("--resume-from", default=None, type=Path,
+                   help="Continue a prior run that was interrupted (Ctrl+C, a crash, or an external quota wall) "
+                        "instead of starting over: point this at that prior run's own output directory (or its "
+                        "_checkpoint.json file directly). Already-finished segments are reused with zero new "
+                        "Street View/Vision calls; only the remaining and previously-errored ones are "
+                        "(re)processed. --table/--state/--functional-class-lt/--sample-size are read from the "
+                        "prior run's own saved config and don't need to be given again.")
     p.add_argument("--max-walk-back", type=int, default=DEFAULT_MAX_WALK_BACK,
                    help=f"If a sampled segment has no sign of its own, how many segments to walk in EACH direction "
                         f"(forward and backward - see module docstring for why both) looking for one, before "
@@ -919,14 +946,48 @@ class SamplingError(ValueError):
     pre-existing StreetViewAuthError/NoUsableApiKey for the auth case."""
 
 
+_CHECKPOINT_FILENAME = "_checkpoint.json"
+
+
+def _write_checkpoint(path: Path, *, config: dict, sampled_rows: list[dict], results: list[dict]) -> None:
+    """Atomically overwrites the run's checkpoint file with the current
+    sampled_rows + results-so-far (see load_checkpoint()/--resume-from
+    below) - a write-to-a-temp-file-then-rename swap, so killing the
+    process mid-write (exactly the scenario this exists to recover from)
+    can never leave a half-written, unparseable checkpoint behind for the
+    next run to choke on. Called after every segment finishes, not just
+    once at the end - a run that's interrupted or hits an external quota
+    wall partway through should never lose the real Street View/Vision
+    work it already paid for and completed."""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps({"config": config, "sampled_rows": sampled_rows, "results": results}, default=str))
+    tmp_path.replace(path)
+
+
+def load_checkpoint(path: Path) -> dict:
+    """Loads a prior (possibly partial) run's checkpoint - written
+    incrementally by run_precision_sample() as `out_root/_checkpoint.json`
+    (see _write_checkpoint) - so --resume-from can pick up where that run
+    left off: the exact segments it sampled (no new BigQuery sampling
+    query needed - re-running one would draw a different random sample),
+    the config it ran with, and whatever results finished before it
+    stopped (Ctrl+C, a crash, or an external quota wall). `path` may be
+    the checkpoint file itself or that run's own output directory."""
+    if path.is_dir():
+        path = path / _CHECKPOINT_FILENAME
+    return json.loads(path.read_text())
+
+
 def run_precision_sample(
-    *, project: str, dataset: str, table: str, state: str, functional_class_lt: int, sample_size: int,
+    *, project: str = DEFAULT_PROJECT, dataset: str = DEFAULT_DATASET,
+    table: Optional[str] = None, state: Optional[str] = None,
+    functional_class_lt: Optional[int] = None, sample_size: Optional[int] = None,
     max_walk_back: int = DEFAULT_MAX_WALK_BACK, concurrency: int = DEFAULT_CONCURRENCY,
     tolerance_mph: float = 0.0,
     walk_segment: bool = False, walk_segment_spacing_m: float = 15.0,
     side_mode: str = "center", side_offset_m: float = 20.0, auto_side_offset: bool = False,
     headings: tuple[int, ...] = DEFAULT_HEADINGS, headings_relative: bool = False, fov: int = DEFAULT_FOV,
-    api_key: str, out_root: Path,
+    api_key: str, out_root: Path, resume_from: Optional[Path] = None,
     out_json_path: Optional[Path] = None, out_csv_path: Optional[Path] = None, out_observations_csv_path: Optional[Path] = None,
     on_event=lambda event, **kw: None, log=lambda msg: None,
 ) -> dict:
@@ -939,16 +1000,56 @@ def run_precision_sample(
     main() turns both into a clean stderr message + exit code; a web job
     records the message on the job's own status instead).
 
+    Pass `resume_from` (a prior run's output directory or its
+    _checkpoint.json directly) to continue a run that was interrupted
+    (Ctrl+C, a crash like the real macOS fork-safety one documented
+    elsewhere in this module, or an external quota wall) instead of
+    starting over: `table`/`state`/`functional_class_lt`/`sample_size`
+    (and the rest of that prior run's config) are then read from the
+    checkpoint itself - no need to pass them again - and NO new BigQuery
+    sampling query runs at all, since re-running one would draw a
+    different random sample (BigQuery's RAND() has no seed). Segments the
+    prior run already finished with a real (non-"error") outcome are
+    reused as-is, with zero new Street View/Vision calls; only the
+    remaining and previously-errored segments are (re)processed. Explicit
+    `table=`/`state=`/etc. arguments are ignored when resuming (a warning
+    is logged if any were given) - the checkpoint is always authoritative,
+    so a resumed run can't silently drift from what it's actually
+    continuing.
+
     on_event(event, **kwargs) is called for progress reporting, same shape
     model_library.compare_models()'s own callback convention uses:
-      - "sampling": about to run the sampling query
+      - "resuming", resume_from=str, already_done=int, remaining=int: only
+        when `resume_from` was given, before "start"
+      - "sampling": about to run the sampling query (skipped when resuming)
       - "start", total=n: n segments sampled, about to start checking them
       - "segment_done", index=i, total=n, result=dict: one segment finished
+        (fired once for each already-done segment carried over from a
+        checkpoint too, so a resumed run's progress reporting still shows
+        the full picture, not just newly-processed segments)
+      - "population": about to compute the domain agree/disagree split
       - "saving_to_bigquery": about to append to calc_tmp
       - "done", payload=dict: the full return value, right before returning
     log(msg) is passed straight through to _process_sampled_segment() for
     its own internal per-step tracing (silent by default, same as before -
     main() passes log=print to preserve the CLI's old verbose output)."""
+    if resume_from is not None:
+        resume_checkpoint_path = resume_from if resume_from.name == _CHECKPOINT_FILENAME else resume_from / _CHECKPOINT_FILENAME
+        checkpoint = load_checkpoint(resume_checkpoint_path)
+        prior_config = checkpoint["config"]
+        if table is not None or state is not None or functional_class_lt is not None or sample_size is not None:
+            log("Resuming: ignoring explicit table/state/functional_class_lt/sample_size - using the checkpoint's own config instead.")
+        project, dataset, table = prior_config["project"], prior_config["dataset"], prior_config["table"]
+        state, functional_class_lt = prior_config["state"], prior_config["functional_class_lt"]
+        sample_size = prior_config["sample_size_requested"]
+        max_walk_back, tolerance_mph, concurrency = prior_config["max_walk_back"], prior_config["tolerance_mph"], prior_config["concurrency"]
+        walk_segment, walk_segment_spacing_m = prior_config["walk_segment"], prior_config["walk_segment_spacing_m"]
+        side_mode, side_offset_m, auto_side_offset = prior_config["side_mode"], prior_config["side_offset_m"], prior_config["auto_side_offset"]
+        headings, headings_relative, fov = tuple(prior_config["headings"]), prior_config["headings_relative"], prior_config["fov"]
+    else:
+        if table is None or state is None or functional_class_lt is None or sample_size is None:
+            raise SamplingError("table, state, functional_class_lt, and sample_size are required unless resume_from is given.")
+
     _validate_identifier(project, PROJECT_RE, "project")
     _validate_identifier(dataset, DATASET_RE, "dataset")
     _validate_identifier(table, TABLE_RE, "table")
@@ -975,23 +1076,56 @@ def run_precision_sample(
     # risk, just far fewer client/channel constructions.
     bq_client = bigquery.Client(project=project)
 
-    on_event("sampling")
-    try:
-        sampled_rows = sample_segments_weighted_by_length(
-            project, dataset, table, state=state, functional_class_lt=functional_class_lt, sample_size=sample_size,
-            client=bq_client,
-        )
-    except Exception as e:
-        raise SamplingError(f"Sampling query failed: {type(e).__name__}: {e}") from e
-    if not sampled_rows:
-        raise SamplingError("No segments matched the sampling criteria (check state/functional_class_lt/table).")
+    if resume_from is not None:
+        sampled_rows = checkpoint["sampled_rows"]
+        prior_results_by_id = {r["segment_id"]: r for r in checkpoint["results"] if r.get("status") != "error"}
+        on_event("resuming", resume_from=str(resume_checkpoint_path), already_done=len(prior_results_by_id), remaining=len(sampled_rows) - len(prior_results_by_id))
+    else:
+        on_event("sampling")
+        try:
+            sampled_rows = sample_segments_weighted_by_length(
+                project, dataset, table, state=state, functional_class_lt=functional_class_lt, sample_size=sample_size,
+                client=bq_client,
+            )
+        except Exception as e:
+            raise SamplingError(f"Sampling query failed: {type(e).__name__}: {e}") from e
+        if not sampled_rows:
+            raise SamplingError("No segments matched the sampling criteria (check state/functional_class_lt/table).")
+        prior_results_by_id = {}
 
     vision_client = vision.ImageAnnotatorClient()
     reset_api_call_counts()
-    results: list[dict] = []
     n = len(sampled_rows)
     on_event("start", total=n)
 
+    run_id = f"{state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    config = {
+        "project": project, "dataset": dataset, "table": table, "state": state.upper(),
+        "functional_class_lt": functional_class_lt,
+        "sample_size_requested": sample_size, "sample_size_actual": len(sampled_rows),
+        "max_walk_back": max_walk_back, "tolerance_mph": tolerance_mph, "concurrency": concurrency,
+        "walk_segment": walk_segment, "walk_segment_spacing_m": walk_segment_spacing_m,
+        "side_mode": side_mode, "side_offset_m": side_offset_m, "auto_side_offset": auto_side_offset,
+        "headings": list(headings), "headings_relative": headings_relative, "fov": fov,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    checkpoint_path = out_root / _CHECKPOINT_FILENAME
+
+    # Replay already-done results first (carried over from a checkpoint),
+    # in original sample order, before any newly-finished one - so a
+    # resumed run's own on_event progress reporting (and the checkpoint
+    # this invocation writes) reflects the full picture immediately, not
+    # just whatever gets (re)processed this time.
+    results: list[dict] = []
+    for row in sampled_rows:
+        prior_result = prior_results_by_id.get(row["here_segment_id"])
+        if prior_result is not None:
+            results.append(prior_result)
+            on_event("segment_done", index=len(results), total=n, result=prior_result)
+    if results:
+        _write_checkpoint(checkpoint_path, config=config, sampled_rows=sampled_rows, results=results)
+
+    pending = [(i, row) for i, row in enumerate(sampled_rows) if row["here_segment_id"] not in prior_results_by_id]
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {
             pool.submit(
@@ -1002,11 +1136,11 @@ def run_precision_sample(
                 side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
                 headings=headings, headings_relative=headings_relative, fov=fov,
                 log=log,
-            ): i
-            for i, row in enumerate(sampled_rows)
+            ): (i, row)
+            for i, row in pending
         }
         for fut in as_completed(futures):
-            i = futures[fut]
+            i, row = futures[fut]
             try:
                 result = fut.result()
             except (StreetViewAuthError, NoUsableApiKey):
@@ -1015,18 +1149,23 @@ def run_precision_sample(
                 # the exact same thing. Cancel whatever hasn't started
                 # yet and re-raise to the caller instead of quietly
                 # logging up to `sample_size` identical "error" results
-                # while burning through the rest of the sample.
+                # while burning through the rest of the sample. Whatever
+                # already finished (this segment's own siblings, plus
+                # anything carried over from a checkpoint) is still safely
+                # on disk via the checkpoint written after each one below,
+                # so --resume-from can pick this exact point back up.
                 for other_fut in futures:
                     other_fut.cancel()
                 raise
             except Exception as e:
                 result = {
-                    "segment_id": sampled_rows[i]["here_segment_id"], "status": "error",
+                    "segment_id": row["here_segment_id"], "status": "error",
                     "found_on_segment": False, "forward": None, "backward": None, "ground_truth_mph": None,
                     "note": f"{type(e).__name__}: {e}",
                 }
             results.append(result)
             on_event("segment_done", index=len(results), total=n, result=result)
+            _write_checkpoint(checkpoint_path, config=config, sampled_rows=sampled_rows, results=results)
 
     obs = _observations(results)
     stats = compute_precision_stats(results, obs, tolerance_mph=tolerance_mph)
@@ -1043,17 +1182,6 @@ def run_precision_sample(
         population_error = f"{type(e).__name__}: {e}"
         log(f"WARNING: could not compute the domain agree/disagree population split: {population_error}")
 
-    run_id = f"{state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    config = {
-        "project": project, "dataset": dataset, "table": table, "state": state.upper(),
-        "functional_class_lt": functional_class_lt,
-        "sample_size_requested": sample_size, "sample_size_actual": len(sampled_rows),
-        "max_walk_back": max_walk_back, "tolerance_mph": tolerance_mph, "concurrency": concurrency,
-        "walk_segment": walk_segment, "walk_segment_spacing_m": walk_segment_spacing_m,
-        "side_mode": side_mode, "side_offset_m": side_offset_m, "auto_side_offset": auto_side_offset,
-        "headings": list(headings), "headings_relative": headings_relative, "fov": fov,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
     payload = {
         "run_id": run_id, "config": config, "api_calls": api_calls, "results": results, "observations": obs, "stats": stats,
         "population": population, "inferred_precision": inferred_precision, "population_error": population_error,
@@ -1111,18 +1239,30 @@ def main() -> int:
               f"GOOGLE_MAPS_API_KEY=... to {args.keys_file}.", file=sys.stderr)
         return 1
 
-    if args.sample_size > MAX_SAMPLE_SIZE:
-        print(f"Note: --sample-size {args.sample_size} exceeds the hard ceiling of {MAX_SAMPLE_SIZE} - clamped.")
-
-    run_label = f"{args.state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    if args.resume_from is None:
+        missing = [flag for flag, val in [
+            ("--table", args.table), ("--state", args.state),
+            ("--functional-class-lt", args.functional_class_lt), ("--sample-size", args.sample_size),
+        ] if val is None]
+        if missing:
+            print(f"ERROR: {', '.join(missing)} required (or pass --resume-from to continue a prior run).", file=sys.stderr)
+            return 1
+        if args.sample_size > MAX_SAMPLE_SIZE:
+            print(f"Note: --sample-size {args.sample_size} exceeds the hard ceiling of {MAX_SAMPLE_SIZE} - clamped.")
+        run_label = f"{args.state.upper()}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    else:
+        run_label = f"resume_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     out_root = Path(args.out_dir) / run_label
 
     def on_event(event, **kw):
-        if event == "sampling":
+        if event == "resuming":
+            print(f"Resuming from {kw['resume_from']}: {kw['already_done']} segment(s) already done (reused, no new "
+                  f"API calls), {kw['remaining']} remaining...")
+        elif event == "sampling":
             print(f"Sampling {min(args.sample_size, MAX_SAMPLE_SIZE)} segment(s) from `{args.project}.{args.dataset}.{args.table}` "
                   f"(state={args.state.upper()}, functional_class<{args.functional_class_lt}), weighted by segment length...")
         elif event == "start":
-            print(f"Sampled {kw['total']} segment(s). Looking for speed-limit signs "
+            print(f"{kw['total']} segment(s) total. Looking for speed-limit signs "
                   f"(walking up to {max(0, args.max_walk_back)} segment(s) in each direction when a sampled segment has none)...\n")
         elif event == "segment_done":
             result = kw["result"]
@@ -1138,7 +1278,7 @@ def main() -> int:
             walk_segment=args.walk_segment, walk_segment_spacing_m=args.walk_segment_spacing_m,
             side_mode=args.side_mode, side_offset_m=args.side_offset_m, auto_side_offset=args.auto_side_offset,
             headings=args.headings, headings_relative=args.headings_relative, fov=args.fov,
-            api_key=api_key, out_root=out_root,
+            api_key=api_key, out_root=out_root, resume_from=args.resume_from,
             out_json_path=args.out_json, out_csv_path=args.out_csv, out_observations_csv_path=args.out_observations_csv,
             on_event=on_event, log=print,
         )
@@ -1158,7 +1298,12 @@ def main() -> int:
     print(f"\nFull results: {payload['output_files']['json']}")
     print(f"CSV (per segment): {payload['output_files']['csv']}")
     print(f"CSV (per segment-direction observation, the table above): {payload['output_files']['observations_csv']}")
-    print(f"Images: {out_root}")
+    if args.resume_from is not None:
+        print(f"Images (new segments only this run): {out_root}")
+        print(f"Images for carried-over segments: still under wherever {args.resume_from} pointed to - unchanged.")
+    else:
+        print(f"Images: {out_root}")
+    print(f"Checkpoint (for --resume-from, if this run itself ever needs to be continued): {out_root / _CHECKPOINT_FILENAME}")
     if payload.get("bigquery_saved"):
         print(f"Saved to BigQuery: calc_tmp.precision_sample_results / calc_tmp.precision_sample_observations (run_id={payload['run_id']})")
     else:
