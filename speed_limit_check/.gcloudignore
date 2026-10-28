@@ -1,0 +1,22 @@
+# Controls what `gcloud run deploy --source .` tars up and uploads to the
+# Cloud Build staging bucket - a SEPARATE step from the Docker build itself
+# (.dockerignore controls that, once the tarball already exists). Without
+# this file, gcloud has no local .gitignore to fall back on (there isn't
+# one in this directory - only one at the repo root, which gcloud doesn't
+# walk up to), so it uploads everything, including output/ - this app's
+# local Street View/Vision image cache, which can grow to gigabytes after
+# repeated local runs. That's the actual cause of a deploy appearing to
+# hang at "Uploading sources..." for a very long time on an otherwise fast
+# connection: it isn't stuck, it's re-uploading the entire local cache on
+# every single deploy. Keep this in sync with .dockerignore - they serve
+# different stages but should exclude the same things.
+output/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.venv/
+venv/
+keys.env
+keys.env.example
+README.md
