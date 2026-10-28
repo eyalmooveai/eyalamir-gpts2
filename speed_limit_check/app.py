@@ -1807,6 +1807,42 @@ def evaluator_status_json(batch_id):
     return jsonify(status)
 
 
+@app.route("/speed-limits-evaluator/<batch_id>/resume", methods=["POST"])
+def evaluator_resume(batch_id):
+    """Continues a prior batch (interrupted by an instance restart, a
+    crash, a user Cancel, or the daily cost cap) under this SAME batch_id,
+    reusing its already-done segments - see batch_evaluator.run_batch's
+    own `resume=True` docstring. Reads only durable status (read_status),
+    never BATCH_CANCEL_EVENTS, deliberately: that in-memory dict is empty
+    after exactly the kind of instance restart this exists to recover
+    from, so gating resume on it being populated would defeat the point."""
+    status = read_status(batch_id)
+    if not status:
+        return render_template("error.html", message="Unknown or expired batch run - nothing to resume.", log=[])
+    if status.get("run_status") == "running":
+        with BATCH_CANCEL_EVENTS_LOCK:
+            still_live = batch_id in BATCH_CANCEL_EVENTS
+        if still_live:
+            return render_template(
+                "error.html",
+                message="This batch is still actively running in this process - nothing to resume yet. Cancel it first if you want to restart it.",
+                log=[],
+            )
+        # status.json says "running" but this process has no matching
+        # cancel_event - exactly the "instance restarted mid-batch" gap
+        # CLAUDE.md documents as this feature's original motivation.
+        # Falling through to resume is correct: nothing is actually still
+        # processing it.
+    cancel_event = threading.Event()
+    with BATCH_CANCEL_EVENTS_LOCK:
+        BATCH_CANCEL_EVENTS[batch_id] = cancel_event
+        while len(BATCH_CANCEL_EVENTS) > EVALUATOR_MAX_JOBS_IN_MEMORY:
+            del BATCH_CANCEL_EVENTS[next(iter(BATCH_CANCEL_EVENTS))]
+    thread = threading.Thread(target=run_batch, args=(batch_id, None, cancel_event), kwargs={"resume": True}, daemon=True)
+    thread.start()
+    return redirect(url_for("evaluator_status_page", batch_id=batch_id))
+
+
 @app.route("/speed-limits-evaluator/<batch_id>/cancel", methods=["POST"])
 def evaluator_cancel(batch_id):
     with BATCH_CANCEL_EVENTS_LOCK:

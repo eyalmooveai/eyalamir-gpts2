@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from google.cloud import vision
+from google.cloud import bigquery, vision
 
 from find_bad_speed_limit import (
     DATASET_RE,
@@ -63,6 +63,7 @@ from find_bad_speed_limit import (
     load_keys_file,
     reset_api_call_counts,
     table_name,
+    wait_for_gcs_uploads,
 )
 
 import os
@@ -445,25 +446,35 @@ def _sync_images_to_gcs(out_root: Path, log=lambda msg: None) -> None:
         gcs_cache_push(image_path, log=log)
 
 
-def _finalize_usage(status: dict, run_started_monotonic: float) -> None:
+def _finalize_usage(
+    status: dict, run_started_monotonic: float,
+    baseline_elapsed: float = 0.0, baseline_streetview: int = 0, baseline_vision: int = 0,
+) -> None:
     """Records this run's real elapsed time and actual API call counts
     into its status - called at every exit point of run_batch (done,
     cancelled, or error) so even a failed/cancelled run leaves behind
     real partial-usage data for run_history_stats() to learn from,
-    rather than only ever recording successful completions."""
-    status["elapsed_seconds"] = time.monotonic() - run_started_monotonic
+    rather than only ever recording successful completions. The
+    baseline_* args add in a PRIOR run's own already-persisted usage when
+    this is a resume (reset_api_call_counts()/get_api_call_counts() only
+    ever see calls made during this one process invocation) - so a
+    resumed batch's status always reflects its real total cost across
+    every resume, not just the most recent leg of it; both
+    daily_spend_for_user's cap enforcement and run_history_stats() need
+    that real cumulative total, not a per-leg reset back to near-zero."""
+    status["elapsed_seconds"] = baseline_elapsed + (time.monotonic() - run_started_monotonic)
     counts = get_api_call_counts()
-    status["actual_streetview_calls"] = counts["streetview"]
-    status["actual_vision_calls"] = counts["vision"]
+    status["actual_streetview_calls"] = baseline_streetview + counts["streetview"]
+    status["actual_vision_calls"] = baseline_vision + counts["vision"]
 
 
-def _worker(i: int, n: int, row, config: BatchConfig, api_key: str, vision_client, out_root: Path, cancel_event: threading.Event):
+def _worker(i: int, n: int, row, config: BatchConfig, api_key: str, vision_client, bq_client, out_root: Path, cancel_event: threading.Event):
     if cancel_event.is_set():
         return i, None, None, None
     try:
         attempt, match = _process_one_candidate(
             i, n, row,
-            api_key=api_key, vision_client=vision_client, out_root=out_root,
+            api_key=api_key, vision_client=vision_client, bq_client=bq_client, project=config.project, out_root=out_root,
             walk_segment=config.walk_segment, walk_segment_spacing_m=config.walk_segment_spacing_m,
             side_mode=config.side_mode, side_offset_m=config.side_offset_m, auto_side_offset=config.auto_side_offset,
             headings=config.headings, headings_relative=config.headings_relative, fov=config.fov,
@@ -474,7 +485,7 @@ def _worker(i: int, n: int, row, config: BatchConfig, api_key: str, vision_clien
         return i, None, None, f"{type(e).__name__}: {e}"
 
 
-def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event) -> None:
+def run_batch(batch_id: str, config: Optional[BatchConfig], cancel_event: threading.Event, resume: bool = False) -> None:
     """Runs one batch end to end: fetch up to config.segment_count
     candidates for config.state/year/month, process them concurrently
     (config.concurrency workers), writing durable status as it goes and
@@ -483,19 +494,91 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
     status instead. Refuses to start at all, or stops partway through, if
     config.started_by has hit DAILY_COST_CAP_USD for the day across every
     run they've started - see daily_spend_for_user and the two checks
-    below."""
+    below.
+
+    Pass `resume=True` to continue a PRIOR run under this same `batch_id`
+    that was interrupted (an instance restart, a crash, a user Cancel, or
+    hitting the daily cost cap) instead of starting a fresh batch from
+    scratch - same "always write intermediate results, always resumable"
+    standard this app already applies to precision_sample.py, now applied
+    here too. `config` is then ignored (the prior run's own persisted
+    `status["config"]` is used instead) - the checkpoint, not a caller's
+    possibly-stale copy of it, is always authoritative, exactly like
+    precision_sample.run_precision_sample's own `resume_from` semantics.
+    Every already-done segment (any non-"error" result from the prior
+    run(s) under this id) is carried over as-is - zero new Street
+    View/Vision calls for it - only the remaining and previously-errored
+    segments are (re)processed. Still writes to and reads from THIS SAME
+    batch_id's status.json/results.csv (never a new batch_id), so a
+    resumed run's status page keeps the same URL and ends up reflecting
+    everything done across every resume, not just the latest leg."""
     started_at = _now_iso()
     run_started_monotonic = time.monotonic()
+
+    prior_status: Optional[dict] = None
+    prior_results: list[dict] = []
+    prior_csv_rows: list[dict] = []
+    if resume:
+        prior_status = read_status(batch_id)
+        if prior_status is None:
+            # Nothing to resume - fail loudly under this same id rather
+            # than silently falling through and starting a brand-new run,
+            # which would surprise whoever specifically asked to resume
+            # this one.
+            _write_status(batch_id, {
+                "batch_id": batch_id, "label": "", "state": "", "year": "", "month": "",
+                "project": "", "dataset": "", "segment_count": 0, "concurrency": 0,
+                "started_by": config.started_by if config else "",
+                "started_at": started_at, "finished_at": started_at, "run_status": "error",
+                "message": "", "heartbeat_at": started_at, "total_count": 0, "done_count": 0,
+                "matched_count": 0, "no_sign_count": 0, "no_coverage_count": 0, "error_count": 0,
+                "error": f"Cannot resume: no prior batch found with id {batch_id}.",
+                "results": [], "config": {}, "elapsed_seconds": None,
+                "actual_streetview_calls": 0, "actual_vision_calls": 0, "hit_daily_cap": False,
+            })
+            return
+        config = BatchConfig(**prior_status["config"])
+        # "Done" = any non-"error" outcome - the exact same convention
+        # precision_sample.py's own resume uses (load_checkpoint/
+        # prior_results_by_id): a real error (not "no_sign_read"/
+        # "no_coverage", both legitimate finished outcomes) is retried,
+        # everything else is trusted as already paid for.
+        prior_results = [r for r in prior_status["results"] if r.get("status") != "error"]
+        prior_csv_path = _csv_path(batch_id)
+        if gcs_cache_pull(prior_csv_path):
+            try:
+                carried_ids = {r["segment_id"] for r in prior_results}
+                with prior_csv_path.open(newline="") as f:
+                    prior_csv_rows = [row for row in csv_module.DictReader(f) if row.get("segment_id") in carried_ids]
+            except OSError:
+                prior_csv_rows = []
+
+    baseline_elapsed = (prior_status.get("elapsed_seconds") or 0.0) if prior_status else 0.0
+    baseline_streetview = (prior_status.get("actual_streetview_calls") or 0) if prior_status else 0
+    baseline_vision = (prior_status.get("actual_vision_calls") or 0) if prior_status else 0
+
     status = {
         "batch_id": batch_id, "label": config.label, "state": config.state,
         "year": config.year, "month": config.month, "project": config.project,
         "dataset": config.dataset, "segment_count": config.segment_count,
         "concurrency": config.concurrency, "started_by": config.started_by,
-        "started_at": started_at, "finished_at": None, "run_status": "running",
-        "message": "Querying candidate segments...", "heartbeat_at": started_at,
-        "total_count": 0, "done_count": 0, "matched_count": 0,
-        "no_sign_count": 0, "no_coverage_count": 0, "error_count": 0,
-        "error": None, "results": [],
+        # Resuming keeps the ORIGINAL run's started_at (not today's time) -
+        # this batch's total real spend stays attributed to the one day it
+        # actually started, consistent with how daily_spend_for_user keys
+        # every batch by its own started_at regardless of when each of its
+        # segments actually ran.
+        "started_at": prior_status["started_at"] if prior_status else started_at,
+        "finished_at": None, "run_status": "running",
+        "message": (f"Resuming: {len(prior_results)} segment(s) already done, fetching the remaining candidates..."
+                    if resume else "Querying candidate segments..."),
+        "heartbeat_at": started_at,
+        "total_count": (prior_status.get("total_count") or 0) if prior_status else 0,
+        "done_count": len(prior_results),
+        "matched_count": sum(1 for r in prior_results if r.get("status") == "match"),
+        "no_sign_count": sum(1 for r in prior_results if r.get("status") == "no_sign_read"),
+        "no_coverage_count": sum(1 for r in prior_results if r.get("status") == "no_coverage"),
+        "error_count": 0,
+        "error": None, "results": list(prior_results),
         # Full run config, for later retrieval/comparison ("same streets,
         # a new model") - every selection-criteria/walk/side/heading/fov
         # setting this run actually used, not just the headline label.
@@ -506,9 +589,13 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
         # actual billed API calls (cache hits never reach those call
         # sites - see find_bad_speed_limit.get_api_call_counts). This is
         # what run_history_stats() below learns from for future estimates.
-        "elapsed_seconds": None,
-        "actual_streetview_calls": 0,
-        "actual_vision_calls": 0,
+        # Seeded from the prior run's own totals on a resume (see
+        # baseline_* above/_finalize_usage) rather than reset to 0, since
+        # this is real cumulative cost across every resume, not just this
+        # one process's slice of it.
+        "elapsed_seconds": baseline_elapsed or None,
+        "actual_streetview_calls": baseline_streetview,
+        "actual_vision_calls": baseline_vision,
         # Set if this run either never started, or was stopped partway
         # through, because DAILY_COST_CAP_USD was reached - see the
         # pre-check right below and the periodic check further down.
@@ -521,7 +608,7 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
     # their name. app.py's evaluator_start already checks this
     # synchronously before even starting this thread; this is defense in
     # depth against two submissions racing each other past that check.
-    spent_before = daily_spend_for_user(config.started_by, started_at[:10])
+    spent_before = daily_spend_for_user(config.started_by, status["started_at"][:10])
     if spent_before >= DAILY_COST_CAP_USD:
         status["run_status"] = "error"
         status["hit_daily_cap"] = True
@@ -557,7 +644,19 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
         )
         n = len(candidates)
         status["total_count"] = n
-        status["message"] = f"Found {n} candidate segment(s)." if n else "No road segments matched the selection criteria."
+        # Already-done segment ids (from a resume) are skipped here, not
+        # re-submitted to the pool - fetch_candidates() is fully
+        # deterministic for a given config (confirmed: no RAND() anywhere
+        # in its query, see find_bad_speed_limit.build_candidates_query's
+        # own docstring), so re-running it on resume reliably reproduces
+        # the same candidate set/order without needing to have persisted
+        # the raw candidate rows themselves.
+        done_ids = {r["segment_id"] for r in prior_results}
+        pending = [(i, row) for i, row in enumerate(candidates) if row.get("here_segment_id") not in done_ids]
+        status["message"] = (
+            f"Found {n} candidate segment(s), {len(pending)} remaining to check." if resume
+            else (f"Found {n} candidate segment(s)." if n else "No road segments matched the selection criteria.")
+        )
         _write_status(batch_id, status)
 
         if not candidates:
@@ -567,14 +666,19 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
             return
 
         vision_client = vision.ImageAnnotatorClient()
+        # One shared client across every concurrent worker (and threaded
+        # into sign_registry.record_sign_detection for each match), not a
+        # fresh bigquery.Client() per call - see find_bad_speed_limit's own
+        # bq_client comment on run_pipeline for why.
+        bq_client = bigquery.Client(project=config.project)
         results_lock = threading.Lock()
-        csv_rows: list[dict] = []
+        csv_rows: list[dict] = list(prior_csv_rows)
         reset_api_call_counts()
 
         with ThreadPoolExecutor(max_workers=max(1, config.concurrency)) as pool:
             futures = [
-                pool.submit(_worker, i, n, row, config, api_key, vision_client, out_root, cancel_event)
-                for i, row in enumerate(candidates)
+                pool.submit(_worker, i, n, row, config, api_key, vision_client, bq_client, out_root, cancel_event)
+                for i, row in pending
             ]
             for fut in as_completed(futures):
                 i, attempt, match, error = fut.result()
@@ -613,27 +717,35 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
                     status["results"].append(seg_summary)
                     status["message"] = f"{status['done_count']}/{n} segments checked ({status['matched_count']} sign(s) found so far)..."
                     status["heartbeat_at"] = _now_iso()
-                    # Written periodically, not on every single completion -
-                    # frequent enough for a "switch back in" check to see
-                    # fresh progress, without a GCS round-trip per segment
-                    # under high concurrency. Usage refreshed here too, so
-                    # someone watching a long run sees real elapsed
-                    # time/call counts climb, not just at the very end.
+                    _finalize_usage(status, run_started_monotonic, baseline_elapsed, baseline_streetview, baseline_vision)
+                    # Written after EVERY completed segment, not just every
+                    # 10th - a crash/restart must never lose more than the
+                    # handful of segments actually in flight at that moment
+                    # (bounded by config.concurrency), per this app's
+                    # standing incremental-checkpointing standard (see
+                    # CLAUDE.md's "Engineering practices"). This is cheap
+                    # even at this cadence: the GCS half of _write_status
+                    # (gcs_cache_push) is asynchronous, so it never blocks
+                    # a worker thread on a network round trip - only the
+                    # local disk write is actually synchronous here.
+                    _write_status(batch_id, status)
+                    # The daily-cap re-check itself stays periodic, not
+                    # per-segment - unlike the status write above, THIS is
+                    # a real cross-batch scan (daily_spend_for_user reads
+                    # every other batch this user started today), so
+                    # checking it on every single completion under high
+                    # concurrency would multiply that cost for no real
+                    # benefit - crossing the cap by a few extra segments'
+                    # worth is already an accepted, bounded overshoot (see
+                    # this function's own docstring). Workers already in
+                    # flight when this fires still finish (see _worker's
+                    # own cancel_event check) - bounded by
+                    # config.concurrency, same as a user-triggered Cancel.
                     if status["done_count"] % 10 == 0 or status["done_count"] == n:
-                        _finalize_usage(status, run_started_monotonic)
-                        _write_status(batch_id, status)
-                        # Real-time enforcement of the same daily cap the
-                        # pre-check above applies at start: re-sums every
-                        # run started_by made today (this one's
-                        # just-written counts included) and stops taking
-                        # on new segments the instant that crosses
-                        # DAILY_COST_CAP_USD. Workers already in flight
-                        # when this fires still finish (see _worker's own
-                        # cancel_event check) - bounded by config.concurrency,
-                        # same as a user-triggered Cancel.
-                        if not cancel_event.is_set() and daily_spend_for_user(config.started_by, started_at[:10]) >= DAILY_COST_CAP_USD:
+                        if not cancel_event.is_set() and daily_spend_for_user(config.started_by, status["started_at"][:10]) >= DAILY_COST_CAP_USD:
                             cancel_event.set()
                             status["hit_daily_cap"] = True
+                            _write_status(batch_id, status)
 
         _write_csv(batch_id, csv_rows)
         _sync_images_to_gcs(out_root)
@@ -650,17 +762,25 @@ def run_batch(batch_id: str, config: BatchConfig, cancel_event: threading.Event)
             status["message"] = f"Cancelled after {status['done_count']}/{n} segment(s) checked ({status['matched_count']} sign(s) found)."
         else:
             status["message"] = f"Done. {status['matched_count']} sign(s) found out of {status['done_count']} segment(s) checked."
-        _finalize_usage(status, run_started_monotonic)
+        _finalize_usage(status, run_started_monotonic, baseline_elapsed, baseline_streetview, baseline_vision)
         _write_status(batch_id, status)
     except (NoUsableApiKey, StreetViewAuthError, ValueError) as e:
         status["run_status"] = "error"
         status["error"] = str(e)
         status["finished_at"] = _now_iso()
-        _finalize_usage(status, run_started_monotonic)
+        _finalize_usage(status, run_started_monotonic, baseline_elapsed, baseline_streetview, baseline_vision)
         _write_status(batch_id, status)
     except Exception as e:
         status["run_status"] = "error"
         status["error"] = f"{type(e).__name__}: {e}"
         status["finished_at"] = _now_iso()
-        _finalize_usage(status, run_started_monotonic)
+        _finalize_usage(status, run_started_monotonic, baseline_elapsed, baseline_streetview, baseline_vision)
         _write_status(batch_id, status)
+    finally:
+        # Drains every still-in-flight async GCS image upload before this
+        # background thread exits, done/cancelled/errored alike - without
+        # this, a push still queued on _GCS_UPLOAD_POOL when the thread
+        # ends could silently never complete (see find_bad_speed_limit's
+        # own wait_for_gcs_uploads docstring for why "async" must never
+        # mean "fire and forget").
+        wait_for_gcs_uploads()
