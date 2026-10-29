@@ -745,6 +745,16 @@
   The stats tables are titled "Sample of Disagreements" and "Inferred overall"; columns are "Precision (exact match)",
   "Recall (exact match)" and "Have Data" (was `n`: how many observations that source had a value for; larger, bold, green
   marker on the highest, ties all marked).
+- **Coverage and the two view filters (precision report)** - `population_agreement_counts` (one query, same columns/bytes as before)
+  now also returns `total_count` (all segments in state + functional class) and `osm_count`/`here_count`/`model_count` (segments each
+  source has a value for). The "Inferred overall" table shows them as "Have Data" and "% Coverage" (count / total_count). Above the
+  tables: a "grey out sources with coverage below N %" input (greys the source's row in BOTH tables and makes it ineligible for
+  the green best-value marker) and an "only roads where OSM, HERE and Model all have data" checkbox (keeps only observations with
+  all three values; the sample table's stats and the inferred metrics are recomputed in JS - `jsSourceStats`/`jsInferredMetrics`,
+  same definitions as `_source_stats`/`infer_overall_metrics`, checked identical against the Python on random data - and the
+  observations list is filtered too). Old runs lack the counts: "Calculate missing values" fills them (`needs_population_counts`,
+  one more read-only query; its dry run is part of `estimate_geometry_cost`). The summary line shows "sign observations" next to
+  "segments with a sign" because a segment with a sign in each direction counts once per direction (that's why 6 segments can give 7 values).
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

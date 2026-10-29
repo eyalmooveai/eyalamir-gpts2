@@ -257,6 +257,28 @@ def sample_segments_weighted_by_length(
     return [dict(row.items()) for row in client.query(query, job_config=job_config).result()]
 
 
+def _population_sql(project: str, dataset: str, table: str) -> str:
+    return f"""
+        SELECT
+          COUNT(*) AS total_count,
+          COUNTIF(speed_limit_osm_mph IS NOT NULL) AS osm_count,
+          COUNTIF(speed_limit_here_mph IS NOT NULL) AS here_count,
+          COUNTIF(COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL) AS model_count,
+          COUNTIF(speed_limit_osm_mph IS NULL OR speed_limit_here_mph IS NULL
+                  OR COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NULL) AS missing_count,
+          COUNTIF(speed_limit_osm_mph IS NOT NULL AND speed_limit_here_mph IS NOT NULL
+                  AND COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL
+                  AND speed_limit_osm_mph = ROUND(speed_limit_here_mph)
+                  AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph)) AS agree_count,
+          COUNTIF(speed_limit_osm_mph IS NOT NULL AND speed_limit_here_mph IS NOT NULL
+                  AND COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL
+                  AND NOT (speed_limit_osm_mph = ROUND(speed_limit_here_mph)
+                           AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph))) AS disagree_count
+        FROM `{project}.{dataset}.{table}`
+        WHERE functional_class < @fc_lt AND state = @state
+    """
+
+
 def population_agreement_counts(
     project: str, dataset: str, table: str, *, state: str, functional_class_lt: int, client: "bigquery.Client",
 ) -> dict:
@@ -271,27 +293,17 @@ def population_agreement_counts(
     into an inferred OVERALL-domain precision - see infer_overall_precision()
     and the module docstring's "Inferring overall precision" section for the
     formula and the explicit assumption it rests on."""
-    query = f"""
-        SELECT
-          COUNTIF(speed_limit_osm_mph IS NULL OR speed_limit_here_mph IS NULL
-                  OR COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NULL) AS missing_count,
-          COUNTIF(speed_limit_osm_mph IS NOT NULL AND speed_limit_here_mph IS NOT NULL
-                  AND COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL
-                  AND speed_limit_osm_mph = ROUND(speed_limit_here_mph)
-                  AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph)) AS agree_count,
-          COUNTIF(speed_limit_osm_mph IS NOT NULL AND speed_limit_here_mph IS NOT NULL
-                  AND COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph) IS NOT NULL
-                  AND NOT (speed_limit_osm_mph = ROUND(speed_limit_here_mph)
-                           AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph))) AS disagree_count
-        FROM `{project}.{dataset}.{table}`
-        WHERE functional_class < @fc_lt AND state = @state
-    """
+    query = _population_sql(project, dataset, table)
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("fc_lt", "INT64", functional_class_lt),
         bigquery.ScalarQueryParameter("state", "STRING", state.upper()),
     ])
     row = next(iter(client.query(query, job_config=job_config).result()))
-    return {"missing_count": row["missing_count"], "agree_count": row["agree_count"], "disagree_count": row["disagree_count"]}
+    return {
+        "missing_count": row["missing_count"], "agree_count": row["agree_count"], "disagree_count": row["disagree_count"],
+        # Per-source coverage of the domain: how many of its total_count segments each source has a value for.
+        "total_count": row["total_count"], "osm_count": row["osm_count"], "here_count": row["here_count"], "model_count": row["model_count"],
+    }
 
 
 def infer_overall_precision(population: dict, stats: dict) -> dict:

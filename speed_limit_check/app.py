@@ -1035,7 +1035,7 @@ def speed_limits_precision_sample_recalculate(job_id):
         return jsonify({"error": "This run's record has no table configuration to recalculate against."}), 409
     data = request.get_json(silent=True) or {}
     try:
-        estimate = precision_recalc.estimate_geometry_cost(cfg["project"], cfg["dataset"], cfg["table"], job["payload"].get("results", []))
+        estimate = precision_recalc.estimate_geometry_cost(cfg["project"], cfg["dataset"], cfg["table"], job["payload"].get("results", []), job["payload"])
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
     from bq_sql_console import COST_CONFIRMATION_THRESHOLD_USD

@@ -20,7 +20,7 @@ from google.cloud import bigquery
 
 import find_bad_speed_limit as fbs
 from precision_sample import (
-    _observations, compute_precision_stats, infer_overall_metrics,
+    _observations, _population_sql, compute_precision_stats, infer_overall_metrics, population_agreement_counts,
 )
 
 _BYTES_PER_GB = 1024 ** 3
@@ -43,17 +43,35 @@ def _geometry_sql(dataset: str, table: str) -> str:
     return f"SELECT here_segment_id, ST_ASGEOJSON(geom) AS geom_geojson FROM {dataset}.{table} WHERE here_segment_id IN UNNEST(@ids)"
 
 
-def estimate_geometry_cost(project: str, dataset: str, table: str, results: list[dict]) -> dict:
-    """Free dry run of the one geometry query - {gb, cost_usd} (zero when there is nothing to look up)."""
-    ids = sorted(_segment_ids(results))
-    if not ids:
-        return {"gb": 0.0, "cost_usd": 0.0}
+def needs_population_counts(payload: dict) -> bool:
+    """A run saved before per-source coverage existed: its population split has no total_count / per-source counts."""
+    pop = payload.get("population")
+    return bool(pop) and pop.get("total_count") is None
+
+
+def estimate_geometry_cost(project: str, dataset: str, table: str, results: list[dict], payload: Optional[dict] = None) -> dict:
+    """Free dry runs of the read-only lookups the recalculation makes (the geometry query, plus the domain coverage
+    count when the run lacks it) - {gb, cost_usd} (zero when there is nothing to look up)."""
     from bq_sql_console import BQ_ON_DEMAND_PRICE_PER_TIB_USD
-    job = bigquery.Client(project=project).query(
-        _geometry_sql(dataset, table),
-        job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", ids)], dry_run=True, use_query_cache=False),
-    )
-    b = job.total_bytes_processed or 0
+    client = bigquery.Client(project=project)
+    b = 0
+    ids = sorted(_segment_ids(results))
+    if ids:
+        job = client.query(
+            _geometry_sql(dataset, table),
+            job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", ids)], dry_run=True, use_query_cache=False),
+        )
+        b += job.total_bytes_processed or 0
+    if payload is not None and needs_population_counts(payload):
+        cfg = payload.get("config") or {}
+        job = client.query(
+            _population_sql(project, dataset, table),
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("fc_lt", "INT64", cfg.get("functional_class_lt")),
+                bigquery.ScalarQueryParameter("state", "STRING", (cfg.get("state") or "").upper()),
+            ], dry_run=True, use_query_cache=False),
+        )
+        b += job.total_bytes_processed or 0
     return {"gb": b / _BYTES_PER_GB, "cost_usd": (b / _BYTES_PER_TIB) * BQ_ON_DEMAND_PRICE_PER_TIB_USD}
 
 
@@ -175,13 +193,27 @@ def recalculate(payload: dict, *, project: str, dataset: str, table: str, on_pro
                 if make_snippet(img, truth):
                     snippets_made += 1
 
+    population = payload.get("population")
+    if needs_population_counts(payload):
+        on_progress("Counting how many segments each source has a value for (read-only BigQuery)...")
+        cfg = payload.get("config") or {}
+        try:
+            fresh = population_agreement_counts(
+                project, dataset, table, state=cfg["state"], functional_class_lt=cfg["functional_class_lt"],
+                client=bigquery.Client(project=project),
+            )
+            population = {**population, **fresh}
+        except Exception as e:  # noqa: BLE001 - the rest of the recalculation still stands
+            on_progress(f"(could not count per-source coverage: {type(e).__name__}: {e})")
+
     on_progress("Recomputing precision / recall / RMSE...")
     obs = _observations(results)
     stats = compute_precision_stats(results, obs, tolerance)
     new = dict(payload)
     new.update({"results": results, "observations": obs, "stats": stats})
-    if payload.get("population"):
-        new["inferred_metrics"] = infer_overall_metrics(payload["population"], stats)
+    if population:
+        new["population"] = population
+        new["inferred_metrics"] = infer_overall_metrics(population, stats)
     new["recalculated_at"] = datetime.now(timezone.utc).isoformat()
     new["recalculated_snippets"] = snippets_made
     return new

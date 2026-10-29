@@ -296,9 +296,63 @@
   }
   const fmt2 = v => isNum(v) ? v.toFixed(2) : 'n/a';
 
+  // Stats over a list of observations, same definitions as precision_sample._source_stats (used when the
+  // "all sources have data" filter is on, so the server's numbers can't be reused as-is).
+  const modelValue = o => (isNum(o.speed_limit_infer_mph_corrected) ? o.speed_limit_infer_mph_corrected : o.speed_limit_infer_mph);
+  function jsSourceStats(obs, getter, tol) {
+    const diffs = []; let exact = 0, within = 0, nTruth = 0;
+    obs.forEach(o => {
+      const truth = o.ground_truth_mph, v = getter(o);
+      if (isNum(truth)) nTruth++;
+      if (!isNum(truth) || !isNum(v)) return;
+      const d = Math.abs(v - truth); diffs.push(d);
+      if (d === 0) exact++;
+      if (d <= tol) within++;
+    });
+    const n = diffs.length, sorted = diffs.slice().sort((x, y) => x - y);
+    const median = n ? (n % 2 ? sorted[(n - 1) / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2) : null;
+    const mse = n ? diffs.reduce((t, d) => t + d * d, 0) / n : null;
+    return {
+      n_compared: n, n_observations: nTruth, exact_match_count: exact,
+      exact_match_rate: n ? exact / n : null, recall: nTruth ? exact / nTruth : null,
+      mse_mph2: mse, rmse_mph: mse === null ? null : Math.sqrt(mse),
+      within_tolerance_rate: n ? within / n : null,
+      mean_abs_error_mph: n ? diffs.reduce((t, d) => t + d, 0) / n : null, median_abs_error_mph: median,
+    };
+  }
+  function jsStatsFor(obs, tol) {
+    return {
+      osm: jsSourceStats(obs, o => o.speed_limit_osm_mph, tol),
+      here: jsSourceStats(obs, o => o.speed_limit_here_mph, tol),
+      model: jsSourceStats(obs, modelValue, tol),
+    };
+  }
+  function jsInferredMetrics(pop, stats) {
+    const total = pop.agree_count + pop.disagree_count, out = {};
+    ['osm', 'here', 'model'].forEach(k => {
+      if (!total) { out[k] = {precision: null, recall: null, rmse_mph: null}; return; }
+      const a = pop.agree_count / total, d = pop.disagree_count / total, s2 = stats[k];
+      out[k] = {
+        precision: s2.exact_match_rate === null ? null : a + d * s2.exact_match_rate,
+        recall: s2.recall === null ? null : a + d * s2.recall,
+        rmse_mph: s2.mse_mph2 === null ? null : Math.sqrt(d * s2.mse_mph2),
+      };
+    });
+    return out;
+  }
+  // Which sources fall below the "minimum coverage" setting (coverage = segments with a value / all segments in the domain).
+  function dimmedSources(pop, minPct) {
+    const out = {osm: false, here: false, model: false};
+    if (!pop || pop.total_count === undefined || pop.total_count === null || !pop.total_count || !minPct) return out;
+    ['osm', 'here', 'model'].forEach(k => { out[k] = (pop[k + '_count'] / pop.total_count * 100) < minPct; });
+    return out;
+  }
+  const DIM_STYLE = ' style="opacity:0.4;" title="Below the minimum coverage - greyed out and not eligible for the best-value marker"';
+
   // The per-source stats table shared by the precision results and the analyzed-signs report.
-  function sourceStatsTableHtml(stats) {
-    const rows = [['OSM', stats.osm], ['HERE', stats.here], ['Model', stats.model]];
+  function sourceStatsTableHtml(stats, dim) {
+    dim = dim || {};
+    const rows = [['OSM', 'osm', stats.osm], ['HERE', 'here', stats.here], ['Model', 'model', stats.model]];
     const cols = [
       { key: 'exact_match_rate', mode: 'max', label: 'Precision (exact match)', title: 'Exact matches / observations where the source had a value', fmt: pctOrNa },
       { key: 'recall', mode: 'max', label: 'Recall (exact match)', title: 'Exact matches / ALL observations with a real sign (a missing value counts as a miss)', fmt: pctOrNa },
@@ -307,39 +361,52 @@
       { key: 'mean_abs_error_mph', mode: 'min', label: 'Mean |err|', title: 'Mean absolute error vs the real sign, mph', fmt: fmt2 },
       { key: 'median_abs_error_mph', mode: 'min', label: 'Median |err|', title: 'Median absolute error vs the real sign, mph', fmt: fmt2 },
     ];
-    const best = cols.map(c => bestSet(rows.map(([, s]) => s[c.key]), c.mode));
-    const bestN = bestSet(rows.map(([, s]) => s.n_compared), 'max');
+    const val = (r, key) => (dim[rows[r][1]] ? null : rows[r][2][key]);   // a greyed-out source never wins a column
+    const best = cols.map(c => bestSet(rows.map((_, r) => val(r, c.key)), c.mode));
+    const bestN = bestSet(rows.map((_, r) => val(r, 'n_compared')), 'max');
     return `<table>
       <thead><tr><th>Source</th><th title="How many real-sign observations this source had a value for - the denominator of its precision">Have Data<br><span class="dir-hint">&uarr; more is better</span></th>${cols.map(c => dirHeader(c.label, c.mode, c.title)).join('')}</tr></thead>
-      <tbody>${rows.map(([label, s], r) => `<tr><td>${label}</td><td style="font-size:1.1rem;">${bestMark('<b>' + s.n_compared + '</b>', bestN.has(r))}</td>`
+      <tbody>${rows.map(([label, key, s], r) => `<tr${dim[key] ? DIM_STYLE : ''}><td>${label}</td><td style="font-size:1.1rem;">${bestMark('<b>' + s.n_compared + '</b>', bestN.has(r))}</td>`
         + cols.map((c, ci) => `<td>${bestMark(c.fmt(s[c.key]), best[ci].has(r))}</td>`).join('') + '</tr>').join('')}</tbody>
     </table>`;
   }
 
-  function inferredPrecisionHtml(payload) {
+  function inferredPrecisionHtml(payload, ctx) {
+    ctx = ctx || {};
     if (payload.population_error) {
       return `<p style="color:var(--muted); font-size:0.82rem; margin:10px 0 0;">Inferred overall precision not computed: ${escapeHtml(payload.population_error)}</p>`;
     }
     const pop = payload.population, inferred = payload.inferred_precision;
     if (!pop || !inferred) return '';
+    const dim = ctx.dim || {};
     const total = pop.agree_count + pop.disagree_count;
     const agreePct = total ? (pop.agree_count / total * 100).toFixed(1) : 'n/a';
     const keys = ['osm', 'here', 'model'];
-    const prec = keys.map(k => inferred[k]);
-    const rec = keys.map(k => ((payload.inferred_metrics || {})[k] || {}).recall);
-    const rm = keys.map(k => ((payload.inferred_metrics || {})[k] || {}).rmse_mph);
-    const bp = bestSet(prec, 'max'), br = bestSet(rec, 'max'), bm = bestSet(rm, 'min');
+    const metrics = ctx.metrics || payload.inferred_metrics || {};
+    const prec = keys.map(k => (ctx.metrics ? (metrics[k] || {}).precision : inferred[k]));
+    const rec = keys.map(k => (metrics[k] || {}).recall);
+    const rm = keys.map(k => (metrics[k] || {}).rmse_mph);
+    const hasCov = pop.total_count !== undefined && pop.total_count !== null;
+    const have = keys.map(k => (hasCov ? pop[k + '_count'] : null));
+    const cov = keys.map((k, i) => (hasCov && pop.total_count ? have[i] / pop.total_count : null));
+    const elig = vals => vals.map((v, i) => (dim[keys[i]] ? null : v));   // a greyed-out source never wins a column
+    const bh = bestSet(elig(have), 'max'), bc = bestSet(elig(cov), 'max');
+    const bp = bestSet(elig(prec), 'max'), br = bestSet(elig(rec), 'max'), bm = bestSet(elig(rm), 'min');
     const rows = keys.map((key, i) => {
       const label = key === 'osm' ? 'OSM' : key === 'here' ? 'HERE' : 'Model';
-      return `<tr><td>${label}</td><td>${bestMark(isNum(prec[i]) ? (prec[i] * 100).toFixed(1) + '%' : 'n/a', bp.has(i))}</td>`
+      return `<tr${dim[key] ? DIM_STYLE : ''}><td>${label}</td>`
+        + `<td style="font-size:1.1rem;">${hasCov ? bestMark('<b>' + have[i] + '</b>', bh.has(i)) : 'n/a'}</td>`
+        + `<td>${hasCov ? bestMark(pctOrNa(cov[i]), bc.has(i)) : 'n/a'}</td>`
+        + `<td>${bestMark(isNum(prec[i]) ? (prec[i] * 100).toFixed(1) + '%' : 'n/a', bp.has(i))}</td>`
         + `<td>${bestMark(pctOrNa(rec[i]), br.has(i))}</td><td>${bestMark(fmt2(rm[i]), bm.has(i))}</td></tr>`;
     }).join('');
     return `
       <h4 style="margin:14px 0 4px;">Inferred overall</h4>
       <p style="margin:0 0 6px; color:var(--muted); font-size:0.85rem;">Inferred overall precision (assumes a segment where OSM/HERE/Model already agree is in fact correct - see <code>precision_sample.py</code>'s module docstring):</p>
-      <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain: ${total} segment(s) with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded.</p>
+      <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain${hasCov ? `: ${pop.total_count} segment(s) in ${escapeHtml((payload.config || {}).state || '')} with functional class &lt; ${(payload.config || {}).functional_class_lt}; ` : ': '}${total} with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded from the inferred figures.</p>
+      ${hasCov ? '' : '<p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Per-source counts and coverage were not saved with this run - use &ldquo;Calculate missing values&rdquo; above to fill them in.</p>'}
       <table>
-        <thead><tr><th>Source</th>${dirHeader('Inferred precision', 'max', 'Share of the whole domain the source gets right, assuming agreement means correct')}${dirHeader('Inferred recall', 'max', 'agree% + disagree% x recall on the disagreeing sample')}${dirHeader('Inferred RMSE (mph)', 'min', 'sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error')}</tr></thead>
+        <thead><tr><th>Source</th><th title="Segments in the domain (state + functional class) for which this source has a value">Have Data<br><span class="dir-hint">&uarr; more is better</span></th><th title="Have Data / all segments in the domain">% Coverage<br><span class="dir-hint">&uarr; higher is better</span></th>${dirHeader('Inferred precision', 'max', 'Share of the whole domain the source gets right, assuming agreement means correct')}${dirHeader('Inferred recall', 'max', 'agree% + disagree% x recall on the disagreeing sample')}${dirHeader('Inferred RMSE (mph)', 'min', 'sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error')}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
@@ -576,10 +643,11 @@
     window.__obsSets = window.__obsSets || {};
 
     const needsRecalc = stats.osm.recall === undefined || (payload.population && !payload.inferred_metrics)
+      || (payload.population && (payload.population.total_count === undefined || payload.population.total_count === null))
       || obs.some(o => !o.snippet_url || !o.segment_geojson);
     const recalcHtml = needsRecalc ? `
       <div id="recalc-box" style="margin:0 0 12px; padding:10px 12px; border:1px dashed var(--border, #ccc); border-radius:6px;">
-        <span style="font-size:0.85rem;">This run was saved before some values existed (Recall, RMSE, the sign snippets and map).</span>
+        <span style="font-size:0.85rem;">This run was saved before some values existed (Recall, RMSE, per-source coverage, the sign snippets and map).</span>
         <button type="button" class="btn-secondary" id="recalc-btn" onclick="recalcPrecisionRun('${jobId}', false)" style="margin-left:8px;">Calculate missing values</button>
         <div id="recalc-status" style="color:var(--muted); font-size:0.82rem; margin-top:6px;">No new Street View, Vision or Gemini calls - only free arithmetic, cached images and a read-only BigQuery lookup (cost shown first if it is not tiny).</div>
       </div>` : '';
@@ -589,11 +657,14 @@
     el.innerHTML = `
       ${reportBarHtml(jobId, 'Results')}
       ${recalcHtml}
-      <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
-      <h4 style="margin:10px 0 6px;">Sample of Disagreements</h4>
-      ${sourceStatsTableHtml(stats)}
-      ${inferredPrecisionHtml(payload)}
-      ${obsTableHtml('p', obs)}
+      <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; sign observations: ${obs.length}${obs.length > stats.segments_with_any_sign ? ' <span style="color:var(--muted);" title="A segment whose two driving directions each had their own sign gives two observations (one per direction), so observations can exceed segments.">(a segment with a sign in each direction counts once per direction)</span>' : ''} &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
+      <div style="display:flex; flex-wrap:wrap; gap:8px 24px; align-items:center; margin:8px 0 4px; padding:8px 12px; border:1px solid var(--border, #ddd); border-radius:6px;">
+        <label style="margin:0;" title="Coverage = segments in the state + functional class that have a value for the source / all those segments. Sources below this are greyed out in both tables and can't win a column.">Grey out sources with coverage below
+          <input type="number" id="cov-min" min="0" max="100" step="1" value="${window.__precView.minCov}" style="width:70px;" oninput="updatePrecisionView()"> %</label>
+        <label style="margin:0; display:inline-flex; gap:6px; align-items:center;" title="Keeps only the sign observations where OSM, HERE and Model all have a value, in both tables and the observations list.">
+          <input type="checkbox" id="all-have" ${window.__precView.allHave ? 'checked' : ''} onchange="updatePrecisionView()"> Compare only roads where OSM, HERE and Model all have data</label>
+      </div>
+      <div id="precision-tables"></div>
       <p style="margin:14px 0 0;">
         <a href="/speed-limits/precision-sample/${jobId}/results.json">Download results.json</a> &middot;
         <a href="/speed-limits/precision-sample/${jobId}/results.csv">Download results.csv</a> &middot;
@@ -605,6 +676,33 @@
           : `Could not queue the BigQuery save: ${escapeHtml(payload.bigquery_error || 'unknown error')}.`
       }</p>
     `;
+    window.__precCtx = {payload};
+    renderPrecisionTables();
+  }
+
+  window.__precView = window.__precView || {minCov: 0, allHave: false};
+  window.updatePrecisionView = function () {
+    const m = parseFloat(document.getElementById('cov-min').value);
+    window.__precView = {minCov: Number.isFinite(m) ? Math.max(0, Math.min(100, m)) : 0, allHave: document.getElementById('all-have').checked};
+    renderPrecisionTables();
+  };
+  function renderPrecisionTables() {
+    const host = document.getElementById('precision-tables');
+    if (!host || !window.__precCtx) return;
+    const payload = window.__precCtx.payload, v = window.__precView;
+    const all = payload.observations || [];
+    const tol = (payload.stats.osm || {}).within_tolerance_mph || 5.0;
+    const hasAll = o => isNum(o.speed_limit_osm_mph) && isNum(o.speed_limit_here_mph) && isNum(modelValue(o));
+    const shown = v.allHave ? all.filter(hasAll) : all;
+    const stats = v.allHave ? jsStatsFor(shown, tol) : payload.stats;
+    const ctx = {dim: dimmedSources(payload.population, v.minCov)};
+    if (v.allHave && payload.population) ctx.metrics = jsInferredMetrics(payload.population, stats);
+    host.innerHTML = `
+      ${v.allHave ? `<p style="color:var(--muted); font-size:0.82rem; margin:6px 0;">Only roads where OSM, HERE and Model all have a value: kept ${shown.length} of ${all.length} sign observations.</p>` : ''}
+      <h4 style="margin:10px 0 6px;">Sample of Disagreements</h4>
+      ${sourceStatsTableHtml(stats, ctx.dim)}
+      ${inferredPrecisionHtml(payload, ctx)}
+      ${obsTableHtml('p', shown)}`;
   }
 
   try {
