@@ -103,6 +103,7 @@ from model_library import (
 )
 from precision_sample import (
     MAX_SAMPLE_SIZE as PRECISION_MAX_SAMPLE_SIZE,
+    SAMPLING_METHODS,
     SamplingError as PrecisionSamplingError,
     run_precision_sample,
 )
@@ -724,13 +725,13 @@ def _load_persisted_precision_job(job_id: str) -> dict | None:
     return job
 
 
-def _new_precision_job(state: str, functional_class_lt: int, sample_size: int) -> str:
+def _new_precision_job(state: str, functional_class_lt: int, sample_size: int, sampling_method: str = "A1") -> str:
     job_id = uuid.uuid4().hex
     with PRECISION_JOBS_LOCK:
         PRECISION_JOBS[job_id] = {
             "status": "running",  # "running" | "done" | "error"
             "error": None,
-            "state": state, "functional_class_lt": functional_class_lt, "sample_size": sample_size,
+            "state": state, "functional_class_lt": functional_class_lt, "sample_size": sample_size, "sampling_method": sampling_method,
             "message": "Starting...",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "segments_done": 0, "segments_total": sample_size, "current_segment_id": None,
@@ -759,7 +760,7 @@ def _get_precision_job(job_id: str) -> dict | None:
     return _load_persisted_precision_job(job_id)
 
 
-def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt: int, sample_size: int, api_key: str, resume: bool = False) -> None:
+def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt: int, sample_size: int, api_key: str, resume: bool = False, sampling_method: str = "A1") -> None:
     """Runs run_precision_sample() in a background thread, translating its
     on_event callback into updates on this job's PRECISION_JOBS record -
     same pattern as _run_quality_job/_run_compare_job above. API-call
@@ -786,7 +787,7 @@ def _run_precision_job(job_id: str, table: str, state: str, functional_class_lt:
     try:
         payload = run_precision_sample(
             project=DEFAULT_PROJECT, dataset=DEFAULT_DATASET, table=table, state=state,
-            functional_class_lt=functional_class_lt, sample_size=sample_size,
+            functional_class_lt=functional_class_lt, sample_size=sample_size, sampling_method=sampling_method,
             api_key=api_key, out_root=out_root, on_event=on_event, log=print,
             resume_from=out_root if resume else None,
             # Tuned per real pilot runs (see precision_sample.py's own CLI
@@ -949,6 +950,9 @@ def speed_limits_precision_sample_start():
         return jsonify({"error": "state must be a 2-letter code, e.g. CO."}), 400
     if not (1 <= sample_size <= PRECISION_MAX_SAMPLE_SIZE):
         return jsonify({"error": f"sample_size must be between 1 and {PRECISION_MAX_SAMPLE_SIZE}."}), 400
+    sampling_method = (data.get("sampling_method") or "A1").strip().upper()
+    if sampling_method not in SAMPLING_METHODS:
+        return jsonify({"error": f"sampling_method must be one of {', '.join(SAMPLING_METHODS)}."}), 400
 
     load_keys_file(DEFAULT_KEYS_FILE)
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
@@ -960,9 +964,9 @@ def speed_limits_precision_sample_start():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    job_id = _new_precision_job(state, functional_class_lt, sample_size)
+    job_id = _new_precision_job(state, functional_class_lt, sample_size, sampling_method)
     thread = threading.Thread(
-        target=_run_precision_job, args=(job_id, table, state, functional_class_lt, sample_size, api_key), daemon=True,
+        target=_run_precision_job, args=(job_id, table, state, functional_class_lt, sample_size, api_key), kwargs={"sampling_method": sampling_method}, daemon=True,
     )
     thread.start()
     return jsonify({"job_id": job_id}), 202
@@ -1267,6 +1271,7 @@ def speed_limits_quality():
         quality_metric_choices=[{"key": m["key"], "name": m["name"], "description": m["description"]} for m in QUALITY_METRICS],
         preview_max_segments=PREVIEW_MAX_SEGMENTS,
         precision_max_sample_size=PRECISION_MAX_SAMPLE_SIZE,
+        sampling_methods=SAMPLING_METHODS,
     )
 
 

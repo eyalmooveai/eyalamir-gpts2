@@ -756,6 +756,21 @@
   observations list is filtered too). Old runs lack the counts: "Calculate missing values" fills them (`needs_population_counts`,
   one more read-only query; its dry run is part of `estimate_geometry_cost`). The summary line shows "sign observations" next to
   "segments with a sign" because a segment with a sign in each direction counts once per direction (that's why 6 segments can give 7 values).
+- **Nationwide precision runs: state = `US`** (precision card and the analyzed-signs report; `US` isn't a USPS code so it can't clash,
+  and already passes `STATE_RE`). `table_name("US", ...)` is the nationwide `speed_limits_US_<Y>_<M>_details`. SQL uses
+  `(@state = 'US' OR state = @state)` in the sampling frame, the population/coverage count and the report. The sample is drawn across
+  the whole country weighted by segment length, so states with more disagreeing road dominate - it is NOT stratified by state. Each
+  sampled segment is walked in ITS OWN state's topology (`_segment_state`; `maps.road_segments_<ST>`), the result row's `state` is the
+  segment's state, and a chain ends at a state border. By-id detail lookups (~10 GB each on the nationwide table, ~0.24 GB on a state
+  table) go to the segment's state table when it exists (`_lookup_table_for_segment`, existence checked once per state via free table
+  metadata), else the nationwide one. Population counts for US cost the same bytes as a single state (the whole table is scanned either way).
+- **Sampling methods (precision card "Sampling method")** - `SAMPLING_METHODS` in `precision_sample.py`: A = weighted by segment length
+  (Efraimidis-Spirakis key `LN(RAND())/length`), B = unweighted (`LN(RAND())`); 1 = all states pooled, 2 = equal draws per state (only
+  differs from 1 for a `US` run: rank each state's eligible segments by the key, take rank 1 of every state in random state order, then
+  rank 2, ... up to the sample size, so a state with few eligible segments just gives what it has). `_sampling_sql` builds it (the per-state
+  form picks ids first, then reads full rows for just those). Stored as `config["sampling_method"]`; a resumed run uses the checkpoint's
+  (old checkpoints without one = A1). The "Inferred overall" population fractions are segment COUNTS regardless of method, so they match
+  a B1 sample exactly and are only an approximation for A (length-weighted) and 2 (state-balanced) samples.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

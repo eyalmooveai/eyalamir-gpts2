@@ -54,7 +54,7 @@ FROM latest l
 JOIN {dataset}.{table} t ON t.here_segment_id = l.here_segment_id
 LEFT JOIN calc_out.signs s1 ON s1.sign_id = l.sign_found_on_id_in_dir_1
 LEFT JOIN calc_out.signs s2 ON s2.sign_id = l.sign_found_on_id_in_dir_2
-WHERE t.state = @state AND t.functional_class < @fc
+WHERE (@state = 'US' OR t.state = @state) AND t.functional_class < @fc
 """
 
 

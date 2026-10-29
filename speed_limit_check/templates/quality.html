@@ -15,8 +15,9 @@
   <form id="precision-sample-form" onsubmit="return false;">
     <div class="row-2">
       <div>
-        <label for="precision-state">State</label>
-        <input type="text" id="precision-state" maxlength="2" value="CO" style="text-transform:uppercase;" list="state-list">
+        <label for="precision-state">State <span style="color:var(--muted); font-weight:normal;">(<b>US</b> = all states)</span></label>
+        <input type="text" id="precision-state" maxlength="2" value="CO" style="text-transform:uppercase;" list="precision-state-list">
+        <datalist id="precision-state-list"><option value="US" label="All states (nationwide)">{% for s in us_state_codes %}<option value="{{ s }}">{% endfor %}</datalist>
       </div>
       <div>
         <label for="precision-fc">Functional class &lt;</label>
@@ -31,6 +32,13 @@
       <div style="display:flex; align-items:flex-end;">
         <button type="button" class="btn-secondary" id="precision-sample-run-btn" onclick="runPrecisionSample()" style="margin-bottom:12px;">Run precision sample</button>
       </div>
+    </div>
+    <div style="margin:0 0 12px;">
+        <label for="precision-sampling-method">Sampling method</label>
+        <select id="precision-sampling-method">
+          {% for key, label in sampling_methods.items() %}<option value="{{ key }}">{{ key }} &mdash; {{ label }}</option>{% endfor %}
+        </select>
+        <p style="color:var(--muted); font-size:0.82rem; margin:4px 0 0;"><b>A</b> favors long segments (the share of road, so a highway counts for more than a connector); <b>B</b> treats every segment alike. <b>1</b> pools all states, so big or disagreement-heavy states dominate; <b>2</b> gives every state the same number of draws. The per-state options only differ from the pooled ones when State is <b>US</b>. The "Inferred overall" figures always use segment counts, whichever method drew the sample.</p>
     </div>
   </form>
   <div id="precision-sample-progress" style="display:none; margin-top:10px;">
@@ -53,8 +61,8 @@
   <form onsubmit="return false;">
     <div class="form-grid">
       <div>
-        <label for="report-state">State</label>
-        <input type="text" id="report-state" maxlength="2" value="CO" style="text-transform:uppercase;">
+        <label for="report-state">State <span style="color:var(--muted); font-weight:normal;">(<b>US</b> = all states)</span></label>
+        <input type="text" id="report-state" maxlength="2" value="CO" style="text-transform:uppercase;" list="precision-state-list">
       </div>
       <div>
         <label for="report-fc">Functional class &lt;</label>
@@ -714,7 +722,7 @@
 
     fetch('/speed-limits/precision-sample', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({state, functional_class_lt, sample_size}),
+      body: JSON.stringify({state, functional_class_lt, sample_size, sampling_method: document.getElementById('precision-sampling-method').value}),
     })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {

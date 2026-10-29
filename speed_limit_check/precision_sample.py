@@ -185,9 +185,75 @@ MAX_CONCURRENCY = 20  # a sanity ceiling on the CLI flag, not a hard API limit
 MAX_SAMPLE_SIZE = 500
 
 
+# The four ways to draw the sample (precision card's "Sampling method"). A = weighted by segment length (a long highway segment is
+# proportionally more likely than a 20 m connector), B = every segment equally likely regardless of length. 1 = pool all states
+# and draw from the whole pool (a state's share follows its share of the disagreeing segments/length), 2 = every state gets the same
+# number of draws (+/-1; a state with fewer disagreeing segments than its quota just gives all it has and the others fill in), drawn
+# within the state by the A/B rule. The "per state" variants only differ from the pooled ones for a nationwide (US) run.
+SAMPLING_METHODS = {
+    "A1": "Weighted by segment length - all states pooled (states not balanced)",
+    "A2": "Weighted by segment length - equal draws per state",
+    "B1": "Unweighted (every segment equal) - all states pooled",
+    "B2": "Unweighted (every segment equal) - equal draws per state",
+}
+DEFAULT_SAMPLING_METHOD = "A1"
+
+
+def _sampling_sql(project: str, dataset: str, table: str, method: str, *, nationwide: bool) -> str:
+    if method not in SAMPLING_METHODS:
+        raise SamplingError(f"sampling method must be one of {', '.join(SAMPLING_METHODS)}.")
+    weighted, per_state = method[0] == "A", method[1] == "2" and nationwide
+    # Efraimidis-Spirakis key: ln(u)/w, largest keys win. w = segment length for A, 1 for B (a plain uniform draw).
+    key = "LN(RAND()) / GREATEST(ST_LENGTH(geom), 1.0)" if weighted else "LN(RAND())"
+    where = """functional_class < @fc_lt AND (@state = 'US' OR state = @state)
+          AND NOT (
+            speed_limit_osm_mph = ROUND(speed_limit_here_mph)
+            AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph)
+          )"""
+    full_row = """* EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph) AS speed_limit_here_mph),
+          ST_Y(ST_CENTROID(geom)) AS centroid_lat,
+          ST_X(ST_CENTROID(geom)) AS centroid_lon,
+          ST_ASGEOJSON(geom) AS geom_geojson"""
+    if not per_state:
+        return f"""
+        SELECT
+          {full_row},
+          {key} AS _sample_key
+        FROM `{project}.{dataset}.{table}`
+        WHERE {where}
+        ORDER BY _sample_key DESC
+        LIMIT @sample_size
+    """
+    # Equal draws per state: rank each state's eligible segments by the A/B key (so rank 1..k are successive A/B draws within the
+    # state), then take rank 1 of every state (in random state order), then rank 2 of every state, ... until sample_size. Picks
+    # only ids first (narrow rows), then reads the full rows for just those ids.
+    return f"""
+        WITH base AS (
+          SELECT here_segment_id, state, {key} AS _sample_key
+          FROM `{project}.{dataset}.{table}`
+          WHERE {where}
+        ),
+        ranked AS (
+          SELECT here_segment_id, state, ROW_NUMBER() OVER (PARTITION BY state ORDER BY _sample_key DESC) AS _rank FROM base
+        ),
+        state_order AS (SELECT state, RAND() AS _state_key FROM (SELECT DISTINCT state FROM base)),
+        picked AS (
+          SELECT r.here_segment_id, r._rank, s._state_key
+          FROM ranked r JOIN state_order s USING (state)
+          ORDER BY r._rank, s._state_key
+          LIMIT @sample_size
+        )
+        SELECT
+          t.{full_row},
+          p._rank AS _sample_rank
+        FROM `{project}.{dataset}.{table}` t JOIN picked p ON t.here_segment_id = p.here_segment_id
+        ORDER BY p._rank, p._state_key
+    """
+
+
 def sample_segments_weighted_by_length(
     project: str, dataset: str, table: str, *, state: str, functional_class_lt: int, sample_size: int,
-    client: "bigquery.Client",
+    client: "bigquery.Client", method: str = DEFAULT_SAMPLING_METHOD,
 ) -> list[dict]:
     """Picks `sample_size` segments uniformly at random FROM AMONG THOSE WHERE
     OSM, HERE, and Moove's inferred value do NOT all three agree (any pairwise
@@ -233,22 +299,7 @@ def sample_segments_weighted_by_length(
     of fork pre-exec") to multiply how often a concurrent credential/mTLS
     subprocess check races against gRPC's own background threads - one
     shared, reused client cuts that down by roughly the same factor."""
-    query = f"""
-        SELECT
-          * EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph) AS speed_limit_here_mph),
-          ST_Y(ST_CENTROID(geom)) AS centroid_lat,
-          ST_X(ST_CENTROID(geom)) AS centroid_lon,
-          ST_ASGEOJSON(geom) AS geom_geojson,
-          LN(RAND()) / GREATEST(ST_LENGTH(geom), 1.0) AS _sample_key
-        FROM `{project}.{dataset}.{table}`
-        WHERE functional_class < @fc_lt AND state = @state
-          AND NOT (
-            speed_limit_osm_mph = ROUND(speed_limit_here_mph)
-            AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph)
-          )
-        ORDER BY _sample_key DESC
-        LIMIT @sample_size
-    """
+    query = _sampling_sql(project, dataset, table, method, nationwide=state.upper() == NATIONWIDE)
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("fc_lt", "INT64", functional_class_lt),
         bigquery.ScalarQueryParameter("state", "STRING", state.upper()),
@@ -275,7 +326,7 @@ def _population_sql(project: str, dataset: str, table: str) -> str:
                   AND NOT (speed_limit_osm_mph = ROUND(speed_limit_here_mph)
                            AND ROUND(speed_limit_here_mph) = COALESCE(speed_limit_infer_mph_corrected, speed_limit_infer_mph))) AS disagree_count
         FROM `{project}.{dataset}.{table}`
-        WHERE functional_class < @fc_lt AND state = @state
+        WHERE functional_class < @fc_lt AND (@state = 'US' OR state = @state)
     """
 
 
@@ -356,6 +407,40 @@ def infer_overall_metrics(population: dict, stats: dict) -> dict:
             "rmse_mph": ((d * s["mse_mph2"]) ** 0.5) if s["mse_mph2"] is not None else None,
         }
     return out
+
+
+NATIONWIDE = "US"  # the "state" value that means every state (not a real USPS code, so it can't clash)
+
+
+def _segment_state(run_state: str, row: dict) -> Optional[str]:
+    """The state whose topology table a sampled segment belongs to: the run's own state, or - for a nationwide run - the
+    segment's own `state` column (None when a nationwide row lacks a usable one, so the caller skips the walk)."""
+    if run_state.upper() != NATIONWIDE:
+        return run_state.upper()
+    st = (row.get("state") or "").upper()
+    return st if STATE_RE.match(st) else None
+
+
+_STATE_TABLE_CACHE: dict[tuple, str] = {}
+
+
+def _lookup_table_for_segment(project: str, dataset: str, table: str, seg_state: Optional[str], run_state: str, *, client: "bigquery.Client") -> str:
+    """The details table to look neighbors/start rows up in. A nationwide run samples from `speed_limits_US_<Y>_<M>_details`,
+    but a by-id lookup there scans ~10 GB (every column, unclustered) while the state's own `speed_limits_<ST>_<Y>_<M>_details`
+    is ~40x smaller - so look up in the segment's state table when it exists (checked once per state via free table metadata),
+    else fall back to the table the run was given."""
+    if run_state.upper() != NATIONWIDE or not seg_state or not table.startswith("speed_limits_US_"):
+        return table
+    key = (project, dataset, table, seg_state)
+    if key not in _STATE_TABLE_CACHE:
+        candidate = "speed_limits_" + seg_state + table[len("speed_limits_US"):]
+        try:
+            _validate_identifier(candidate, TABLE_RE, "table")
+            client.get_table(f"{project}.{dataset}.{candidate}")
+            _STATE_TABLE_CACHE[key] = candidate
+        except Exception:  # noqa: BLE001 - missing/unreadable: keep using the nationwide table
+            _STATE_TABLE_CACHE[key] = table
+    return _STATE_TABLE_CACHE[key]
 
 
 def _maps_table_for_state(state: str) -> str:
@@ -646,7 +731,7 @@ def _process_sampled_segment(
 
     base_result = {
         "segment_id": seg_id,
-        "state": state.upper(),
+        "state": (sampled_row.get("state") or state).upper() if state.upper() == NATIONWIDE else state.upper(),
         "street_name": sampled_row.get("street_name"),
         "functional_class": sampled_row.get("functional_class"),
         "segment_geojson": sampled_row.get("geom_geojson"),
@@ -679,25 +764,27 @@ def _process_sampled_segment(
             "segments_tried": [seg_id], "status": "match_on_segment", "note": "",
         }
 
-    topo_by_id = _lookup_segment_topology(project, state, [seg_id], client=bq_client)
+    seg_state = _segment_state(state, sampled_row)   # nationwide runs walk in each segment's OWN state's topology
+    topo_by_id = _lookup_segment_topology(project, seg_state, [seg_id], client=bq_client) if seg_state else {}
     start_topo = topo_by_id.get(seg_id)
     segments_tried = [seg_id]
     if start_topo is None:
-        log(f"{tag}: no sign on the segment itself, and not found in maps.road_segments_{state.upper()} - cannot walk either direction.")
+        log(f"{tag}: no sign on the segment itself, and not found in maps.road_segments_{(seg_state or '?')} - cannot walk either direction.")
         directions = {d: _empty_direction_result("no topology row - could not walk", 0) for d in ("forward", "backward")}
     else:
         directions = {}
         flips = _travel_flips(start_topo.get("orientation_raw"))
-        start_row = (fetch_candidates_by_ids(project, dataset, table, [seg_id], client=bq_client).get(seg_id) or sampled_row)
+        walk_table = _lookup_table_for_segment(project, dataset, table, seg_state, state, client=bq_client)
+        start_row = (fetch_candidates_by_ids(project, dataset, walk_table, [seg_id], client=bq_client).get(seg_id) or sampled_row)
         for direction in ("forward", "backward"):
             chain = _walk_chain(
-                project, state, start_topo, max_walk_back, direction, client=bq_client,
-                dataset=dataset, table=table, start_row=start_row, travel_flip=flips[direction],
+                project, seg_state, start_topo, max_walk_back, direction, client=bq_client,
+                dataset=dataset, table=walk_table, start_row=start_row, travel_flip=flips[direction],
             )
             log(f"{tag} [{direction}]: {len(chain)} neighbor segment(s) to check"
                 + (f" ({', '.join(s['here_segment_id'] for s in chain)})" if chain else ""))
             directions[direction] = _walk_direction_for_sign(
-                chain, project=project, dataset=dataset, table=table, direction=direction, tag=tag,
+                chain, project=project, dataset=dataset, table=walk_table, direction=direction, tag=tag,
                 api_key=api_key, vision_client=vision_client, bq_client=bq_client, sample_out_root=sample_out_root,
                 walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
                 side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
@@ -1091,6 +1178,8 @@ def parse_args() -> argparse.Namespace:
                    help="Only sample segments with functional_class < this value, e.g. 3 - required unless --resume-from is given")
     p.add_argument("--sample-size", type=int, default=None,
                    help=f"How many segments to sample (hard ceiling: {MAX_SAMPLE_SIZE}) - required unless --resume-from is given")
+    p.add_argument("--sampling-method", choices=sorted(SAMPLING_METHODS), default=DEFAULT_SAMPLING_METHOD,
+                   help="; ".join(f"{k} = {v}" for k, v in SAMPLING_METHODS.items()) + " (the per-state ones only matter with --state US)")
     p.add_argument("--resume-from", default=None, type=Path,
                    help="Continue a prior run that was interrupted (Ctrl+C, a crash, or an external quota wall) "
                         "instead of starting over: point this at that prior run's own output directory (or its "
@@ -1174,7 +1263,7 @@ def load_checkpoint(path: Path) -> dict:
 def run_precision_sample(
     *, project: str = DEFAULT_PROJECT, dataset: str = DEFAULT_DATASET,
     table: Optional[str] = None, state: Optional[str] = None,
-    functional_class_lt: Optional[int] = None, sample_size: Optional[int] = None,
+    functional_class_lt: Optional[int] = None, sample_size: Optional[int] = None, sampling_method: str = DEFAULT_SAMPLING_METHOD,
     max_walk_back: int = DEFAULT_MAX_WALK_BACK, concurrency: int = DEFAULT_CONCURRENCY,
     tolerance_mph: float = 0.0,
     walk_segment: bool = False, walk_segment_spacing_m: float = 15.0,
@@ -1235,6 +1324,7 @@ def run_precision_sample(
         project, dataset, table = prior_config["project"], prior_config["dataset"], prior_config["table"]
         state, functional_class_lt = prior_config["state"], prior_config["functional_class_lt"]
         sample_size = prior_config["sample_size_requested"]
+        sampling_method = prior_config.get("sampling_method", DEFAULT_SAMPLING_METHOD)   # runs saved before the option were pooled + length-weighted (A1)
         max_walk_back, tolerance_mph, concurrency = prior_config["max_walk_back"], prior_config["tolerance_mph"], prior_config["concurrency"]
         walk_segment, walk_segment_spacing_m = prior_config["walk_segment"], prior_config["walk_segment_spacing_m"]
         side_mode, side_offset_m, auto_side_offset = prior_config["side_mode"], prior_config["side_offset_m"], prior_config["auto_side_offset"]
@@ -1281,7 +1371,7 @@ def run_precision_sample(
         try:
             sampled_rows = sample_segments_weighted_by_length(
                 project, dataset, table, state=state, functional_class_lt=functional_class_lt, sample_size=sample_size,
-                client=bq_client,
+                client=bq_client, method=sampling_method,
             )
         except Exception as e:
             raise SamplingError(f"Sampling query failed: {type(e).__name__}: {e}") from e
@@ -1298,7 +1388,7 @@ def run_precision_sample(
     config = {
         "project": project, "dataset": dataset, "table": table, "state": state.upper(),
         "functional_class_lt": functional_class_lt,
-        "sample_size_requested": sample_size, "sample_size_actual": len(sampled_rows),
+        "sample_size_requested": sample_size, "sample_size_actual": len(sampled_rows), "sampling_method": sampling_method,
         "max_walk_back": max_walk_back, "tolerance_mph": tolerance_mph, "concurrency": concurrency,
         "walk_segment": walk_segment, "walk_segment_spacing_m": walk_segment_spacing_m,
         "side_mode": side_mode, "side_offset_m": side_offset_m, "auto_side_offset": auto_side_offset,
@@ -1491,7 +1581,7 @@ def main() -> int:
     try:
         payload = run_precision_sample(
             project=args.project, dataset=args.dataset, table=args.table, state=args.state,
-            functional_class_lt=args.functional_class_lt, sample_size=args.sample_size,
+            functional_class_lt=args.functional_class_lt, sample_size=args.sample_size, sampling_method=args.sampling_method,
             max_walk_back=args.max_walk_back, concurrency=args.concurrency, tolerance_mph=args.tolerance_mph,
             walk_segment=args.walk_segment, walk_segment_spacing_m=args.walk_segment_spacing_m,
             side_mode=args.side_mode, side_offset_m=args.side_offset_m, auto_side_offset=args.auto_side_offset,
