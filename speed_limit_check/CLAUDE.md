@@ -701,6 +701,18 @@
   (sampled segment blue, matched segment orange dashed, camera dot + heading line), each opening a modal with
   the full annotated frame or a Leaflet/OSM map. The map's dot is the Street View CAMERA position, not a
   surveyed sign location (same caveat as `calc_out.signs.lat/lon`).
+- **Quality page: "Previous runs" and "Report from signs already analyzed"** - `GET /speed-limits/precision-sample/runs`
+  (`_list_precision_runs`) lists every saved precision-sample run (local `_job.json` files plus the GCS mirror,
+  newest first); "View results" re-renders it through the normal status route (the finished payload is in the
+  persisted record), "Open / resume" covers interrupted/paused ones. `POST /speed-limits/analyzed-signs-report`
+  (`road_signs_report.py`) builds the same precision/recall/RMSE tables and the Sign/Map observations table purely
+  from `calc_out.road_signs` (latest check per segment, filtered by `origin` sampled/traversed/both) joined to
+  `calc_out.signs` and the state's `_details` table - read-only SQL with implicit project refs, a dry-run cost
+  shown first and the usual $10 confirmation (`needs_confirmation` -> resend with `confirmed`), zero imagery or
+  Gemini spend. No "inferred overall" figures there on purpose: traversed segments and Evaluator candidates
+  are not a random sample. Direction labels are `both` / `dir_1 (<bearing>°)` / `dir_2 (<bearing>°)`.
+  `quality.html`'s `obsTableHtml(setKey, obs)` renders the observations table for both the precision results
+  and this report (an Origin column appears when rows carry one).
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

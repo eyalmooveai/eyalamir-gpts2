@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import datetime, timezone
 import os
 import re
 import threading
@@ -26,6 +27,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 
 import bq_writer
 import preflight
+import road_signs_report
 from batch_evaluator import (
     DAILY_COST_CAP_USD,
     MAX_SEGMENT_COUNT,
@@ -57,6 +59,9 @@ from find_bad_speed_limit import (
     _validate_identifier,
     fetch_candidates,
     gcs_cache_pull,
+    GCS_CACHE_PREFIX,
+    _gcs_bucket,
+    _gcs_object_key,
     gcs_cache_push,
     get_api_call_counts,
     load_keys_file,
@@ -726,6 +731,7 @@ def _new_precision_job(state: str, functional_class_lt: int, sample_size: int) -
             "error": None,
             "state": state, "functional_class_lt": functional_class_lt, "sample_size": sample_size,
             "message": "Starting...",
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "segments_done": 0, "segments_total": sample_size, "current_segment_id": None,
             "api_calls": {"streetview": 0, "vision": 0},
             "payload": None,
@@ -959,6 +965,70 @@ def speed_limits_precision_sample_start():
     )
     thread.start()
     return jsonify({"job_id": job_id}), 202
+
+
+def _list_precision_runs(limit: int = 20) -> list[dict]:
+    """Summaries (newest first) of every precision-sample run this app has a durable record of - this instance's disk
+    plus, when the GCS cache is configured, runs started by instances that no longer exist. Each carries what the
+    Previous runs list needs; the full results are fetched on demand through the normal status route."""
+    stamps: dict[str, float] = {}
+    if PRECISION_OUT_DIR.exists():
+        for p in PRECISION_OUT_DIR.glob("*/_job.json"):
+            stamps[p.parent.name] = p.stat().st_mtime
+    if GCS_CACHE_BUCKET:
+        try:
+            for blob in _gcs_bucket().list_blobs(prefix=_gcs_object_key(PRECISION_OUT_DIR) + "/"):
+                if blob.name.endswith("/_job.json"):
+                    stamps.setdefault(blob.name.rsplit("/", 2)[-2], blob.updated.timestamp() if blob.updated else 0.0)
+        except Exception as e:  # noqa: BLE001 - the local list is still useful
+            print(f"WARNING: could not list precision runs in GCS: {type(e).__name__}: {e}")
+    runs = []
+    for job_id in sorted(stamps, key=lambda j: stamps[j], reverse=True)[:limit]:
+        job = _get_precision_job(job_id)
+        if not job:
+            continue
+        runs.append({
+            "job_id": job_id, "status": job.get("status"), "state": job.get("state"),
+            "functional_class_lt": job.get("functional_class_lt"), "sample_size": job.get("sample_size"),
+            "segments_done": job.get("segments_done"), "segments_total": job.get("segments_total"),
+            "created_at": job.get("created_at") or datetime.fromtimestamp(stamps[job_id], timezone.utc).isoformat(),
+            "resumable": bool(job.get("resumable")),
+        })
+    return runs
+
+
+@app.route("/speed-limits/precision-sample/runs")
+def speed_limits_precision_sample_runs():
+    return jsonify({"runs": _list_precision_runs()})
+
+
+@app.route("/speed-limits/analyzed-signs-report", methods=["POST"])
+def speed_limits_analyzed_signs_report():
+    """A report from signs ALREADY recorded in calc_out.road_signs/signs - no Street View/Vision/Gemini spend (see
+    road_signs_report.py). Read-only BigQuery with a dry-run cost shown first; above the confirmation threshold it
+    returns needs_confirmation and waits for the same request with confirmed=true."""
+    data = request.get_json(silent=True) or {}
+    state = (data.get("state") or "").strip().upper()
+    origin = (data.get("origin") or "both").strip().lower()
+    try:
+        functional_class_lt = int(data.get("functional_class_lt"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "functional_class_lt must be an integer."}), 400
+    if not STATE_RE.match(state):
+        return jsonify({"error": "state must be a 2-letter code, e.g. CO."}), 400
+    try:
+        table = table_name(state, DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
+        report = road_signs_report.run_report(
+            DEFAULT_PROJECT, DEFAULT_DATASET, table, state=state, functional_class_lt=functional_class_lt,
+            origin=origin, confirmed=bool(data.get("confirmed")),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        if type(e).__name__ == "NotFound":
+            return jsonify({"error": "No analyzed signs are recorded yet (calc_out.road_signs / calc_out.signs don't exist) - run a precision sample, the Evaluator or the Sign Checker first."}), 404
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify(report)
 
 
 @app.route("/speed-limits/precision-sample/<job_id>/resume", methods=["POST"])

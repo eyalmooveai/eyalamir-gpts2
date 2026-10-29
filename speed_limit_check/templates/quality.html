@@ -41,6 +41,44 @@
 </div>
 
 <div class="card">
+  <span class="eyebrow">Precision sample</span>
+  <h2>Previous runs</h2>
+  <p class="section-intro">Every precision-sample run this app has saved. Open one to see its full results again, or resume one that was interrupted.</p>
+  <div id="precision-runs"><p style="color:var(--muted); font-size:0.85rem;">Loading...</p></div>
+</div>
+
+<div class="card">
+  <span class="eyebrow">Analyzed signs</span>
+  <h2>Report from signs already analyzed</h2>
+  <p class="section-intro">Builds the same precision / recall / RMSE report purely from signs already recorded in <code>calc_out.road_signs</code> and <code>calc_out.signs</code> - no new Street View, Vision or Gemini calls, only a read-only BigQuery query (its cost is shown). Each segment's latest check is used. <b>Origin</b> picks which checks count: <i>sampled</i> = the segment a run set out to check; <i>traversed</i> = a neighbor only reached while walking along the road for a sign. These are measurements on the analyzed signs themselves, not a random sample, so no overall inferred figures are given.</p>
+  <form onsubmit="return false;">
+    <div class="form-grid">
+      <div>
+        <label for="report-state">State</label>
+        <input type="text" id="report-state" maxlength="2" value="CO" style="text-transform:uppercase;">
+      </div>
+      <div>
+        <label for="report-fc">Functional class &lt;</label>
+        <input type="number" id="report-fc" value="3" min="0" max="8">
+      </div>
+      <div>
+        <label for="report-origin">Origin</label>
+        <select id="report-origin">
+          <option value="both">Sampled + traversed</option>
+          <option value="sampled">Sampled only</option>
+          <option value="traversed">Traversed only</option>
+        </select>
+      </div>
+      <div>
+        <button type="button" class="btn-secondary" id="report-run-btn" onclick="runAnalyzedReport(false)" style="margin-bottom:12px;">Build report</button>
+      </div>
+    </div>
+  </form>
+  <div id="report-status" style="color:var(--muted); font-size:0.85rem; margin-top:6px;"></div>
+  <div id="report-results" style="margin-top:12px;"></div>
+</div>
+
+<div class="card">
   <span class="eyebrow">Get started</span>
   <h3 style="margin:0 0 4px;">Filters</h3>
   <p class="section-intro">Pick a table and an inferred field, narrow it down if you like, then run the metrics below. Only Table and Inferred field usually need changing - everything else has a sensible default.</p>
@@ -276,6 +314,73 @@
     `;
   }
 
+  // ---- previous runs list ----
+  function loadPrecisionRuns() {
+    const el = document.getElementById('precision-runs');
+    if (!el) return;
+    fetch('/speed-limits/precision-sample/runs')
+      .then(r => r.json())
+      .then(data => {
+        const runs = data.runs || [];
+        if (!runs.length) { el.innerHTML = '<p style="color:var(--muted); font-size:0.85rem;">No saved runs yet.</p>'; return; }
+        const badge = s => `<span class="badge ${s === 'done' ? 'ok' : (s === 'running' ? '' : 'warn')}">${escapeHtml(s || '?')}</span>`;
+        el.innerHTML = `<table><thead><tr><th>Started</th><th>State</th><th>FC &lt;</th><th>Sample</th><th>Segments done</th><th>Status</th><th></th></tr></thead><tbody>`
+          + runs.map(r => `<tr><td>${escapeHtml(new Date(r.created_at).toLocaleString())}</td><td>${escapeHtml(r.state || '')}</td><td>${r.functional_class_lt ?? ''}</td>`
+            + `<td>${r.sample_size ?? ''}</td><td>${r.segments_done ?? 0}/${r.segments_total ?? '?'}</td><td>${badge(r.status)}</td>`
+            + `<td><a href="#" onclick="viewPrecisionRun('${r.job_id}'); return false;">${r.status === 'done' ? 'View results' : (r.resumable ? 'Open / resume' : 'Open')}</a></td></tr>`).join('')
+          + '</tbody></table>';
+      })
+      .catch(() => { el.innerHTML = '<p style="color:var(--muted); font-size:0.85rem;">Could not load the saved runs.</p>'; });
+  }
+
+  window.viewPrecisionRun = function (jobId) {
+    document.getElementById('precision-sample-results').style.display = 'none';
+    pollPrecisionSample(jobId);
+    document.getElementById('precision-sample-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  // ---- report from already-analyzed signs (no new imagery spend) ----
+  window.runAnalyzedReport = function (confirmed) {
+    const state = document.getElementById('report-state').value.trim().toUpperCase();
+    const fc = parseInt(document.getElementById('report-fc').value, 10);
+    const origin = document.getElementById('report-origin').value;
+    const status = document.getElementById('report-status'), out = document.getElementById('report-results'), btn = document.getElementById('report-run-btn');
+    if (!/^[A-Z]{2}$/.test(state) || !Number.isFinite(fc)) { status.textContent = 'State must be 2 letters and functional class a number.'; return; }
+    btn.disabled = true; out.innerHTML = ''; status.textContent = 'Checking the query cost, then reading the analyzed signs from BigQuery...';
+    fetch('/speed-limits/analyzed-signs-report', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({state, functional_class_lt: fc, origin, confirmed}),
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        btn.disabled = false;
+        if (!ok || data.error) { status.innerHTML = `<span class="badge err">Error</span> ${escapeHtml(data.error || 'unknown error')}`; return; }
+        if (data.needs_confirmation) {
+          status.innerHTML = `This query would read about ${data.estimate.gb.toFixed(2)} GB (about $${data.estimate.cost_usd.toFixed(2)}). `
+            + `<button type="button" class="btn-secondary" onclick="runAnalyzedReport(true)">Yes, run it</button>`;
+          return;
+        }
+        renderAnalyzedReport(data);
+      })
+      .catch(err => { btn.disabled = false; status.textContent = err.message; });
+  };
+
+  function renderAnalyzedReport(data) {
+    const s = data.summary, st = s.stats;
+    document.getElementById('report-status').textContent =
+      `BigQuery read: ${data.gb_billed.toFixed(3)} GB billed (about $${data.cost_usd_billed.toFixed(4)}). No imagery or Gemini calls were made.`;
+    const byOrigin = Object.entries(s.by_origin || {}).map(([k, v]) => `${escapeHtml(k)}: ${v.with_sign}/${v.checked} with a sign`).join(' &middot; ');
+    document.getElementById('report-results').innerHTML = `
+      <p style="margin:0 0 6px;">Segments checked: ${s.segments_checked} &middot; with a sign: ${s.segments_with_sign} (${pctOrNa(s.sign_find_rate)}) &middot; observations: ${s.observations}${byOrigin ? ' &middot; ' + byOrigin : ''}</p>
+      <table>
+        <thead><tr><th>Source</th><th>n</th><th title="Exact matches / observations where the source had a value">Precision (exact)</th><th title="Exact matches / ALL observations with a real sign (a missing value counts as a miss)">Recall</th><th title="Root mean squared error vs the real sign, mph">RMSE (mph)</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
+        <tbody>${sourceRowHtml('OSM', st.osm)}${sourceRowHtml('HERE', st.here)}${sourceRowHtml('Model', st.model)}</tbody>
+      </table>
+      ${obsTableHtml('r', data.observations || [])}`;
+  }
+
+  loadPrecisionRuns();
+
   // ---- sign snippet / map columns of the observations table ----
   function lineCoords(geojsonStr) {
     try {
@@ -316,16 +421,16 @@
   window.closeSignModal = closeSignModal;
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSignModal(); });
 
-  window.openSignImage = function (idx) {
-    const o = (window.__precisionObs || [])[idx];
+  window.openSignImage = function (setKey, idx) {
+    const o = ((window.__obsSets || {})[setKey] || [])[idx];
     if (!o) return;
     document.getElementById('sign-modal-title').textContent = `${o.segment_id} (${o.direction}) - the sign that was read: ${o.ground_truth_mph} mph`;
     document.getElementById('sign-modal-body').innerHTML = `<img src="${o.image_url || o.snippet_url}" alt="Street View frame with the sign outlined" style="max-width:100%; border-radius:6px;">`;
     document.getElementById('sign-modal').hidden = false;
   };
 
-  window.openSignMap = function (idx) {
-    const o = (window.__precisionObs || [])[idx];
+  window.openSignMap = function (setKey, idx) {
+    const o = ((window.__obsSets || {})[setKey] || [])[idx];
     if (!o) return;
     document.getElementById('sign-modal-title').textContent = `${o.segment_id} (${o.direction}) - where the sign was seen`;
     document.getElementById('sign-modal-body').innerHTML =
@@ -354,25 +459,41 @@
     setTimeout(() => m.invalidateSize(), 50);
   };
 
-  function renderPrecisionResults(jobId, payload) {
-    resetPrecisionSampleUi();
-    const stats = payload.stats;
-    const obs = payload.observations || [];
-    const obsRows = obs.map((o, idx) => {
+  // One observations table (segment-direction rows with the Sign and Map columns), shared by the precision results and
+  // the analyzed-signs report. `setKey` names which observation list the click handlers index into.
+  function obsTableHtml(setKey, obs) {
+    window.__obsSets = window.__obsSets || {};
+    window.__obsSets[setKey] = obs;
+    const showOrigin = obs.some(o => o.origin);
+    const rows = obs.map((o, idx) => {
       const modelMph = (o.speed_limit_infer_mph_corrected !== null && typeof o.speed_limit_infer_mph_corrected !== 'undefined')
         ? o.speed_limit_infer_mph_corrected : o.speed_limit_infer_mph;
-      const svUrl = (o.sign_lat !== null && o.sign_lon !== null) ? `https://www.google.com/maps?q=&layer=c&cbll=${o.sign_lat},${o.sign_lon}` : null;
+      const svUrl = (o.sign_lat !== null && typeof o.sign_lat !== 'undefined' && o.sign_lon !== null && typeof o.sign_lon !== 'undefined')
+        ? `https://www.google.com/maps?q=&layer=c&cbll=${o.sign_lat},${o.sign_lon}` : null;
       const segLabel = svUrl ? `<a href="${svUrl}" target="_blank" rel="noopener">${escapeHtml(o.segment_id)}</a>` : escapeHtml(o.segment_id);
       const snip = o.snippet_url
-        ? `<a href="#" onclick="openSignImage(${idx}); return false;" title="Click for the full image"><img src="${o.snippet_url}" alt="sign" class="sign-snippet" onerror="this.onerror=null; this.src='${o.image_url || ''}';"></a>`
+        ? `<a href="#" onclick="openSignImage('${setKey}', ${idx}); return false;" title="Click for the full image"><img src="${o.snippet_url}" alt="sign" class="sign-snippet" onerror="this.onerror=null; this.src='${o.image_url || ''}';"></a>`
         : '<span style="color:var(--muted)">n/a</span>';
       const mini = miniMapSvg(o);
-      const mapCell = mini ? `<a href="#" onclick="openSignMap(${idx}); return false;" title="Click for the interactive map">${mini}</a>` : '<span style="color:var(--muted)">n/a</span>';
-      return `<tr><td>${segLabel}</td><td>${escapeHtml(o.direction)}</td><td>${fmtMph(o.ground_truth_mph)}</td>`
+      const mapCell = mini ? `<a href="#" onclick="openSignMap('${setKey}', ${idx}); return false;" title="Click for the interactive map">${mini}</a>` : '<span style="color:var(--muted)">n/a</span>';
+      return `<tr><td>${segLabel}</td>${showOrigin ? `<td>${escapeHtml(o.origin || '')}</td>` : ''}<td>${escapeHtml(o.direction)}</td><td>${fmtMph(o.ground_truth_mph)}</td>`
         + `<td>${fmtMph(o.speed_limit_osm_mph)}</td><td>${fmtMph(o.speed_limit_here_mph)}</td><td>${fmtMph(modelMph)}</td>`
         + `<td>${snip}</td><td>${mapCell}</td></tr>`;
     }).join('');
-    window.__precisionObs = obs;
+    const cols = showOrigin ? 9 : 8;
+    return `<p style="margin:14px 0 6px;">Segment-direction observations (every source's value next to the real sign reading):</p>
+      <table>
+        <thead><tr><th>Segment</th>${showOrigin ? '<th title="sampled = the segment a run set out to check; traversed = a neighbor only reached while walking for a sign">Origin</th>' : ''}<th>Direction</th><th>Truth</th><th>OSM</th><th>HERE</th><th>Model</th><th>Sign</th><th>Map</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${cols}">No signs found.</td></tr>`}</tbody>
+      </table>`;
+  }
+
+  function renderPrecisionResults(jobId, payload) {
+    resetPrecisionSampleUi();
+    loadPrecisionRuns();
+    const stats = payload.stats;
+    const obs = payload.observations || [];
+    window.__obsSets = window.__obsSets || {};
 
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'block';
@@ -384,10 +505,7 @@
       </table>
       ${inferredPrecisionHtml(payload)}
       <p style="margin:14px 0 6px;">Segment-direction observations (every source's value next to the real sign reading):</p>
-      <table>
-        <thead><tr><th>Segment</th><th>Direction</th><th>Truth</th><th>OSM</th><th>HERE</th><th>Model</th><th>Sign</th><th>Map</th></tr></thead>
-        <tbody>${obsRows || '<tr><td colspan="8">No signs found in this sample.</td></tr>'}</tbody>
-      </table>
+      ${obsTableHtml('p', obs)}
       <p style="margin:14px 0 0;">
         <a href="/speed-limits/precision-sample/${jobId}/results.json">Download results.json</a> &middot;
         <a href="/speed-limits/precision-sample/${jobId}/results.csv">Download results.csv</a> &middot;
