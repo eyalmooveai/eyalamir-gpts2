@@ -13,26 +13,27 @@
   <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-end; gap:8px 16px;">
     <h3 style="margin:0;">RMSE vs. the real posted signs, and how much data each source has</h3>
     <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
-      <label for="rmse-method" style="margin:0; font-size:0.85rem;">Stats method</label>
-      <select id="rmse-method" style="max-width:340px;">
-        <option value="precision_inferred">Precision runs &mdash; inferred overall (default)</option>
-        <option value="precision_pooled">Precision runs &mdash; pooled disagreement sample</option>
-        <option value="analyzed">All analyzed signs (reads BigQuery)</option>
+      <label for="rmse-method" style="margin:0; font-size:0.85rem;" title="All options report the INFERRED overall RMSE (the sample RMSE is biased by how the sample is selected); this only chooses how several runs are combined">How runs are combined</label>
+      <select id="rmse-method" style="max-width:460px;">
+        <option value="precision_inferred">Inferred overall &mdash; all runs, weighted by observations (default)</option>
+        <option value="precision_inferred_latest">Inferred overall &mdash; newest run per state/class only</option>
+        <option value="precision_inferred_equal">Inferred overall &mdash; every run counts equally</option>
       </select>
       <button type="button" class="btn-secondary" id="rmse-update-btn" onclick="updateRmseGauges(false)">Update</button>
     </div>
   </div>
-  <div id="rmse-gauges" style="display:flex; flex-wrap:wrap; justify-content:space-around; align-items:flex-start; gap:18px 36px; margin-top:10px;"></div>
+  <div id="rmse-gauges" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(540px, 1fr)); justify-items:center; align-items:start; gap:18px 36px; margin-top:10px;"></div>
   <p id="rmse-note" style="color:var(--muted); font-size:0.8rem; margin:6px 0 0;"></p>
   <p id="rmse-status" style="font-size:0.85rem; margin:4px 0 0;"></p>
 </div>
 <script>
 (function () {
   const SRC = [['osm', 'OSM'], ['here', 'HERE'], ['model', 'Model']];
+  const INFERRED_NOTE = 'RMSE is the INFERRED overall figure, not the raw sample RMSE: the precision samples are drawn only from segments where OSM, HERE and Model disagree, so their plain RMSE is biased by how the sample was selected. Each run\'s RMSE on its sample is scaled by the share of its whole state/class that disagrees (segments where all three agree count as zero error). Coverage: segments with a value / all segments in those states and functional classes.';
   const METHOD_NOTES = {
-    precision_inferred: 'RMSE: every saved precision-sample run, scaled to its whole domain (assumes segments where OSM, HERE and Model already agree are right) and combined across runs by number of observations. Coverage: segments with a value / all segments in the runs\' states and functional classes.',
-    precision_pooled: 'RMSE: every saved precision-sample run pooled into one set of observations - the error on the DISAGREEING segments the samples draw from, so it reads worse than the overall figure. Coverage: share of those sign observations the source had a value for.',
-    analyzed: 'RMSE: every sign ever analyzed (calc_out.road_signs, latest check per segment: sampled + traversed + Evaluator / Sign Checker) pooled - not a random sample. Coverage: share of those observations the source had a value for.',
+    precision_inferred: INFERRED_NOTE + ' Runs are combined weighted by their number of observations.',
+    precision_inferred_latest: INFERRED_NOTE + ' Only the newest run of each state/functional class is used, weighted by its observations.',
+    precision_inferred_equal: INFERRED_NOTE + ' Every run counts the same, however large.',
   };
   let rmseZones = [{name: 'green', from: 0, to: 5}, {name: 'yellow', from: 5, to: 10}, {name: 'red', from: 10, to: 20}], rmseMax = 20;
   let covZones = [{name: 'red', from: 0, to: 80}, {name: 'yellow', from: 80, to: 95}, {name: 'green', from: 95, to: 100}], covMin = 80, polling = null;
@@ -67,8 +68,11 @@
       <line x1="${bx.toFixed(1)}" y1="${by.toFixed(1)}" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" stroke="#222" stroke-width="${cfg.big ? 3.5 : 7}" stroke-linecap="round"/>
       <circle cx="${cx}" cy="${cy}" r="${cfg.big ? 7 : 12}" fill="#222"/><circle cx="${cx}" cy="${cy}" r="${cfg.big ? 3 : 5}" fill="${col}"/>${inner}</svg>`;
   }
-  const BIG = 216, SMALL = 108;   // each small dial is half the height of the big one
-  // metric: 'rmse' | 'cov'. Returns the HTML of one big dial + the two small dials stacked to its right.
+  const BIG = 216, SMALL = 108;   // each small dial is half the height of the big one, so HERE + OSM stacked are exactly as tall as the Model dial
+  // HERE and OSM are only shown as a reference next to the Model: slightly greyed; a source under the coverage threshold is greyed out much more.
+  const REF_STYLE = 'filter:grayscale(0.4); opacity:0.82;';
+  const LOW_STYLE = 'filter:grayscale(0.9); opacity:0.42;';
+  // metric: 'rmse' | 'cov'. One big Model dial, with the HERE and OSM dials stacked to its right, tops and bottoms aligned.
   function cluster(title, metric, srcs) {
     const pick = k => srcs[k] || {};
     const cfgFor = (k, label, big) => {
@@ -79,29 +83,34 @@
       return {value: typeof s.coverage === 'number' ? s.coverage * 100 : null, max: 100, zones: covZones, tickStep: 20, size: big ? BIG : SMALL, big, fmt: v => v.toFixed(1) + '%', unit: 'coverage', aria: label + ' coverage'};
     };
     const low = k => typeof pick(k).coverage === 'number' && pick(k).coverage * 100 < covMin;   // under the coverage threshold
+    const sub = k => {
+      const s = pick(k);
+      if (metric === 'rmse') return s.n ? 'n = ' + Number(s.n).toLocaleString() : 'no data';
+      return s.of ? Number(s.have).toLocaleString() + ' of ' + Number(s.of).toLocaleString() : 'not calculated - press Update';
+    };
     const text = (k, label) => {
       const s = pick(k), v = metric === 'rmse' ? s.rmse_mph : (typeof s.coverage === 'number' ? s.coverage * 100 : null);
       const val = v === null || typeof v === 'undefined' ? 'n/a' : (metric === 'rmse' ? v.toFixed(2) + ' mph' : v.toFixed(1) + '%');
-      const sub = metric === 'rmse' ? (s.n ? 'n = ' + Number(s.n).toLocaleString() : 'no data')
-        : (s.of ? Number(s.have).toLocaleString() + ' of ' + Number(s.of).toLocaleString() : 'no data');
-      return `<div><div style="font-weight:700;">${label}</div><div style="font-size:1.15rem; font-weight:700;">${val}</div><div style="color:var(--muted); font-size:0.75rem;">${sub}</div></div>`;
+      return `<div style="min-width:112px;"><div style="font-weight:700;">${label}</div><div style="font-size:1.15rem; font-weight:700;">${val}</div><div style="color:var(--muted); font-size:0.75rem;">${sub(k)}</div></div>`;
     };
-    // small dial row: dial on the left, text on the right. RMSE dials of low-coverage sources are greyed; their coverage dials are boxed in red.
+    // A small row is exactly SMALL px tall: dial left, text right. RMSE of a low-coverage source is greyed out hard; its coverage dial gets the red box.
     const small = (k, label) => {
       const dim = metric === 'rmse' && low(k), alert = metric === 'cov' && low(k);
-      return `<div style="display:flex; align-items:center; gap:8px; ${dim ? 'opacity:0.5; filter:grayscale(0.8);' : ''} ${alert ? 'outline:2px solid #c62828; outline-offset:2px; border-radius:10px; background:rgba(198,40,40,0.08);' : ''}"
-        title="${dim ? label + ' has under ' + covMin + '% coverage, so its RMSE is greyed out' : (alert ? label + ' is under ' + covMin + '% coverage' : '')}">
-        ${dial(cfgFor(k, label, false))}${text(k, label)}${alert ? '<span class="badge err" style="font-size:0.7rem;">&lt; ' + covMin + '%</span>' : ''}</div>`;
+      const style = dim ? LOW_STYLE : REF_STYLE;
+      const box = alert ? 'outline:2px solid #c62828; outline-offset:-2px; border-radius:10px; background:rgba(198,40,40,0.08);' : '';
+      const tip = dim ? label + ' has under ' + covMin + '% coverage, so its RMSE is greyed out' : (alert ? label + ' is under ' + covMin + '% coverage' : label + ' (reference)');
+      return `<div style="display:flex; align-items:center; gap:8px; height:${SMALL + 2}px; ${box}" title="${tip}">
+        <div style="display:flex; align-items:center; gap:8px; ${alert ? '' : style}">${dial(cfgFor(k, label, false))}${text(k, label)}</div>${alert ? '<span class="badge err" style="font-size:0.7rem; margin-right:6px;">&lt; ' + covMin + '%</span>' : ''}</div>`;
     };
     const mAlert = metric === 'cov' && low('model'), mDim = metric === 'rmse' && low('model');
-    const big = `<div style="text-align:center; ${mDim ? 'opacity:0.5; filter:grayscale(0.8);' : ''} ${mAlert ? 'outline:2px solid #c62828; outline-offset:2px; border-radius:12px; background:rgba(198,40,40,0.08);' : ''}">
+    const big = `<div style="text-align:center; ${mDim ? LOW_STYLE : ''} ${mAlert ? 'outline:2px solid #c62828; outline-offset:2px; border-radius:12px; background:rgba(198,40,40,0.08);' : ''}">
         ${dial(cfgFor('model', 'Model', true))}
         <div style="font-weight:700; font-size:1.05rem;">Model</div>
-        <div style="color:var(--muted); font-size:0.78rem;">${metric === 'rmse' ? (pick('model').n ? 'n = ' + Number(pick('model').n).toLocaleString() + ' observations' : 'no data') : (pick('model').of ? Number(pick('model').have).toLocaleString() + ' of ' + Number(pick('model').of).toLocaleString() : 'no data')}</div>
+        <div style="color:var(--muted); font-size:0.78rem;">${sub('model')}</div>
       </div>`;
     return `<div><div style="font-weight:700; margin:0 0 4px; color:var(--muted); text-transform:uppercase; font-size:0.75rem; letter-spacing:0.04em;">${title}</div>
-      <div style="display:flex; align-items:center; gap:12px;">${big}
-        <div style="display:flex; flex-direction:column; justify-content:center; gap:0;">${small('here', 'HERE')}${small('osm', 'OSM')}</div></div></div>`;
+      <div style="display:flex; align-items:flex-start; gap:16px;">${big}
+        <div style="display:flex; flex-direction:column; width:290px;">${small('here', 'HERE')}${small('osm', 'OSM')}</div></div></div>`;
   }
   function render(data) {
     rmseZones = data.zones || rmseZones; rmseMax = data.max_mph || rmseMax;
@@ -113,8 +122,8 @@
     if (e) {
       bits.push('Calculated ' + new Date(e.calculated_at).toLocaleString()
         + (e.runs != null ? ' from ' + e.runs + ' run(s)' : '') + (e.observations ? ', ' + Number(e.observations).toLocaleString() + ' sign observations' : '')
-        + (e.gb_billed != null ? ' (BigQuery read: ' + e.gb_billed.toFixed(3) + ' GB billed)' : '')
-        + '. Saved, so it is here after a restart; press Update to recalculate. A source under ' + covMin + '% coverage has its RMSE greyed out and its coverage dial boxed in red.');
+        + (e.skipped_runs ? '; ' + e.skipped_runs + ' older run(s) skipped because they have no domain split saved (open them under Previous runs and press "Calculate missing values")' : '')
+        + '. Saved, so it is here after a restart; press Update to recalculate. HERE and OSM are shown a little greyed as a reference for the Model; a source under ' + covMin + '% coverage is greyed out much more and its coverage dial is boxed in red.');
       if (e.sources && !SRC.some(([k]) => e.sources[k] && e.sources[k].of)) bits.push('(This saved result predates the coverage dials - press Update to add them.)');
     } else {
       bits.push('Not calculated yet for this method.');
@@ -132,10 +141,7 @@
         render(data);
         const job = data.job || {};
         if (job.status === 'running') { watch(); return; }
-        if (!data.entry && auto) {
-          if (method === 'analyzed') setStatus('Not calculated yet - this method reads BigQuery, so press <b>Update</b> (the cost is shown first).');
-          else window.updateRmseGauges(false);   // free: only reads saved run files
-        }
+        if (!data.entry && auto) window.updateRmseGauges(false);   // free: only reads saved run files
       })
       .catch(err => setStatus(esc(err.message)));
   }
@@ -150,9 +156,7 @@
         document.getElementById('rmse-update-btn').disabled = false;
         render(data);
         if (job.status === 'error') setStatus('<span class="badge err">Error</span> ' + esc(job.error || ''));
-        else if (job.status === 'needs_confirmation' && job.estimate) {
-          setStatus('This would read about ' + job.estimate.gb.toFixed(2) + ' GB (about $' + job.estimate.cost_usd.toFixed(2) + '). <button type="button" class="btn-secondary" onclick="updateRmseGauges(true)">Yes, run it</button>');
-        } else setStatus('');
+        else setStatus('');
       }).catch(() => {});
     }, 1200);
   }

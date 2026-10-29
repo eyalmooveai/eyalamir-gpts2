@@ -1069,34 +1069,29 @@ def _iter_precision_payloads():
             yield job["payload"]
 
 
-def _run_rmse_job(method: str, confirmed: bool) -> None:
-    """Background thread for the RMSE gauges' "Update": recomputes ONE stats method and rewrites its cache entry
-    (rmse_gauges.py). Local methods read stored run files; "analyzed" is one read-only BigQuery query with the usual
-    dry-run cost + $10 confirmation."""
+def _run_rmse_job(method: str) -> None:
+    """Background thread for the RMSE gauges' "Update": recomputes ONE combining method (inferred-overall RMSE from the saved
+    precision-sample runs - rmse_gauges.py) and rewrites its cache entry. Reads local/GCS run files only, no BigQuery."""
     def finish(**kw):
         with RMSE_JOB_LOCK:
             RMSE_JOB.update(kw)
     try:
-        if method == "analyzed":
-            table = table_name("US", DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
-            finish(message="Reading every analyzed sign from BigQuery (cost estimated first)...")
-            entry = rmse_gauges.compute_analyzed(
-                lambda confirmed: road_signs_report.run_report(
-                    DEFAULT_PROJECT, DEFAULT_DATASET, table, state="US", functional_class_lt=9, origin="both", confirmed=confirmed),
-                confirmed=confirmed,
-            )
-            if entry.get("needs_confirmation"):
-                finish(status="needs_confirmation", estimate=entry["estimate"], message="")
-                return
-        else:
-            finish(message="Reading the saved precision-sample runs...")
-            entry = rmse_gauges.compute_precision(_iter_precision_payloads(), method)
+        finish(message="Reading the saved precision-sample runs...")
+        payloads = list(_iter_precision_payloads())
+        known = rmse_gauges.load_cache(RMSE_GAUGE_CACHE).get("domain_counts", {})
+        missing = rmse_gauges.domains_missing_counts(payloads, known)
+        if missing:   # runs saved before per-source counts existed: one small read-only COUNT per state/class, once, then cached
+            from bq_sql_console import BQ_ON_DEMAND_PRICE_PER_TIB_USD, COST_CONFIRMATION_THRESHOLD_USD
+            finish(message=f"Counting how many segments each source has a value for ({len(missing)} state/class domain(s), read-only BigQuery)...")
+            fetched, _ = rmse_gauges.fetch_domain_counts(
+                missing, max_cost_usd=COST_CONFIRMATION_THRESHOLD_USD, price_per_tib=BQ_ON_DEMAND_PRICE_PER_TIB_USD)
+            rmse_gauges.save_domain_counts(RMSE_GAUGE_CACHE, fetched)
+            known = {**known, **fetched}
+        entry = rmse_gauges.compute_precision(payloads, method, domain_counts=known)
         rmse_gauges.save_entry(RMSE_GAUGE_CACHE, method, entry)
         finish(status="idle", message="", error=None, estimate=None)
     except Exception as e:  # noqa: BLE001
-        msg = ("No analyzed signs are recorded yet (calc_out.road_signs / calc_out.signs don't exist)."
-               if type(e).__name__ == "NotFound" else f"{type(e).__name__}: {e}")
-        finish(status="error", error=msg, message="")
+        finish(status="error", error=f"{type(e).__name__}: {e}", message="")
 
 
 @app.route("/speed-limits/rmse-gauges")
@@ -1120,7 +1115,7 @@ def speed_limits_rmse_gauges_recalculate():
         if RMSE_JOB["status"] == "running":
             return jsonify({"already_running": True, "job": dict(RMSE_JOB)}), 202
         RMSE_JOB.update(status="running", method=method, message="Starting...", error=None, estimate=None)
-    threading.Thread(target=_run_rmse_job, args=(method, bool(data.get("confirmed"))), daemon=True).start()
+    threading.Thread(target=_run_rmse_job, args=(method,), daemon=True).start()
     return jsonify({"started": True}), 202
 
 

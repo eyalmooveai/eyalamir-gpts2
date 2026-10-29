@@ -771,20 +771,24 @@
   form picks ids first, then reads full rows for just those). Stored as `config["sampling_method"]`; a resumed run uses the checkpoint's
   (old checkpoints without one = A1). The "Inferred overall" population fractions are segment COUNTS regardless of method, so they match
   a B1 sample exactly and are only an approximation for A (length-weighted) and 2 (state-balanced) samples.
-- **RMSE pressure gauges at the top of the Quality page** (`rmse_gauges.py`, card `#rmse-card` in `quality.html`) - three SVG dials (OSM / HERE /
-  Model; 240-degree sweep, needle, green 0-5 / yellow 5-10 / red 10-20 mph, `ZONES`/`GAUGE_MAX_MPH`) of each source's RMSE over everything
-  measured so far. A "Stats method" select picks how: `precision_inferred` (default; each saved precision run's inferred-overall RMSE,
-  combined weighted by observations), `precision_pooled` (all runs' observations pooled - error on the disagreeing segments) or `analyzed`
-  (every sign in calc_out.road_signs via `road_signs_report.run_report`, state US, one read-only BigQuery query with the dry-run cost and
-  $10 confirmation). Values are cached per method in `output/_rmse_gauges/gauges.json` (GCS-mirrored via gcs_cache_push/pull) so a restart shows
-  them instantly; `GET /speed-limits/rmse-gauges?method=` only reads that cache; `POST /speed-limits/rmse-gauges/recalculate` ("Update") runs one
-  method in a background thread (`_run_rmse_job`, status in `RMSE_JOB`). The free methods auto-calculate the first time they have no cache; `analyzed`
-  waits for a click. `Dockerfile`'s COPY line needs `rmse_gauges.py`.
+- **RMSE pressure gauges at the top of the Quality page** (`rmse_gauges.py`, card `#rmse-card` in `quality.html`) - SVG dials (OSM / HERE /
+  Model; 240-degree sweep, needle, green 0-5 / yellow 5-10 / red 10-20 mph, `ZONES`/`GAUGE_MAX_MPH`) of each source's INFERRED OVERALL RMSE,
+  never the raw sample RMSE: the precision samples are drawn only from disagreeing segments (and weighted/balanced per the sampling method), so
+  their plain RMSE is biased by the selection; the inferred figure scales a run's sample MSE by its domain's disagree share (`sqrt(d * MSE)`, agreeing
+  segments = 0 error). The "How runs are combined" select only picks how several runs' inferred figures are merged: `precision_inferred` (default,
+  weighted by observations), `precision_inferred_latest` (newest run per table/state/class), `precision_inferred_equal` (each run equal). Runs
+  without a saved domain split can't be inferred and are skipped (count shown). Biased sample-only and non-random "analyzed signs" variants were
+  removed on purpose. Free: reads saved run files only (no BigQuery). Values are cached per method in `output/_rmse_gauges/gauges.json` (GCS-mirrored via gcs_cache_push/pull) so a restart shows
+  them instantly; `GET /speed-limits/rmse-gauges?method=` only reads that cache; `POST /speed-limits/rmse-gauges/recalculate` ("Update") recomputes one
+  method in a background thread (`_run_rmse_job`, status in `RMSE_JOB`); a method with no cache auto-calculates on first view. `Dockerfile`'s COPY line needs `rmse_gauges.py`.
+  Coverage needs each run's domain counts; runs saved before they existed get them looked up ONCE by "Update" (`domains_missing_counts` /
+  `fetch_domain_counts`: the run's own read-only population COUNT, ~1 GB per state/class, free dry run first, refuses above $10) and remembered under
+  `domain_counts` in the gauges cache. HERE and OSM dials are drawn slightly greyed as a reference for the Model (`REF_STYLE`), and a source under
+  the coverage threshold much more (`LOW_STYLE`); the small dials stack exactly as tall as the Model dial so the group lines up.
   Layout: a left cluster of RMSE dials (big Model dial; HERE above OSM to its right, each half the Model dial's height) and a matching right
   cluster of COVERAGE dials (0-100 %, higher is better so red < 80 / yellow 80-95 / green > 95, `COVERAGE_ZONES`/`COVERAGE_MIN_PCT`). Coverage per
-  entry source = `coverage`/`have`/`of`: for `precision_inferred` segments with a value / all segments, summed over each distinct (table, state,
-  functional class) domain once (newest run, so repeats don't double count; runs saved before the counts existed are skipped); for
-  `precision_pooled` and `analyzed` the share of sign observations the source had a value for. A source under 80 % coverage gets its RMSE dial greyed
+  entry source = `coverage`/`have`/`of`: segments with a value / all segments, summed over each distinct (table, state, functional class)
+  domain once (newest run, so repeats don't double count; runs saved before the counts existed are skipped). A source under 80 % coverage gets its RMSE dial greyed
   and its coverage dial boxed in red with a "< 80%" badge. Saved results from before this lack coverage until "Update" is pressed.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
