@@ -740,14 +740,15 @@
   mean/median |error|. A new metric column needs an explicit mode there.
 - **Precision section layout (quality.html)** - "Previous runs" lives INSIDE the precision-sample card (form -> "Or open a
   previous run" list -> results), not a separate card, so it's clear they're one workflow. The open run is highlighted
-  in the list ("Showing"), and the results/interrupted views start with a bar naming the run (`reportBarHtml`) with a
-  "Close report" button (`closePrecisionReport`: hides the report, forgets the remembered job, un-highlights the row).
+  in the list ("Showing"), and clicking that "Showing" link a second time closes the report (`viewPrecisionRun` toggles ->
+  `closePrecisionReport`: hides the report, forgets the remembered job, un-highlights the row). There is deliberately no separate
+  banner/Close button - the highlighted row is the indicator.
   The stats tables are titled "Sample of Disagreements" and "Inferred overall"; columns are "Precision (exact match)",
   "Recall (exact match)" and "Have Data" (was `n`: how many observations that source had a value for; larger, bold, green
   marker on the highest, ties all marked).
 - **Coverage and the two view filters (precision report)** - `population_agreement_counts` (one query, same columns/bytes as before)
   now also returns `total_count` (all segments in state + functional class) and `osm_count`/`here_count`/`model_count` (segments each
-  source has a value for). The "Inferred overall" table shows them as "Have Data" and "% Coverage" (count / total_count). Above the
+  source has a value for). Both tables show "Have Data" as `count (pct)` in one cell: sample table = observations with a value / all sign observations; Inferred overall = segments with a value / total_count ("% coverage"). Above the
   tables: a "grey out sources with coverage below N %" input (greys the source's row in BOTH tables and makes it ineligible for
   the green best-value marker) and an "only roads where OSM, HERE and Model all have data" checkbox (keeps only observations with
   all three values; the sample table's stats and the inferred metrics are recomputed in JS - `jsSourceStats`/`jsInferredMetrics`,

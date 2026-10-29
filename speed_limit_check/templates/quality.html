@@ -252,7 +252,7 @@
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'block';
     window.__openRunId = jobId; loadPrecisionRuns();
-    el.innerHTML = reportBarHtml(jobId, 'Run not finished') + `<span class="badge warn">${job.status === 'error' ? 'Error' : (job.status === 'paused' ? 'Paused' : 'Interrupted')}</span>`
+    el.innerHTML = `<span class="badge warn">${job.status === 'error' ? 'Error' : (job.status === 'paused' ? 'Paused' : 'Interrupted')}</span>`
       + `<pre class="log">${escapeHtml(job.error || 'The run stopped before finishing.')}</pre>`
       + `<p style="color:var(--muted); font-size:0.85rem;">${job.segments_done || 0}/${job.segments_total || '?'} segments were finished.</p>`
       + (job.resumable ? `<button type="button" class="btn-secondary" onclick="resumePrecisionSample('${jobId}')">Resume this run</button>` : '');
@@ -365,8 +365,8 @@
     const best = cols.map(c => bestSet(rows.map((_, r) => val(r, c.key)), c.mode));
     const bestN = bestSet(rows.map((_, r) => val(r, 'n_compared')), 'max');
     return `<table>
-      <thead><tr><th>Source</th><th title="How many real-sign observations this source had a value for - the denominator of its precision">Have Data<br><span class="dir-hint">&uarr; more is better</span></th>${cols.map(c => dirHeader(c.label, c.mode, c.title)).join('')}</tr></thead>
-      <tbody>${rows.map(([label, key, s], r) => `<tr${dim[key] ? DIM_STYLE : ''}><td>${label}</td><td style="font-size:1.1rem;">${bestMark('<b>' + s.n_compared + '</b>', bestN.has(r))}</td>`
+      <thead><tr><th>Source</th><th title="How many real-sign observations this source had a value for (and what share of all the sign observations that is) - the denominator of its precision">Have Data<br><span class="dir-hint">&uarr; more is better</span></th>${cols.map(c => dirHeader(c.label, c.mode, c.title)).join('')}</tr></thead>
+      <tbody>${rows.map(([label, key, s], r) => `<tr${dim[key] ? DIM_STYLE : ''}><td>${label}</td><td style="font-size:1.1rem;">${bestMark('<b>' + s.n_compared + '</b>' + (s.n_observations ? ` <span style="font-size:0.85rem; font-weight:normal;">(${(s.n_compared / s.n_observations * 100).toFixed(0)}%)</span>` : ''), bestN.has(r))}</td>`
         + cols.map((c, ci) => `<td>${bestMark(c.fmt(s[c.key]), best[ci].has(r))}</td>`).join('') + '</tr>').join('')}</tbody>
     </table>`;
   }
@@ -395,8 +395,7 @@
     const rows = keys.map((key, i) => {
       const label = key === 'osm' ? 'OSM' : key === 'here' ? 'HERE' : 'Model';
       return `<tr${dim[key] ? DIM_STYLE : ''}><td>${label}</td>`
-        + `<td style="font-size:1.1rem;">${hasCov ? bestMark('<b>' + have[i] + '</b>', bh.has(i)) : 'n/a'}</td>`
-        + `<td>${hasCov ? bestMark(pctOrNa(cov[i]), bc.has(i)) : 'n/a'}</td>`
+        + `<td style="font-size:1.1rem;">${hasCov ? bestMark('<b>' + have[i].toLocaleString() + '</b> <span style="font-size:0.85rem; font-weight:normal;">(' + (cov[i] * 100).toFixed(1) + '% coverage)</span>', bh.has(i) || bc.has(i)) : 'n/a'}</td>`
         + `<td>${bestMark(isNum(prec[i]) ? (prec[i] * 100).toFixed(1) + '%' : 'n/a', bp.has(i))}</td>`
         + `<td>${bestMark(pctOrNa(rec[i]), br.has(i))}</td><td>${bestMark(fmt2(rm[i]), bm.has(i))}</td></tr>`;
     }).join('');
@@ -406,29 +405,20 @@
       <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain${hasCov ? `: ${pop.total_count} segment(s) in ${escapeHtml((payload.config || {}).state || '')} with functional class &lt; ${(payload.config || {}).functional_class_lt}; ` : ': '}${total} with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded from the inferred figures.</p>
       ${hasCov ? '' : '<p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Per-source counts and coverage were not saved with this run - use &ldquo;Calculate missing values&rdquo; above to fill them in.</p>'}
       <table>
-        <thead><tr><th>Source</th><th title="Segments in the domain (state + functional class) for which this source has a value">Have Data<br><span class="dir-hint">&uarr; more is better</span></th><th title="Have Data / all segments in the domain">% Coverage<br><span class="dir-hint">&uarr; higher is better</span></th>${dirHeader('Inferred precision', 'max', 'Share of the whole domain the source gets right, assuming agreement means correct')}${dirHeader('Inferred recall', 'max', 'agree% + disagree% x recall on the disagreeing sample')}${dirHeader('Inferred RMSE (mph)', 'min', 'sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error')}</tr></thead>
+        <thead><tr><th>Source</th><th title="Segments in the domain (state + functional class) for which this source has a value, and that as a % of all segments in the domain (coverage)">Have Data (% coverage)<br><span class="dir-hint">&uarr; more is better</span></th>${dirHeader('Inferred precision', 'max', 'Share of the whole domain the source gets right, assuming agreement means correct')}${dirHeader('Inferred recall', 'max', 'agree% + disagree% x recall on the disagreeing sample')}${dirHeader('Inferred RMSE (mph)', 'min', 'sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error')}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
   }
 
-  // ---- closing the open report, and the bar that says which run it is ----
+  // ---- closing the open report (a second click on the "Showing" row link does this) ----
   window.closePrecisionReport = function () {
     window.__openRunId = null;
     rememberPrecisionJob(null);
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'none'; el.innerHTML = '';
     loadPrecisionRuns();
-    document.getElementById('precision-sample-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
-  function reportBarHtml(jobId, label) {
-    const r = (window.__precisionRuns || []).find(x => x.job_id === jobId);
-    const when = r ? `${escapeHtml(r.state || '')} &middot; FC &lt; ${r.functional_class_lt ?? ''} &middot; sample ${r.sample_size ?? ''} &middot; started ${escapeHtml(new Date(r.created_at).toLocaleString())}` : escapeHtml(jobId);
-    return `<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin:0 0 12px; padding:8px 12px; border-radius:6px; background:rgba(0,181,173,0.12);">
-      <span><b>${label}</b> &middot; ${when}</span>
-      <button type="button" class="btn-secondary" onclick="closePrecisionReport()">&#10005; Close report</button></div>`;
-  }
-
   // ---- previous runs list ----
   function loadPrecisionRuns() {
     const el = document.getElementById('precision-runs');
@@ -443,7 +433,7 @@
         el.innerHTML = `<table><thead><tr><th>Started</th><th>State</th><th>FC &lt;</th><th>Sample</th><th>Segments done</th><th>Status</th><th></th></tr></thead><tbody>`
           + runs.map(r => `<tr${r.job_id === window.__openRunId ? ' style="background:rgba(0,181,173,0.12);"' : ''}><td>${escapeHtml(new Date(r.created_at).toLocaleString())}</td><td>${escapeHtml(r.state || '')}</td><td>${r.functional_class_lt ?? ''}</td>`
             + `<td>${r.sample_size ?? ''}</td><td>${r.segments_done ?? 0}/${r.segments_total ?? '?'}</td><td>${badge(r.status)}</td>`
-            + `<td><a href="#" onclick="viewPrecisionRun('${r.job_id}'); return false;">${r.job_id === window.__openRunId ? '<b>Showing &#9654;</b>' : (r.status === 'done' ? 'View results' : (r.resumable ? 'Open / resume' : 'Open'))}</a></td></tr>`).join('')
+            + `<td><a href="#" onclick="viewPrecisionRun('${r.job_id}'); return false;">${r.job_id === window.__openRunId ? '<b title="Click again to close this report">Showing &#9654;</b>' : (r.status === 'done' ? 'View results' : (r.resumable ? 'Open / resume' : 'Open'))}</a></td></tr>`).join('')
           + '</tbody></table>';
       })
       .catch(() => { el.innerHTML = '<p style="color:var(--muted); font-size:0.85rem;">Could not load the saved runs.</p>'; });
@@ -484,6 +474,7 @@
   }
 
   window.viewPrecisionRun = function (jobId) {
+    if (jobId === window.__openRunId) { closePrecisionReport(); return; }   // clicking "Showing" again closes the report
     document.getElementById('precision-sample-results').style.display = 'none';
     pollPrecisionSample(jobId);
     document.getElementById('precision-sample-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -655,7 +646,6 @@
     el.style.display = 'block';
     window.__openRunId = jobId; loadPrecisionRuns();
     el.innerHTML = `
-      ${reportBarHtml(jobId, 'Results')}
       ${recalcHtml}
       <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; sign observations: ${obs.length}${obs.length > stats.segments_with_any_sign ? ' <span style="color:var(--muted);" title="A segment whose two driving directions each had their own sign gives two observations (one per direction), so observations can exceed segments.">(a segment with a sign in each direction counts once per direction)</span>' : ''} &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
       <div style="display:flex; flex-wrap:wrap; gap:8px 24px; align-items:center; margin:8px 0 4px; padding:8px 12px; border:1px solid var(--border, #ddd); border-radius:6px;">
