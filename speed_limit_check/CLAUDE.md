@@ -721,6 +721,11 @@
   SELECT on the run's own `config.table`, dry-run cost checked first, usual $10 confirmation) and camera
   headings (best-effort SELECT on `calc_out.signs.image_gcs_path`). Runs in a background thread; the result is
   stored back into the durable job record and `results.json`; progress/outcome is `job["recalc"]`.
+- **Metric tables mark direction and the best value** - `quality.html`'s `sourceStatsTableHtml(stats)` (precision results
+  and the analyzed-signs report) and the inferred-overall table put "↑ higher is better" / "↓ lower is better" under each
+  metric header (`dirHeader`) and a green dot + bold on the best value of each column (`bestSet`/`bestMark`; ties are
+  all marked, n/a is ignored). Higher is better: precision, recall, within-tolerance; lower is better: RMSE and
+  mean/median |error|. A new metric column needs an explicit mode there.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

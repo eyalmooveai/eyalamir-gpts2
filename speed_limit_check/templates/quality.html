@@ -280,13 +280,39 @@
       .catch(err => setTimeout(() => pollPrecisionSample(jobId), 3000));
   }
 
-  function sourceRowHtml(label, s) {
-    const rmse = (v) => (v === null || typeof v === 'undefined') ? 'n/a' : v.toFixed(2);
-    return `<tr><td>${label}</td><td>${s.n_compared}</td><td>${pctOrNa(s.exact_match_rate)}</td>`
-      + `<td>${pctOrNa(s.recall)}</td><td>${rmse(s.rmse_mph)}</td>`
-      + `<td>${pctOrNa(s.within_tolerance_rate)}</td>`
-      + `<td>${s.mean_abs_error_mph !== null ? s.mean_abs_error_mph.toFixed(2) : 'n/a'}</td>`
-      + `<td>${s.median_abs_error_mph !== null ? s.median_abs_error_mph.toFixed(2) : 'n/a'}</td></tr>`;
+  // ---- "higher/lower is better" headers and a green marker on the best value of each column ----
+  const isNum = v => v !== null && typeof v !== 'undefined' && !Number.isNaN(v);
+  function bestSet(values, mode) {
+    const valid = values.map((v, i) => [v, i]).filter(([v]) => isNum(v));
+    if (!valid.length) return new Set();
+    const best = mode === 'max' ? Math.max(...valid.map(x => x[0])) : Math.min(...valid.map(x => x[0]));
+    return new Set(valid.filter(([v]) => Math.abs(v - best) < 1e-9).map(x => x[1]));   // ties are all marked
+  }
+  function bestMark(text, isBest) {
+    return isBest ? `<span class="best-cell"><span class="best-dot" title="Best in this column">&#9679;</span> ${text}</span>` : text;
+  }
+  function dirHeader(label, mode, title) {
+    return `<th title="${title}">${label}<br><span class="dir-hint">${mode === 'max' ? '&uarr; higher is better' : '&darr; lower is better'}</span></th>`;
+  }
+  const fmt2 = v => isNum(v) ? v.toFixed(2) : 'n/a';
+
+  // The per-source stats table shared by the precision results and the analyzed-signs report.
+  function sourceStatsTableHtml(stats) {
+    const rows = [['OSM', stats.osm], ['HERE', stats.here], ['Model', stats.model]];
+    const cols = [
+      { key: 'exact_match_rate', mode: 'max', label: 'Precision (exact)', title: 'Exact matches / observations where the source had a value', fmt: pctOrNa },
+      { key: 'recall', mode: 'max', label: 'Recall', title: 'Exact matches / ALL observations with a real sign (a missing value counts as a miss)', fmt: pctOrNa },
+      { key: 'rmse_mph', mode: 'min', label: 'RMSE (mph)', title: 'Root mean squared error vs the real sign, mph', fmt: fmt2 },
+      { key: 'within_tolerance_rate', mode: 'max', label: 'Within tol.', title: 'Share of comparisons within the tolerance (mph) of the real sign', fmt: pctOrNa },
+      { key: 'mean_abs_error_mph', mode: 'min', label: 'Mean |err|', title: 'Mean absolute error vs the real sign, mph', fmt: fmt2 },
+      { key: 'median_abs_error_mph', mode: 'min', label: 'Median |err|', title: 'Median absolute error vs the real sign, mph', fmt: fmt2 },
+    ];
+    const best = cols.map(c => bestSet(rows.map(([, s]) => s[c.key]), c.mode));
+    return `<table>
+      <thead><tr><th>Source</th><th>n</th>${cols.map(c => dirHeader(c.label, c.mode, c.title)).join('')}</tr></thead>
+      <tbody>${rows.map(([label, s], r) => `<tr><td>${label}</td><td>${s.n_compared}</td>`
+        + cols.map((c, ci) => `<td>${bestMark(c.fmt(s[c.key]), best[ci].has(r))}</td>`).join('') + '</tr>').join('')}</tbody>
+    </table>`;
   }
 
   function inferredPrecisionHtml(payload) {
@@ -297,18 +323,21 @@
     if (!pop || !inferred) return '';
     const total = pop.agree_count + pop.disagree_count;
     const agreePct = total ? (pop.agree_count / total * 100).toFixed(1) : 'n/a';
-    const rows = ['osm', 'here', 'model'].map(key => {
+    const keys = ['osm', 'here', 'model'];
+    const prec = keys.map(k => inferred[k]);
+    const rec = keys.map(k => ((payload.inferred_metrics || {})[k] || {}).recall);
+    const rm = keys.map(k => ((payload.inferred_metrics || {})[k] || {}).rmse_mph);
+    const bp = bestSet(prec, 'max'), br = bestSet(rec, 'max'), bm = bestSet(rm, 'min');
+    const rows = keys.map((key, i) => {
       const label = key === 'osm' ? 'OSM' : key === 'here' ? 'HERE' : 'Model';
-      const val = inferred[key];
-      const m = (payload.inferred_metrics || {})[key] || {};
-      return `<tr><td>${label}</td><td>${val !== null ? (val * 100).toFixed(1) + '%' : 'n/a'}</td>`
-        + `<td>${pctOrNa(m.recall)}</td><td>${(m.rmse_mph === null || typeof m.rmse_mph === 'undefined') ? 'n/a' : m.rmse_mph.toFixed(2)}</td></tr>`;
+      return `<tr><td>${label}</td><td>${bestMark(isNum(prec[i]) ? (prec[i] * 100).toFixed(1) + '%' : 'n/a', bp.has(i))}</td>`
+        + `<td>${bestMark(pctOrNa(rec[i]), br.has(i))}</td><td>${bestMark(fmt2(rm[i]), bm.has(i))}</td></tr>`;
     }).join('');
     return `
       <p style="margin:14px 0 6px;">Inferred overall precision (assumes a segment where OSM/HERE/Model already agree is in fact correct - see <code>precision_sample.py</code>'s module docstring):</p>
       <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain: ${total} segment(s) with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded.</p>
       <table>
-        <thead><tr><th>Source</th><th>Inferred precision</th><th title="agree% + disagree% x recall on the disagreeing sample">Inferred recall</th><th title="sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error">Inferred RMSE (mph)</th></tr></thead>
+        <thead><tr><th>Source</th>${dirHeader('Inferred precision', 'max', 'Share of the whole domain the source gets right, assuming agreement means correct')}${dirHeader('Inferred recall', 'max', 'agree% + disagree% x recall on the disagreeing sample')}${dirHeader('Inferred RMSE (mph)', 'min', 'sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error')}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
@@ -406,10 +435,7 @@
     const byOrigin = Object.entries(s.by_origin || {}).map(([k, v]) => `${escapeHtml(k)}: ${v.with_sign}/${v.checked} with a sign`).join(' &middot; ');
     document.getElementById('report-results').innerHTML = `
       <p style="margin:0 0 6px;">Segments checked: ${s.segments_checked} &middot; with a sign: ${s.segments_with_sign} (${pctOrNa(s.sign_find_rate)}) &middot; observations: ${s.observations}${byOrigin ? ' &middot; ' + byOrigin : ''}</p>
-      <table>
-        <thead><tr><th>Source</th><th>n</th><th title="Exact matches / observations where the source had a value">Precision (exact)</th><th title="Exact matches / ALL observations with a real sign (a missing value counts as a miss)">Recall</th><th title="Root mean squared error vs the real sign, mph">RMSE (mph)</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
-        <tbody>${sourceRowHtml('OSM', st.osm)}${sourceRowHtml('HERE', st.here)}${sourceRowHtml('Model', st.model)}</tbody>
-      </table>
+      ${sourceStatsTableHtml(st)}
       ${obsTableHtml('r', data.observations || [])}`;
   }
 
@@ -542,10 +568,7 @@
     el.innerHTML = `
       ${recalcHtml}
       <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
-      <table>
-        <thead><tr><th>Source</th><th>n</th><th title="Exact matches / observations where the source had a value">Precision (exact)</th><th title="Exact matches / ALL observations with a real sign (a missing value counts as a miss)">Recall</th><th title="Root mean squared error vs the real sign, mph">RMSE (mph)</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
-        <tbody>${sourceRowHtml('OSM', stats.osm)}${sourceRowHtml('HERE', stats.here)}${sourceRowHtml('Model', stats.model)}</tbody>
-      </table>
+      ${sourceStatsTableHtml(stats)}
       ${inferredPrecisionHtml(payload)}
       ${obsTableHtml('p', obs)}
       <p style="margin:14px 0 0;">
@@ -595,6 +618,9 @@
 <style>
   .sign-snippet { height: 48px; width: auto; max-width: 90px; border-radius: 4px; border: 1px solid var(--border, #ddd); display: block; }
   .sign-minimap { background: #f7f7f7; border: 1px solid var(--border, #ddd); border-radius: 4px; display: block; }
+  .best-cell { font-weight: 600; }
+  .best-dot { color: #2f9e44; }
+  .dir-hint { font-weight: 400; font-size: 0.72rem; color: var(--muted); }
 </style>
 <div id="sign-modal" class="modal-overlay" hidden onclick="if (event.target === this) closeSignModal()">
   <div class="lightbox-inner">
