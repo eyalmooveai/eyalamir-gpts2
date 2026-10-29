@@ -8,6 +8,134 @@
 {% block subtitle %}How much can we trust the inferred speed limit? Nationwide metrics vs. OSM, HERE, and observed speeds.{% endblock %}
 {% block content %}
 
+<div class="card" id="rmse-card">
+  <span class="eyebrow">Accuracy at a glance</span>
+  <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-end; gap:8px 16px;">
+    <h3 style="margin:0;">RMSE vs. the real posted signs <span style="font-weight:normal; color:var(--muted); font-size:0.9rem;">(mph &mdash; lower is better)</span></h3>
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+      <label for="rmse-method" style="margin:0; font-size:0.85rem;">Stats method</label>
+      <select id="rmse-method" style="max-width:340px;">
+        <option value="precision_inferred">Precision runs &mdash; inferred overall (default)</option>
+        <option value="precision_pooled">Precision runs &mdash; pooled disagreement sample</option>
+        <option value="analyzed">All analyzed signs (reads BigQuery)</option>
+      </select>
+      <button type="button" class="btn-secondary" id="rmse-update-btn" onclick="updateRmseGauges(false)">Update</button>
+    </div>
+  </div>
+  <div id="rmse-gauges" style="display:flex; flex-wrap:wrap; justify-content:space-around; gap:12px; margin-top:8px;"></div>
+  <p id="rmse-note" style="color:var(--muted); font-size:0.8rem; margin:4px 0 0;"></p>
+  <p id="rmse-status" style="font-size:0.85rem; margin:4px 0 0;"></p>
+</div>
+<script>
+(function () {
+  const SRC = [['osm', 'OSM'], ['here', 'HERE'], ['model', 'Model']];
+  const METHOD_NOTES = {
+    precision_inferred: 'Every saved precision-sample run, scaled to its whole domain (assumes segments where OSM, HERE and Model already agree are right), combined across runs by number of observations.',
+    precision_pooled: 'Every saved precision-sample run pooled into one set of observations - the error on the DISAGREEING segments the samples draw from, so it reads worse than the overall figure.',
+    analyzed: 'Every sign ever analyzed (calc_out.road_signs, latest check per segment: sampled + traversed + Evaluator / Sign Checker) pooled. Not a random sample.',
+  };
+  let zones = [{name: 'green', from: 0, to: 5}, {name: 'yellow', from: 5, to: 10}, {name: 'red', from: 10, to: 20}], maxMph = 20, polling = null;
+  const ZONE_COLOR = {green: '#1d8a4a', yellow: '#e0a800', red: '#c62828'};
+  const SWEEP = 240, START = -120;   // degrees from straight up; 240-degree dial like a pressure gauge
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const pt = (cx, cy, r, deg) => [cx + r * Math.sin(deg * Math.PI / 180), cy - r * Math.cos(deg * Math.PI / 180)];
+  const angleFor = v => START + SWEEP * Math.max(0, Math.min(1, v / maxMph));
+  function arc(cx, cy, r, a1, a2) {
+    const [x1, y1] = pt(cx, cy, r, a1), [x2, y2] = pt(cx, cy, r, a2);
+    return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${a2 - a1 > 180 ? 1 : 0} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
+  }
+  function zoneOf(v) { return (zones.find(z => v < z.to) || zones[zones.length - 1]).name; }
+  function gaugeSvg(label, s) {
+    const cx = 100, cy = 100, r = 74, v = s && typeof s.rmse_mph === 'number' ? s.rmse_mph : null;
+    const arcs = zones.map(z => `<path d="${arc(cx, cy, r, angleFor(z.from), angleFor(z.to))}" fill="none" stroke="${ZONE_COLOR[z.name]}" stroke-width="16"/>`).join('');
+    let ticks = '';
+    for (let m = 0; m <= maxMph + 1e-9; m += 5) {
+      const a = angleFor(m), [x1, y1] = pt(cx, cy, r + 10, a), [x2, y2] = pt(cx, cy, r - 12, a), [tx, ty] = pt(cx, cy, r - 24, a);
+      ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="currentColor" stroke-width="1.5" opacity="0.55"/>`
+        + `<text x="${tx.toFixed(1)}" y="${(ty + 3).toFixed(1)}" text-anchor="middle" font-size="9" fill="currentColor" opacity="0.7">${m}</text>`;
+    }
+    const a = v === null ? START : angleFor(v), [nx, ny] = pt(cx, cy, r - 8, a), [bx, by] = pt(cx, cy, -12, a);
+    const needleColor = v === null ? '#8a8a8a' : ZONE_COLOR[zoneOf(v)];
+    return `<div style="text-align:center; min-width:190px;">
+      <svg viewBox="0 0 200 198" width="220" role="img" aria-label="${esc(label)} RMSE ${v === null ? 'not available' : v.toFixed(2) + ' mph'}">
+        <circle cx="${cx}" cy="${cy}" r="94" fill="none" stroke="currentColor" opacity="0.15" stroke-width="2"/>
+        ${arcs}${ticks}
+        <line x1="${bx.toFixed(1)}" y1="${by.toFixed(1)}" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" stroke="#222" stroke-width="3.5" stroke-linecap="round"/>
+        <circle cx="${cx}" cy="${cy}" r="7" fill="#222"/><circle cx="${cx}" cy="${cy}" r="3" fill="${needleColor}"/>
+        <text x="${cx}" y="152" text-anchor="middle" font-size="22" font-weight="700" fill="${v === null ? '#8a8a8a' : ZONE_COLOR[zoneOf(v)]}">${v === null ? 'n/a' : v.toFixed(2)}</text>
+        <text x="${cx}" y="166" text-anchor="middle" font-size="9" fill="currentColor" opacity="0.7">mph RMSE</text>
+      </svg>
+      <div style="font-weight:700; font-size:1.05rem;">${esc(label)}</div>
+      <div style="color:var(--muted); font-size:0.78rem;">${s && s.n ? 'n = ' + Number(s.n).toLocaleString() + ' observations' : 'no data'}</div>
+    </div>`;
+  }
+  function render(data) {
+    zones = data.zones || zones; maxMph = data.max_mph || maxMph;
+    const e = data.entry, srcs = (e && e.sources) || {};
+    document.getElementById('rmse-gauges').innerHTML = SRC.map(([k, label]) => gaugeSvg(label, srcs[k])).join('');
+    const bits = [METHOD_NOTES[data.method] || ''];
+    if (e) {
+      bits.push('Calculated ' + new Date(e.calculated_at).toLocaleString()
+        + (e.runs != null ? ' from ' + e.runs + ' run(s)' : '') + (e.observations ? ', ' + Number(e.observations).toLocaleString() + ' sign observations' : '')
+        + (e.gb_billed != null ? ' (BigQuery read: ' + e.gb_billed.toFixed(3) + ' GB billed)' : '') + '. Saved, so it is here after a restart; press Update to recalculate.');
+    } else {
+      bits.push('Not calculated yet for this method.');
+    }
+    document.getElementById('rmse-note').textContent = bits.join(' ');
+  }
+  function setStatus(html) { document.getElementById('rmse-status').innerHTML = html; }
+  function currentMethod() { return document.getElementById('rmse-method').value; }
+  function load(auto) {
+    const method = currentMethod();
+    fetch('/speed-limits/rmse-gauges?method=' + encodeURIComponent(method))
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { setStatus('<span class="badge err">Error</span> ' + esc(data.error)); return; }
+        render(data);
+        const job = data.job || {};
+        if (job.status === 'running') { watch(); return; }
+        if (!data.entry && auto) {
+          if (method === 'analyzed') setStatus('Not calculated yet - this method reads BigQuery, so press <b>Update</b> (the cost is shown first).');
+          else window.updateRmseGauges(false);   // free: only reads saved run files
+        }
+      })
+      .catch(err => setStatus(esc(err.message)));
+  }
+  function watch() {
+    document.getElementById('rmse-update-btn').disabled = true;
+    if (polling) return;
+    polling = setInterval(() => {
+      fetch('/speed-limits/rmse-gauges?method=' + encodeURIComponent(currentMethod())).then(r => r.json()).then(data => {
+        const job = data.job || {};
+        if (job.status === 'running') { setStatus(esc(job.message || 'Working...')); return; }
+        clearInterval(polling); polling = null;
+        document.getElementById('rmse-update-btn').disabled = false;
+        render(data);
+        if (job.status === 'error') setStatus('<span class="badge err">Error</span> ' + esc(job.error || ''));
+        else if (job.status === 'needs_confirmation' && job.estimate) {
+          setStatus('This would read about ' + job.estimate.gb.toFixed(2) + ' GB (about $' + job.estimate.cost_usd.toFixed(2) + '). <button type="button" class="btn-secondary" onclick="updateRmseGauges(true)">Yes, run it</button>');
+        } else setStatus('');
+      }).catch(() => {});
+    }, 1200);
+  }
+  window.updateRmseGauges = function (confirmed) {
+    setStatus('Updating...');
+    document.getElementById('rmse-update-btn').disabled = true;
+    fetch('/speed-limits/rmse-gauges/recalculate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({method: currentMethod(), confirmed})})
+      .then(r => r.json().then(d => ({ok: r.ok, d})))
+      .then(({ok, d}) => {
+        if (!ok || d.error) { document.getElementById('rmse-update-btn').disabled = false; setStatus('<span class="badge err">Error</span> ' + esc(d.error || 'failed')); return; }
+        watch();
+      })
+      .catch(err => { document.getElementById('rmse-update-btn').disabled = false; setStatus(esc(err.message)); });
+  };
+  const sel = document.getElementById('rmse-method');
+  try { const saved = localStorage.getItem('archimedes-rmse-method'); if (saved && sel.querySelector('option[value="' + saved + '"]')) sel.value = saved; } catch (e) {}
+  sel.addEventListener('change', () => { try { localStorage.setItem('archimedes-rmse-method', sel.value); } catch (e) {} setStatus(''); load(true); });
+  load(true);
+})();
+</script>
+
 <div class="card">
   <span class="eyebrow">Precision sample (pilot)</span>
   <h3 style="margin:0 0 4px;">How often do OSM, HERE, and our model match the real posted sign?</h3>

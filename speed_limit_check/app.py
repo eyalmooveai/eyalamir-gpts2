@@ -28,6 +28,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 import bq_writer
 import precision_recalc
 import preflight
+import rmse_gauges
 import road_signs_report
 from batch_evaluator import (
     DAILY_COST_CAP_USD,
@@ -1051,6 +1052,76 @@ def speed_limits_precision_sample_recalculate(job_id):
         _persist_precision_job(job_id, PRECISION_JOBS[job_id])
     threading.Thread(target=_run_precision_recalc, args=(job_id,), daemon=True).start()
     return jsonify({"job_id": job_id, "estimate": estimate}), 202
+
+
+RMSE_GAUGE_CACHE = OUT_DIR / "_rmse_gauges" / "gauges.json"
+RMSE_JOB: dict = {"status": "idle", "method": None, "message": "", "error": None, "estimate": None}
+RMSE_JOB_LOCK = threading.Lock()
+
+
+def _iter_precision_payloads():
+    """The stored payload of every finished precision-sample run (local disk + GCS mirror)."""
+    for r in _list_precision_runs(limit=1000):
+        if r.get("status") != "done":
+            continue
+        job = _get_precision_job(r["job_id"])
+        if job and job.get("payload"):
+            yield job["payload"]
+
+
+def _run_rmse_job(method: str, confirmed: bool) -> None:
+    """Background thread for the RMSE gauges' "Update": recomputes ONE stats method and rewrites its cache entry
+    (rmse_gauges.py). Local methods read stored run files; "analyzed" is one read-only BigQuery query with the usual
+    dry-run cost + $10 confirmation."""
+    def finish(**kw):
+        with RMSE_JOB_LOCK:
+            RMSE_JOB.update(kw)
+    try:
+        if method == "analyzed":
+            table = table_name("US", DEFAULT_QUALITY_YEAR, DEFAULT_QUALITY_MONTH)
+            finish(message="Reading every analyzed sign from BigQuery (cost estimated first)...")
+            entry = rmse_gauges.compute_analyzed(
+                lambda confirmed: road_signs_report.run_report(
+                    DEFAULT_PROJECT, DEFAULT_DATASET, table, state="US", functional_class_lt=9, origin="both", confirmed=confirmed),
+                confirmed=confirmed,
+            )
+            if entry.get("needs_confirmation"):
+                finish(status="needs_confirmation", estimate=entry["estimate"], message="")
+                return
+        else:
+            finish(message="Reading the saved precision-sample runs...")
+            entry = rmse_gauges.compute_precision(_iter_precision_payloads(), method)
+        rmse_gauges.save_entry(RMSE_GAUGE_CACHE, method, entry)
+        finish(status="idle", message="", error=None, estimate=None)
+    except Exception as e:  # noqa: BLE001
+        msg = ("No analyzed signs are recorded yet (calc_out.road_signs / calc_out.signs don't exist)."
+               if type(e).__name__ == "NotFound" else f"{type(e).__name__}: {e}")
+        finish(status="error", error=msg, message="")
+
+
+@app.route("/speed-limits/rmse-gauges")
+def speed_limits_rmse_gauges():
+    """The cached RMSE gauge values for one stats method (no BigQuery, no recomputation) plus the current update job."""
+    method = request.args.get("method") or rmse_gauges.DEFAULT_METHOD
+    if method not in rmse_gauges.METHODS:
+        return jsonify({"error": f"method must be one of {', '.join(rmse_gauges.METHODS)}."}), 400
+    with RMSE_JOB_LOCK:
+        job = dict(RMSE_JOB)
+    return jsonify({**rmse_gauges.payload_for_ui(rmse_gauges.load_cache(RMSE_GAUGE_CACHE), method), "job": job})
+
+
+@app.route("/speed-limits/rmse-gauges/recalculate", methods=["POST"])
+def speed_limits_rmse_gauges_recalculate():
+    data = request.get_json(silent=True) or {}
+    method = data.get("method") or rmse_gauges.DEFAULT_METHOD
+    if method not in rmse_gauges.METHODS:
+        return jsonify({"error": f"method must be one of {', '.join(rmse_gauges.METHODS)}."}), 400
+    with RMSE_JOB_LOCK:
+        if RMSE_JOB["status"] == "running":
+            return jsonify({"already_running": True, "job": dict(RMSE_JOB)}), 202
+        RMSE_JOB.update(status="running", method=method, message="Starting...", error=None, estimate=None)
+    threading.Thread(target=_run_rmse_job, args=(method, bool(data.get("confirmed"))), daemon=True).start()
+    return jsonify({"started": True}), 202
 
 
 @app.route("/speed-limits/precision-sample/runs")

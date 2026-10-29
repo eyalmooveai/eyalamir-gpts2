@@ -771,6 +771,15 @@
   form picks ids first, then reads full rows for just those). Stored as `config["sampling_method"]`; a resumed run uses the checkpoint's
   (old checkpoints without one = A1). The "Inferred overall" population fractions are segment COUNTS regardless of method, so they match
   a B1 sample exactly and are only an approximation for A (length-weighted) and 2 (state-balanced) samples.
+- **RMSE pressure gauges at the top of the Quality page** (`rmse_gauges.py`, card `#rmse-card` in `quality.html`) - three SVG dials (OSM / HERE /
+  Model; 240-degree sweep, needle, green 0-5 / yellow 5-10 / red 10-20 mph, `ZONES`/`GAUGE_MAX_MPH`) of each source's RMSE over everything
+  measured so far. A "Stats method" select picks how: `precision_inferred` (default; each saved precision run's inferred-overall RMSE,
+  combined weighted by observations), `precision_pooled` (all runs' observations pooled - error on the disagreeing segments) or `analyzed`
+  (every sign in calc_out.road_signs via `road_signs_report.run_report`, state US, one read-only BigQuery query with the dry-run cost and
+  $10 confirmation). Values are cached per method in `output/_rmse_gauges/gauges.json` (GCS-mirrored via gcs_cache_push/pull) so a restart shows
+  them instantly; `GET /speed-limits/rmse-gauges?method=` only reads that cache; `POST /speed-limits/rmse-gauges/recalculate` ("Update") runs one
+  method in a background thread (`_run_rmse_job`, status in `RMSE_JOB`). The free methods auto-calculate the first time they have no cache; `analyzed`
+  waits for a click. `Dockerfile`'s COPY line needs `rmse_gauges.py`.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -
