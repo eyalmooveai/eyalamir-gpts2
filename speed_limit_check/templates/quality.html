@@ -243,7 +243,9 @@
   }
 
   function sourceRowHtml(label, s) {
+    const rmse = (v) => (v === null || typeof v === 'undefined') ? 'n/a' : v.toFixed(2);
     return `<tr><td>${label}</td><td>${s.n_compared}</td><td>${pctOrNa(s.exact_match_rate)}</td>`
+      + `<td>${pctOrNa(s.recall)}</td><td>${rmse(s.rmse_mph)}</td>`
       + `<td>${pctOrNa(s.within_tolerance_rate)}</td>`
       + `<td>${s.mean_abs_error_mph !== null ? s.mean_abs_error_mph.toFixed(2) : 'n/a'}</td>`
       + `<td>${s.median_abs_error_mph !== null ? s.median_abs_error_mph.toFixed(2) : 'n/a'}</td></tr>`;
@@ -260,44 +262,131 @@
     const rows = ['osm', 'here', 'model'].map(key => {
       const label = key === 'osm' ? 'OSM' : key === 'here' ? 'HERE' : 'Model';
       const val = inferred[key];
-      return `<tr><td>${label}</td><td>${val !== null ? (val * 100).toFixed(1) + '%' : 'n/a'}</td></tr>`;
+      const m = (payload.inferred_metrics || {})[key] || {};
+      return `<tr><td>${label}</td><td>${val !== null ? (val * 100).toFixed(1) + '%' : 'n/a'}</td>`
+        + `<td>${pctOrNa(m.recall)}</td><td>${(m.rmse_mph === null || typeof m.rmse_mph === 'undefined') ? 'n/a' : m.rmse_mph.toFixed(2)}</td></tr>`;
     }).join('');
     return `
       <p style="margin:14px 0 6px;">Inferred overall precision (assumes a segment where OSM/HERE/Model already agree is in fact correct - see <code>precision_sample.py</code>'s module docstring):</p>
       <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain: ${total} segment(s) with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded.</p>
       <table>
-        <thead><tr><th>Source</th><th>Inferred precision</th></tr></thead>
+        <thead><tr><th>Source</th><th>Inferred precision</th><th title="agree% + disagree% x recall on the disagreeing sample">Inferred recall</th><th title="sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error">Inferred RMSE (mph)</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
   }
 
+  // ---- sign snippet / map columns of the observations table ----
+  function lineCoords(geojsonStr) {
+    try {
+      const g = typeof geojsonStr === 'string' ? JSON.parse(geojsonStr) : geojsonStr;
+      return (g && g.coordinates) ? g.coordinates : [];   // [[lon, lat], ...]
+    } catch (e) { return []; }
+  }
+
+  function miniMapSvg(o) {
+    const own = lineCoords(o.segment_geojson), hit = lineCoords(o.matched_segment_geojson);
+    const hasSign = o.sign_lat !== null && typeof o.sign_lat !== 'undefined' && o.sign_lon !== null && typeof o.sign_lon !== 'undefined';
+    const pts = own.concat(hit);
+    if (hasSign) pts.push([o.sign_lon, o.sign_lat]);
+    if (pts.length < 2) return '';
+    const lat0 = pts.reduce((a, p) => a + p[1], 0) / pts.length, k = Math.cos(lat0 * Math.PI / 180);
+    const xs = pts.map(p => p[0] * k), ys = pts.map(p => p[1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const W = 96, H = 64, pad = 6, span = Math.max(maxX - minX, maxY - minY, 1e-9);
+    const sx = p => pad + ((p[0] * k - minX) / span) * (W - 2 * pad), sy = p => H - pad - ((p[1] - minY) / span) * (H - 2 * pad);
+    const path = (c, style) => c.length > 1 ? `<polyline points="${c.map(p => sx(p).toFixed(1) + ',' + sy(p).toFixed(1)).join(' ')}" fill="none" ${style}/>` : '';
+    const same = JSON.stringify(own) === JSON.stringify(hit);
+    let svg = `<svg class="sign-minimap" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`
+      + path(own, 'stroke="#2b6cb0" stroke-width="3" stroke-linecap="round"')
+      + (same ? '' : path(hit, 'stroke="#dd6b20" stroke-width="3" stroke-dasharray="4 3" stroke-linecap="round"'));
+    if (hasSign) {
+      const cx = sx([o.sign_lon, o.sign_lat]), cy = sy([o.sign_lon, o.sign_lat]);
+      if (o.sign_heading !== null && typeof o.sign_heading !== 'undefined') {
+        const a = o.sign_heading * Math.PI / 180;
+        svg += `<line x1="${cx.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${(cx + 14 * Math.sin(a)).toFixed(1)}" y2="${(cy - 14 * Math.cos(a)).toFixed(1)}" stroke="#c53030" stroke-width="1.5"/>`;
+      }
+      svg += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4" fill="#c53030" stroke="#fff" stroke-width="1"/>`;
+    }
+    return svg + '</svg>';
+  }
+
+  let signModalMap = null;
+  function closeSignModal() { document.getElementById('sign-modal').hidden = true; }
+  window.closeSignModal = closeSignModal;
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSignModal(); });
+
+  window.openSignImage = function (idx) {
+    const o = (window.__precisionObs || [])[idx];
+    if (!o) return;
+    document.getElementById('sign-modal-title').textContent = `${o.segment_id} (${o.direction}) - the sign that was read: ${o.ground_truth_mph} mph`;
+    document.getElementById('sign-modal-body').innerHTML = `<img src="${o.image_url || o.snippet_url}" alt="Street View frame with the sign outlined" style="max-width:100%; border-radius:6px;">`;
+    document.getElementById('sign-modal').hidden = false;
+  };
+
+  window.openSignMap = function (idx) {
+    const o = (window.__precisionObs || [])[idx];
+    if (!o) return;
+    document.getElementById('sign-modal-title').textContent = `${o.segment_id} (${o.direction}) - where the sign was seen`;
+    document.getElementById('sign-modal-body').innerHTML =
+      '<div id="sign-modal-map" style="height:480px; border-radius:6px;"></div>'
+      + '<p style="color:#ccc; font-size:0.78rem; margin:8px 0 0;">Blue: the sampled segment. Orange dashed: the segment the sign was found on (when it differs). Red dot: the Street View camera position that saw the sign (not a surveyed sign location); the red line is the direction the camera faced.</p>';
+    document.getElementById('sign-modal').hidden = false;
+    if (signModalMap) { signModalMap.remove(); signModalMap = null; }
+    const m = L.map('sign-modal-map', { scrollWheelZoom: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(m);
+    const bounds = [];
+    const draw = (c, style) => { const ll = c.map(p => [p[1], p[0]]); if (ll.length > 1) { L.polyline(ll, style).addTo(m); bounds.push(...ll); } };
+    const own = lineCoords(o.segment_geojson), hit = lineCoords(o.matched_segment_geojson);
+    draw(own, { color: '#2b6cb0', weight: 5 });
+    if (JSON.stringify(own) !== JSON.stringify(hit)) draw(hit, { color: '#dd6b20', weight: 5, dashArray: '8 6' });
+    if (o.sign_lat !== null && typeof o.sign_lat !== 'undefined') {
+      const p = [o.sign_lat, o.sign_lon];
+      L.circleMarker(p, { radius: 7, color: '#fff', weight: 2, fillColor: '#c53030', fillOpacity: 1 }).addTo(m).bindPopup(`${o.ground_truth_mph} mph sign (camera position)`);
+      if (o.sign_heading !== null && typeof o.sign_heading !== 'undefined') {
+        const a = o.sign_heading * Math.PI / 180, d = 25, dLat = d * Math.cos(a) / 111320, dLon = d * Math.sin(a) / (111320 * Math.cos(o.sign_lat * Math.PI / 180));
+        L.polyline([p, [o.sign_lat + dLat, o.sign_lon + dLon]], { color: '#c53030', weight: 3 }).addTo(m);
+      }
+      bounds.push(p);
+    }
+    if (bounds.length) m.fitBounds(bounds, { padding: [30, 30], maxZoom: 19 }); else m.setView([39.5, -105.5], 7);
+    signModalMap = m;
+    setTimeout(() => m.invalidateSize(), 50);
+  };
+
   function renderPrecisionResults(jobId, payload) {
     resetPrecisionSampleUi();
     const stats = payload.stats;
     const obs = payload.observations || [];
-    const obsRows = obs.map(o => {
+    const obsRows = obs.map((o, idx) => {
       const modelMph = (o.speed_limit_infer_mph_corrected !== null && typeof o.speed_limit_infer_mph_corrected !== 'undefined')
         ? o.speed_limit_infer_mph_corrected : o.speed_limit_infer_mph;
       const svUrl = (o.sign_lat !== null && o.sign_lon !== null) ? `https://www.google.com/maps?q=&layer=c&cbll=${o.sign_lat},${o.sign_lon}` : null;
       const segLabel = svUrl ? `<a href="${svUrl}" target="_blank" rel="noopener">${escapeHtml(o.segment_id)}</a>` : escapeHtml(o.segment_id);
+      const snip = o.snippet_url
+        ? `<a href="#" onclick="openSignImage(${idx}); return false;" title="Click for the full image"><img src="${o.snippet_url}" alt="sign" class="sign-snippet" onerror="this.onerror=null; this.src='${o.image_url || ''}';"></a>`
+        : '<span style="color:var(--muted)">n/a</span>';
+      const mini = miniMapSvg(o);
+      const mapCell = mini ? `<a href="#" onclick="openSignMap(${idx}); return false;" title="Click for the interactive map">${mini}</a>` : '<span style="color:var(--muted)">n/a</span>';
       return `<tr><td>${segLabel}</td><td>${escapeHtml(o.direction)}</td><td>${fmtMph(o.ground_truth_mph)}</td>`
-        + `<td>${fmtMph(o.speed_limit_osm_mph)}</td><td>${fmtMph(o.speed_limit_here_mph)}</td><td>${fmtMph(modelMph)}</td></tr>`;
+        + `<td>${fmtMph(o.speed_limit_osm_mph)}</td><td>${fmtMph(o.speed_limit_here_mph)}</td><td>${fmtMph(modelMph)}</td>`
+        + `<td>${snip}</td><td>${mapCell}</td></tr>`;
     }).join('');
+    window.__precisionObs = obs;
 
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'block';
     el.innerHTML = `
       <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
       <table>
-        <thead><tr><th>Source</th><th>n</th><th>Exact match</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
+        <thead><tr><th>Source</th><th>n</th><th title="Exact matches / observations where the source had a value">Precision (exact)</th><th title="Exact matches / ALL observations with a real sign (a missing value counts as a miss)">Recall</th><th title="Root mean squared error vs the real sign, mph">RMSE (mph)</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
         <tbody>${sourceRowHtml('OSM', stats.osm)}${sourceRowHtml('HERE', stats.here)}${sourceRowHtml('Model', stats.model)}</tbody>
       </table>
       ${inferredPrecisionHtml(payload)}
       <p style="margin:14px 0 6px;">Segment-direction observations (every source's value next to the real sign reading):</p>
       <table>
-        <thead><tr><th>Segment</th><th>Direction</th><th>Truth</th><th>OSM</th><th>HERE</th><th>Model</th></tr></thead>
-        <tbody>${obsRows || '<tr><td colspan="6">No signs found in this sample.</td></tr>'}</tbody>
+        <thead><tr><th>Segment</th><th>Direction</th><th>Truth</th><th>OSM</th><th>HERE</th><th>Model</th><th>Sign</th><th>Map</th></tr></thead>
+        <tbody>${obsRows || '<tr><td colspan="8">No signs found in this sample.</td></tr>'}</tbody>
       </table>
       <p style="margin:14px 0 0;">
         <a href="/speed-limits/precision-sample/${jobId}/results.json">Download results.json</a> &middot;
@@ -342,6 +431,20 @@
   };
 })();
 </script>
+
+<style>
+  .sign-snippet { height: 48px; width: auto; max-width: 90px; border-radius: 4px; border: 1px solid var(--border, #ddd); display: block; }
+  .sign-minimap { background: #f7f7f7; border: 1px solid var(--border, #ddd); border-radius: 4px; display: block; }
+</style>
+<div id="sign-modal" class="modal-overlay" hidden onclick="if (event.target === this) closeSignModal()">
+  <div class="lightbox-inner">
+    <div class="lightbox-topbar">
+      <span id="sign-modal-title"></span>
+      <button type="button" class="lightbox-close" onclick="closeSignModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="sign-modal-body"></div>
+  </div>
+</div>
 
 {% if job_id %}
 <script>

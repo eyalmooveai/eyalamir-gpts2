@@ -673,6 +673,34 @@
   BigQuery every 60s; 3 failures in a row stop new segments: precision raises `RunPaused` (job status
   `paused`, resumable from its checkpoint), the Evaluator self-cancels with `paused_reason` (Resume
   button). Not wired into the cheap single-run Sign Checker.
+- **`calc_out.road_signs`** (precision_sample.py only) - one row per segment CHECKED for a sign (the sampled
+  one, plus every neighbor traversed on Street View while walking for one): `here_segment_id`,
+  `sign_found_on_id_in_dir_1` / `dir_1`, `sign_found_on_id_in_dir_2` / `dir_2` (sign ids are `calc_out.signs.sign_id`,
+  null = checked, none found), `datetime_checked`, `origin` (`sampled` = the segment the run set out to
+  check - a precision draw, an Evaluator/Sign Checker candidate; `traversed` = a neighbor only reached while
+  walking for a sign), so a report can be built from already-analyzed segments alone. `dir_1` is the compass bearing (int) of the segment's digitized
+  direction (HERE start->end), `dir_2` the opposite. A sign found directly on the sampled segment fills both slots; a
+  walk result uses the report's own mapping (backward = approach in the digitized direction -> dir_1, forward ->
+  dir_2), for the sampled segment AND for each traversed segment. The sign id comes from `Match.sign_id`, set by
+  `sign_registry.record_sign_detection`. Written once per run through `bq_writer` with the other two precision
+  tables (autodetect, background, resumable). The Evaluator and Sign Checker write it too, via
+  `_process_one_candidate(record_road_sign=True)`: one row per segment checked (not for `no_coverage`/error),
+  a sign found on the segment filling BOTH direction slots (detection can't attribute it to one direction), null
+  otherwise. Those rows go through `bq_writer.submit_row()` - durable on disk immediately but loaded in
+  batches (one load job per ~2 min per table, `COALESCE_WINDOW_S`) because a 1000-segment run would otherwise
+  hit BigQuery's ~1500 load jobs/table/day; `bq_writer.flush()` (run_batch's `finally`, the Sign Checker's
+  `_run_job`, the CLI `main`) sends the rest immediately. A coalesced batch's job id is a hash of its spool
+  files, so replaying the same set is a harmless 409.
+- **Precision results table: Sign and Map columns** - on a match, `_process_one_candidate` also saves
+  `sign_snippet.jpg` (a tight crop of the sign from the ORIGINAL frame, `save_sign_snippet`) next to
+  `sign_detected.jpg`. Observations carry display-only keys (`annotated_image`, `sign_heading`,
+  `segment_geojson` = sampled segment, `matched_segment_geojson` = segment the sign was found on) that are NOT in
+  `OBSERVATION_CSV_FIELDNAMES`, so they never reach the CSV/BigQuery. The status route adds
+  `image_url`/`snippet_url` (`_with_sign_image_urls`, served by `images()`); `quality.html` shows the snippet as
+  a thumbnail (falls back to the full frame for runs from before snippets existed) and an inline-SVG mini map
+  (sampled segment blue, matched segment orange dashed, camera dot + heading line), each opening a modal with
+  the full annotated frame or a Leaflet/OSM map. The map's dot is the Street View CAMERA position, not a
+  surveyed sign location (same caveat as `calc_out.signs.lat/lon`).
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

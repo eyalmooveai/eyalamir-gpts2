@@ -46,6 +46,7 @@ from typing import Optional
 
 from google.cloud import bigquery, vision
 
+import bq_writer
 import preflight
 from adaptive_walk import AdaptiveWalkConfig
 from find_bad_speed_limit import (
@@ -485,6 +486,7 @@ def _worker(i: int, n: int, row, config: BatchConfig, api_key: str, vision_clien
             walk_segment=config.walk_segment, walk_segment_spacing_m=config.walk_segment_spacing_m,
             side_mode=config.side_mode, side_offset_m=config.side_offset_m, auto_side_offset=config.auto_side_offset,
             headings=config.headings, headings_relative=config.headings_relative, fov=config.fov,
+            record_road_sign=True,
             adaptive_cfg=(
                 AdaptiveWalkConfig(config.adaptive_min_step_m, config.adaptive_max_step_m, config.adaptive_read_distance_m)
                 if config.adaptive_step else None
@@ -812,6 +814,7 @@ def run_batch(batch_id: str, config: Optional[BatchConfig], cancel_event: thread
         _write_status(batch_id, status)
     finally:
         monitor.stop()
+        bq_writer.flush()
         # Drains every still-in-flight async GCS image upload before this
         # background thread exits, done/cancelled/errored alike - without
         # this, a push still queued on _GCS_UPLOAD_POOL when the thread

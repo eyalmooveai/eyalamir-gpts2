@@ -179,6 +179,7 @@ def record_sign_detection(match: "Match", *, image_gcs_path: str, project: str, 
     only; bq_writer keeps its own shared per-project client. Never raises."""
     try:
         row = build_sign_row(match, image_gcs_path=image_gcs_path, project=project, classify_visual=False)
+        match.sign_id = row["sign_id"]
         bq_writer.submit(
             project, f"{project}.{SIGNS_DATASET}.{SIGNS_TABLE}", [row],
             classify={"image": str(match.annotated_image), "project": project}, log=log,

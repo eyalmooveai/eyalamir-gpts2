@@ -529,6 +529,8 @@ def _run_job(
         _update_job(job_id, status="error", error=str(e))
     except Exception as e:  # BigQuery/Vision auth errors etc. - surface rather than hanging the UI
         _update_job(job_id, status="error", error=f"{type(e).__name__}: {e}")
+    finally:
+        bq_writer.flush()  # send this run's queued calc_out.road_signs rows now (still in the background)
 
 
 def _new_quality_job() -> str:
@@ -992,12 +994,32 @@ def speed_limits_precision_sample_resume(job_id):
     return jsonify({"job_id": job_id}), 202
 
 
+def _with_sign_image_urls(job: dict) -> dict:
+    """Adds image_url / snippet_url (served by images()) to each observation of a finished job's payload, for the
+    results table's Sign and Map columns. Works on a copy; the stored job is untouched."""
+    payload = job.get("payload")
+    if not payload or not payload.get("observations"):
+        return job
+    obs = []
+    for o in payload["observations"]:
+        o = dict(o)
+        if o.get("annotated_image"):
+            try:
+                annotated = Path(o["annotated_image"])
+                o["image_url"] = _image_url(annotated)
+                o["snippet_url"] = _image_url(annotated.parent / "sign_snippet.jpg")
+            except ValueError:
+                pass  # outside OUT_DIR - nothing servable
+        obs.append(o)
+    return {**job, "payload": {**payload, "observations": obs}}
+
+
 @app.route("/speed-limits/precision-sample/status/<job_id>")
 def speed_limits_precision_sample_status(job_id):
     job = _get_precision_job(job_id)
     if not job:
         return jsonify({"status": "error", "error": "Unknown or expired precision-sample job."}), 404
-    return jsonify(job)
+    return jsonify(_with_sign_image_urls(job))
 
 
 @app.route("/speed-limits/precision-sample/<job_id>/<kind>")

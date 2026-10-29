@@ -148,6 +148,7 @@ from find_bad_speed_limit import (
     gcs_cache_push,
     get_api_call_counts,
     load_keys_file,
+    road_sign_row as _road_sign_row,
     parse_headings,
     reset_api_call_counts,
     safe_segment_dirname,
@@ -315,6 +316,30 @@ def infer_overall_precision(population: dict, stats: dict) -> dict:
     return result
 
 
+def infer_overall_metrics(population: dict, stats: dict) -> dict:
+    """Per-source inferred OVERALL precision, recall and RMSE across the full domain, under the same stated assumption
+    as infer_overall_precision (a segment where OSM/HERE/Moove all agree is correct, so it contributes a perfect hit
+    and zero error). Law of total probability over the agree/disagree split:
+        precision = agree + disagree * precision|disagreement
+        recall    = agree + disagree * recall|disagreement      (agreeing segments always have a value)
+        RMSE      = sqrt(disagree * MSE|disagreement)
+    Each is None when the sample has nothing to anchor it."""
+    agree, disagree = population["agree_count"], population["disagree_count"]
+    total = agree + disagree
+    out = {}
+    for label in ("osm", "here", "model"):
+        if total == 0:
+            out[label] = {"precision": None, "recall": None, "rmse_mph": None}
+            continue
+        a, d, s = agree / total, disagree / total, stats[label]
+        out[label] = {
+            "precision": (a + d * s["exact_match_rate"]) if s["exact_match_rate"] is not None else None,
+            "recall": (a + d * s["recall"]) if s["recall"] is not None else None,
+            "rmse_mph": ((d * s["mse_mph2"]) ** 0.5) if s["mse_mph2"] is not None else None,
+        }
+    return out
+
+
 def _maps_table_for_state(state: str) -> str:
     table = f"road_segments_{state.upper()}"
     _validate_identifier(table, TABLE_RE, "maps table")
@@ -447,6 +472,7 @@ def _check_segment_for_sign(
 
 def _empty_direction_result(note: str, steps_available: int) -> dict:
     return {
+        "sign_id": None, "traversed": [],
         "found": False, "ground_truth_mph": None, "sign_lat": None, "sign_lon": None,
         "sign_evidence": None, "streetview_capture_date": None, "annotated_image": None,
         "matched_segment_id": None, "steps_walked": steps_available, "note": note,
@@ -466,6 +492,7 @@ def _walk_direction_for_sign(
     which segment actually had the sign and how many steps it took."""
     if not chain:
         return _empty_direction_result(f"no {direction} neighbor segments found", 0)
+    traversed: list[tuple[str, dict, Optional[str]]] = []  # (segment id, its row, sign id found on it) in walk order
     for step_index, step_topo in enumerate(chain, start=1):
         step_seg_id = step_topo["here_segment_id"]
         rows = fetch_candidate_by_id(project, dataset, table, step_seg_id)
@@ -478,15 +505,20 @@ def _walk_direction_for_sign(
             side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
             headings=headings, headings_relative=headings_relative, fov=fov, log=log,
         )
+        traversed.append((step_seg_id, rows[0], match.sign_id if match else None))
         if match:
             sign = match.image_details[match.matched_image_index]
             return {
+                "sign_id": match.sign_id, "traversed": traversed,
+                "sign_heading": sign.heading, "segment_geojson": rows[0].get("geom_geojson"),
                 "found": True, "ground_truth_mph": match.reading.speed_mph,
                 "sign_lat": sign.lat, "sign_lon": sign.lon, "sign_evidence": match.reading.evidence,
                 "streetview_capture_date": sign.capture_date, "annotated_image": str(match.annotated_image),
                 "matched_segment_id": step_seg_id, "steps_walked": step_index, "note": "",
             }
-    return _empty_direction_result(f"no readable sign in {len(chain)} {direction} segment(s)", len(chain))
+    result = _empty_direction_result(f"no readable sign in {len(chain)} {direction} segment(s)", len(chain))
+    result["traversed"] = traversed
+    return result
 
 
 def _process_sampled_segment(
@@ -516,6 +548,7 @@ def _process_sampled_segment(
         "state": state.upper(),
         "street_name": sampled_row.get("street_name"),
         "functional_class": sampled_row.get("functional_class"),
+        "segment_geojson": sampled_row.get("geom_geojson"),
         "centroid_lat": sampled_row.get("centroid_lat"),
         "centroid_lon": sampled_row.get("centroid_lon"),
         "speed_limit_osm_mph": sampled_row.get("speed_limit_osm_mph"),
@@ -537,7 +570,8 @@ def _process_sampled_segment(
         log(f"{tag}: sign found directly on the sampled segment - {match0.reading.speed_mph} mph (applies to both directions).")
         return {
             **base_result,
-            "found_on_segment": True, "ground_truth_mph": match0.reading.speed_mph,
+            "road_sign_rows": [_road_sign_row(seg_id, sampled_row, sign_dir_1=match0.sign_id, sign_dir_2=match0.sign_id)],
+            "found_on_segment": True, "ground_truth_mph": match0.reading.speed_mph, "sign_heading": sign.heading,
             "sign_lat": sign.lat, "sign_lon": sign.lon, "sign_evidence": match0.reading.evidence,
             "streetview_capture_date": sign.capture_date, "annotated_image": str(match0.annotated_image),
             "forward": None, "backward": None,
@@ -573,8 +607,18 @@ def _process_sampled_segment(
         "match_backward_only" if found_backward else
         "no_sign"
     )
+    # calc_out.road_signs: the sampled segment itself (backward = approach in its digitized direction -> dir_1, forward =
+    # the opposite direction -> dir_2, same mapping the report uses), then every segment traversed in each walk - a sign
+    # found on a traversed segment serves that segment's own dir_1 (backward chain) or dir_2 (forward chain).
+    road_sign_rows = [_road_sign_row(
+        seg_id, sampled_row, sign_dir_1=directions["backward"].get("sign_id"), sign_dir_2=directions["forward"].get("sign_id"),
+    )]
+    for direction, slot in (("backward", "sign_dir_1"), ("forward", "sign_dir_2")):
+        for t_seg_id, t_row, t_sign_id in directions[direction].get("traversed", []):
+            road_sign_rows.append(_road_sign_row(t_seg_id, t_row, origin="traversed", **{slot: t_sign_id}))
     return {
         **base_result,
+        "road_sign_rows": road_sign_rows,
         "found_on_segment": False, "ground_truth_mph": None,
         "sign_lat": None, "sign_lon": None, "sign_evidence": None, "streetview_capture_date": None, "annotated_image": None,
         "forward": directions["forward"], "backward": directions["backward"],
@@ -644,9 +688,12 @@ def _source_stats(found_results: list[dict], column: Optional[str], tolerance_mp
     diffs = []
     exact = 0
     within_tolerance = 0
+    n_truth = 0  # every observation with a real sign reading, whether or not this source had a value for it
     for r in found_results:
         truth = r.get("ground_truth_mph")
         value = _source_value(r, column)
+        if truth is not None:
+            n_truth += 1
         if truth is None or value is None:
             continue
         diff = abs(value - truth)
@@ -656,10 +703,17 @@ def _source_stats(found_results: list[dict], column: Optional[str], tolerance_mp
         if diff <= tolerance_mph:
             within_tolerance += 1
     n = len(diffs)
+    mse = (sum(d * d for d in diffs) / n) if n else None
     return {
         "n_compared": n,
+        "n_observations": n_truth,
         "exact_match_count": exact,
+        # Precision = exact matches / observations where the source gave a value; recall = exact matches / ALL
+        # observations with a real sign (a source that has no value there counts as a miss). RMSE is over the compared ones.
         "exact_match_rate": (exact / n) if n else None,
+        "recall": (exact / n_truth) if n_truth else None,
+        "mse_mph2": mse,
+        "rmse_mph": (mse ** 0.5) if mse is not None else None,
         "within_tolerance_mph": tolerance_mph,
         "within_tolerance_count": within_tolerance,
         "within_tolerance_rate": (within_tolerance / n) if n else None,
@@ -668,7 +722,7 @@ def _source_stats(found_results: list[dict], column: Optional[str], tolerance_mp
     }
 
 
-def _observation_row(r: dict, *, direction: str, ground_truth_mph: float, matched_segment_id, steps_walked, sign_lat, sign_lon) -> dict:
+def _observation_row(r: dict, *, direction: str, ground_truth_mph: float, matched_segment_id, steps_walked, sign_lat, sign_lon, display: Optional[dict] = None) -> dict:
     """One self-contained segment-direction row - every source's value
     alongside the real sign reading, suitable for direct display/export
     (print_observations_table/write_observations_csv) as well as the
@@ -685,6 +739,9 @@ def _observation_row(r: dict, *, direction: str, ground_truth_mph: float, matche
         "speed_limit_infer_mph": r.get("speed_limit_infer_mph"),
         "speed_limit_infer_mph_corrected": r.get("speed_limit_infer_mph_corrected"),
         "speed_AVG_mph": r.get("speed_AVG_mph"), "freeflow_mph": r.get("freeflow_mph"),
+        # Display-only (the web page's snippet/map columns) - not in OBSERVATION_CSV_FIELDNAMES, so never exported:
+        # annotated_image, sign_heading (camera heading), segment_geojson (sampled segment), matched_segment_geojson.
+        **(display or {}),
     }
 
 
@@ -704,6 +761,8 @@ def _observations(results: list[dict]) -> list[dict]:
             obs.append(_observation_row(
                 r, direction="both", ground_truth_mph=r["ground_truth_mph"],
                 matched_segment_id=r["segment_id"], steps_walked=0, sign_lat=r.get("sign_lat"), sign_lon=r.get("sign_lon"),
+                display={"annotated_image": r.get("annotated_image"), "sign_heading": r.get("sign_heading"),
+                         "segment_geojson": r.get("segment_geojson"), "matched_segment_geojson": r.get("segment_geojson")},
             ))
             continue
         for direction in ("forward", "backward"):
@@ -713,6 +772,8 @@ def _observations(results: list[dict]) -> list[dict]:
                     r, direction=direction, ground_truth_mph=d["ground_truth_mph"],
                     matched_segment_id=d.get("matched_segment_id"), steps_walked=d.get("steps_walked"),
                     sign_lat=d.get("sign_lat"), sign_lon=d.get("sign_lon"),
+                    display={"annotated_image": d.get("annotated_image"), "sign_heading": d.get("sign_heading"),
+                             "segment_geojson": r.get("segment_geojson"), "matched_segment_geojson": d.get("segment_geojson")},
                 ))
     return obs
 
@@ -741,7 +802,7 @@ def compute_precision_stats(results: list[dict], obs: list[dict], tolerance_mph:
     }
 
 
-def print_report(stats: dict, api_calls: dict, population: Optional[dict] = None, inferred_precision: Optional[dict] = None, population_error: Optional[str] = None) -> None:
+def print_report(stats: dict, api_calls: dict, population: Optional[dict] = None, inferred_precision: Optional[dict] = None, population_error: Optional[str] = None, inferred_metrics: Optional[dict] = None) -> None:
     print("\n=== Precision sample report ===")
     print(f"Sample size: {stats['sample_size']} segment(s)")
     if stats["segment_sign_find_rate"] is not None:
@@ -752,14 +813,16 @@ def print_report(stats: dict, api_calls: dict, population: Optional[dict] = None
               f"(disagreed on the posted limit: {stats['direction_disagreement_count']}, "
               f"{stats['direction_disagreement_rate'] * 100:.1f}%)")
     print(f"Street View calls: {api_calls['streetview']}  Vision OCR calls: {api_calls['vision']}")
-    print(f"\n{'Source':<8}{'n':>6}{'Exact match':>14}{'Within tol.':>14}{'Mean |err|':>12}{'Median |err|':>14}")
+    print(f"\n{'Source':<8}{'n':>6}{'Precision':>11}{'Recall':>9}{'RMSE':>8}{'Within tol.':>13}{'Mean |err|':>12}{'Median |err|':>14}")
     for label in ("osm", "here", "model"):
         s = stats[label]
         exact_pct = f"{s['exact_match_rate'] * 100:.1f}%" if s["exact_match_rate"] is not None else "n/a"
         tol_pct = f"{s['within_tolerance_rate'] * 100:.1f}%" if s["within_tolerance_rate"] is not None else "n/a"
         mean_err = f"{s['mean_abs_error_mph']:.2f}" if s["mean_abs_error_mph"] is not None else "n/a"
         median_err = f"{s['median_abs_error_mph']:.2f}" if s["median_abs_error_mph"] is not None else "n/a"
-        print(f"{label:<8}{s['n_compared']:>6}{exact_pct:>14}{tol_pct:>14}{mean_err:>12}{median_err:>14}")
+        recall_pct = f"{s['recall'] * 100:.1f}%" if s["recall"] is not None else "n/a"
+        rmse = f"{s['rmse_mph']:.2f}" if s["rmse_mph"] is not None else "n/a"
+        print(f"{label:<8}{s['n_compared']:>6}{exact_pct:>11}{recall_pct:>9}{rmse:>8}{tol_pct:>13}{mean_err:>12}{median_err:>14}")
 
     print("\n=== Inferred overall precision (assumes agreement = correct) ===")
     if population_error:
@@ -773,7 +836,10 @@ def print_report(stats: dict, api_calls: dict, population: Optional[dict] = None
         print("Assumes a segment where OSM/HERE/Moove already agree is in fact correct - see module docstring.")
         for label in ("osm", "here", "model"):
             pct = f"{inferred_precision[label] * 100:.1f}%" if inferred_precision[label] is not None else "n/a (no disagreement observations to anchor the estimate)"
-            print(f"  {label:<8}{pct}")
+            m = (inferred_metrics or {}).get(label) or {}
+            rec = f"{m['recall'] * 100:.1f}%" if m.get("recall") is not None else "n/a"
+            rmse = f"{m['rmse_mph']:.2f} mph" if m.get("rmse_mph") is not None else "n/a"
+            print(f"  {label:<8}precision {pct:<8} recall {rec:<8} RMSE {rmse}")
     else:
         print("Not computed.")
 
@@ -877,6 +943,8 @@ def save_results_to_bigquery(
     bq_writer.submit(project, f"{project}.calc_tmp.precision_sample_results", result_rows, log=log)
     observation_rows = [{**meta, **_observation_row_for_export(o)} for o in observations]
     bq_writer.submit(project, f"{project}.calc_tmp.precision_sample_observations", observation_rows, log=log)
+    road_sign_rows = [row for r in results for row in (r.get("road_sign_rows") or [])]
+    bq_writer.submit(project, f"{project}.calc_out.road_signs", road_sign_rows, log=log)
 
 
 def _append_rows_to_bigquery(client: "bigquery.Client", table_ref: str, rows: list[dict], log=lambda msg: None) -> None:
@@ -1204,16 +1272,19 @@ def run_precision_sample(
     try:
         population = population_agreement_counts(project, dataset, table, state=state, functional_class_lt=functional_class_lt, client=bq_client)
         inferred_precision = infer_overall_precision(population, stats)
+        inferred_metrics = infer_overall_metrics(population, stats)
         population_error = None
     except Exception as e:
         population = None
         inferred_precision = None
+        inferred_metrics = None
         population_error = f"{type(e).__name__}: {e}"
         log(f"WARNING: could not compute the domain agree/disagree population split: {population_error}")
 
     payload = {
         "run_id": run_id, "config": config, "api_calls": api_calls, "results": results, "observations": obs, "stats": stats,
-        "population": population, "inferred_precision": inferred_precision, "population_error": population_error,
+        "population": population, "inferred_precision": inferred_precision, "inferred_metrics": inferred_metrics,
+        "population_error": population_error,
     }
 
     out_json_path = out_json_path or (out_root / "results.json")
@@ -1323,7 +1394,7 @@ def main() -> int:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
 
-    print_report(payload["stats"], payload["api_calls"], payload.get("population"), payload.get("inferred_precision"), payload.get("population_error"))
+    print_report(payload["stats"], payload["api_calls"], payload.get("population"), payload.get("inferred_precision"), payload.get("population_error"), payload.get("inferred_metrics"))
     print_observations_table(payload["observations"])
     print(f"\nFull results: {payload['output_files']['json']}")
     print(f"CSV (per segment): {payload['output_files']['csv']}")

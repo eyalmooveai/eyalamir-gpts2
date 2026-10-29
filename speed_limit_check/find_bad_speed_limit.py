@@ -48,6 +48,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -1169,6 +1170,23 @@ def save_annotated_image(reading: SignReading, out_path: Path) -> None:
         im.save(out_path)
 
 
+def save_sign_snippet(reading: SignReading, out_path: Path, pad_ratio: float = 0.6, min_side: int = 120) -> None:
+    """Saves a tight crop of the sign itself (from the ORIGINAL frame, not the one with the red box drawn on it) for
+    thumbnails. When no bounding box is available, a downscaled copy of the whole frame is saved instead."""
+    with Image.open(reading.image_path) as im:
+        im = im.convert("RGB")
+        if reading.box != (0, 0, 0, 0):
+            l, t, r, b = reading.box
+            w, h = max(r - l, 1), max(b - t, 1)
+            side = max(w, h, min_side)
+            cx, cy = (l + r) / 2, (t + b) / 2
+            half = side / 2 + max(w, h) * pad_ratio / 2
+            im = im.crop((max(0, int(cx - half)), max(0, int(cy - half)), min(im.width, int(cx + half)), min(im.height, int(cy + half))))
+        else:
+            im.thumbnail((320, 320))
+        im.save(out_path)
+
+
 def print_row(row: dict) -> None:
     for key, value in row.items():
         print(f"  {key}: {value}")
@@ -1224,6 +1242,9 @@ class Match:
     annotated_image: Path
     image_details: list[ImageDetail]
     matched_image_index: int
+    # The calc_out.signs row id for this detection, set by sign_registry.record_sign_detection - lets a caller
+    # (precision_sample's calc_out.road_signs rows) reference the sign without re-deriving it.
+    sign_id: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -1447,7 +1468,7 @@ def run_pipeline(
             walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
             side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
             headings=headings, headings_relative=headings_relative, fov=fov, adaptive_cfg=adaptive_cfg,
-            log=log, progress=progress,
+            record_road_sign=True, log=log, progress=progress,
         )
         result.attempts.append(attempt)
         if match:
@@ -1484,6 +1505,38 @@ def point_at_distance(coords: list[tuple[float, float]], distance_m: float) -> t
         remaining -= seg_len
     lon, lat = coords[0]
     return lat, lon, 0.0
+
+
+def segment_dirs(row: dict) -> tuple[Optional[int], Optional[int]]:
+    """(dir_1, dir_2) for calc_out.road_signs: dir_1 is the compass bearing (0-359) of the segment's own digitized
+    direction of travel (HERE start -> end), dir_2 the opposite one. None when the segment has no usable geometry."""
+    coords = line_coords_from_geojson(row.get("geom_geojson")) if row.get("geom_geojson") else []
+    if len(coords) < 2:
+        return None, None
+    d1 = int(round(overall_bearing(coords))) % 360
+    return d1, (d1 + 180) % 360
+
+
+def road_sign_row(segment_id: str, row: dict, *, sign_dir_1: Optional[str] = None, sign_dir_2: Optional[str] = None, origin: str = "sampled") -> dict:
+    """One calc_out.road_signs row: a segment that was checked for a sign and, per direction of travel, the
+    calc_out.signs id of the sign found for it (None = checked, none found). `origin` is "sampled" for the segment a
+    run set out to check (precision sample draw, Evaluator candidate, Sign Checker candidate) or "traversed" for a
+    neighbor segment only reached while walking along the road looking for a sign."""
+    d1, d2 = segment_dirs(row)
+    return {
+        "here_segment_id": segment_id,
+        "sign_found_on_id_in_dir_1": sign_dir_1, "dir_1": d1,
+        "sign_found_on_id_in_dir_2": sign_dir_2, "dir_2": d2,
+        "datetime_checked": datetime.now(timezone.utc).isoformat(),
+        "origin": origin,
+    }
+
+
+def _record_road_sign(project: str, seg_id: str, row: dict, match: Optional["Match"], log) -> None:
+    """Queues this checked segment's calc_out.road_signs row (background, batched, resumable - see bq_writer.submit_row).
+    A sign found directly on a segment fills both direction slots: detection can't attribute it to one direction."""
+    sign_id = match.sign_id if match else None
+    bq_writer.submit_row(project, f"{project}.calc_out.road_signs", road_sign_row(seg_id, row, sign_dir_1=sign_id, sign_dir_2=sign_id), log=log)
 
 
 def _lookahead_cache_path(image_path: Path) -> Path:
@@ -1588,6 +1641,7 @@ def _process_one_candidate(
     headings_relative: bool,
     fov: int,
     adaptive_cfg: Optional[adaptive_walk.AdaptiveWalkConfig] = None,
+    record_road_sign: bool = False,
     log=lambda msg: None,
     progress=lambda fraction, message: None,
 ) -> tuple["CandidateAttempt", Optional["Match"]]:
@@ -1803,6 +1857,8 @@ def _process_one_candidate(
         return CandidateAttempt(i + 1, seg_id, lat, lon, "no_coverage", row=row_dict), None
 
     if not reading:
+        if record_road_sign:
+            _record_road_sign(project, seg_id, row, None, log)
         log("  Street View imagery found, but no speed limit sign could be read in it.")
         progress(base + span, f"{tag} No readable sign.")
         return CandidateAttempt(i + 1, seg_id, lat, lon, "no_sign_read", image_details=image_details, row=row_dict), None
@@ -1811,6 +1867,12 @@ def _process_one_candidate(
     annotated_path = reading.image_path.parent / "sign_detected.jpg"
     save_annotated_image(reading, annotated_path)
     gcs_cache_push(annotated_path, log=log)
+    snippet_path = annotated_path.parent / "sign_snippet.jpg"
+    try:
+        save_sign_snippet(reading, snippet_path)
+        gcs_cache_push(snippet_path, log=log)
+    except Exception as e:  # noqa: BLE001 - a thumbnail problem must never fail the real match
+        log(f"    WARNING: could not save the sign snippet ({type(e).__name__}: {e})")
 
     attempt = CandidateAttempt(
         i + 1, seg_id, lat, lon, "match", reading.evidence,
@@ -1830,6 +1892,8 @@ def _process_one_candidate(
         else str(annotated_path)
     )
     sign_registry.record_sign_detection(match, image_gcs_path=image_gcs_path, project=project, client=bq_client, log=log)
+    if record_road_sign:
+        _record_road_sign(project, seg_id, row, match, log)
 
     return attempt, match
 
@@ -1837,6 +1901,13 @@ def _process_one_candidate(
 def main() -> int:
     args = parse_args()
     bq_writer.replay_pending(print)
+    try:
+        return _main(args)
+    finally:
+        bq_writer.flush(print)
+
+
+def _main(args) -> int:
 
     try:
         result = run_pipeline(
