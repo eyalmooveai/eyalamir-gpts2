@@ -1188,8 +1188,12 @@ def save_annotated_image(reading: SignReading, out_path: Path) -> None:
     with Image.open(reading.image_path) as im:
         im = im.convert("RGB")
         if reading.box != (0, 0, 0, 0):
-            draw = ImageDraw.Draw(im)
-            draw.rectangle(reading.box, outline="red", width=6)
+            # A thin frame well AROUND the sign (about 4x its size), not on it, so the sign itself stays readable and the eye is
+            # still led to what was interpreted. A tight thick box used to cover the very digits that were read.
+            l, t, r, b = reading.box
+            pad = max(1.5 * max(r - l, b - t), 30)
+            frame = (max(l - pad, 2), max(t - pad, 2), min(r + pad, im.width - 3), min(b + pad, im.height - 3))
+            ImageDraw.Draw(im).rectangle(frame, outline="red", width=3)
         im.save(out_path)
 
 

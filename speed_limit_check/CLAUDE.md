@@ -703,6 +703,8 @@
   <= `MAX_TURN_DEG` (45) - otherwise the chain ENDS rather than drift onto an off-ramp/side street. Candidate geometry comes
   from one `fetch_candidates_by_ids` query per step and rides along as `_row`. The sampling WHERE clause deliberately keeps rows with
   a NULL OSM value (by design) - don't "fix" it.
+- **Annotated sign frames** (`save_annotated_image` -> `sign_detected.jpg`) draw a THIN (3 px) red frame about 4x the sign's size AROUND it, never a
+  tight thick box on it (that covered the digits that were read). Frames already saved by earlier runs keep their old box; new detections use the new one.
 - **Precision results table: Sign and Map columns** - on a match, `_process_one_candidate` also saves
   `sign_snippet.jpg` (a tight crop of the sign from the ORIGINAL frame, `save_sign_snippet`) next to
   `sign_detected.jpg`. Observations carry display-only keys (`annotated_image`, `sign_heading`,
