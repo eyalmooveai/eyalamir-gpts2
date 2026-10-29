@@ -195,6 +195,161 @@
 })();
 </script>
 
+<div class="card" id="maps-card">
+  <span class="eyebrow">Maps</span>
+  <div style="display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; justify-content:space-between;">
+    <h3 style="margin:0;">Where each source is right</h3>
+    <div style="display:flex; gap:6px;">
+      <button type="button" class="btn-secondary" id="maps-tab-samples" onclick="showMapsTab('samples')">Samples of a run</button>
+      <button type="button" class="btn-secondary" id="maps-tab-states" onclick="showMapsTab('states')">Inferred RMSE per state</button>
+    </div>
+  </div>
+
+  <div id="maps-panel-samples" style="display:none; margin-top:10px;">
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+      <label for="runmap-run" style="margin:0; font-size:0.85rem;">Show</label>
+      <select id="runmap-run" style="max-width:420px;"><option value="all">All runs together</option></select>
+      <button type="button" class="btn-secondary" onclick="loadRunMap()">Show on map</button>
+      <span id="runmap-status" style="font-size:0.85rem; color:var(--muted);"></span>
+    </div>
+    <p style="color:var(--muted); font-size:0.8rem; margin:6px 0;">Each dot is one real posted sign (at the Street View camera that saw it), coloured by which source was <b>closest</b> to it:
+      <span class="runmap-key" style="--c:#2563eb;">OSM</span> <span class="runmap-key" style="--c:#f59e0b;">HERE</span> <span class="runmap-key" style="--c:#00b5ad;">Model</span>
+      <span class="runmap-key" style="--c:#9ca3af;">tie (two or more equally close)</span> <span class="runmap-key" style="--c:#d1d5db;">no source had a value</span>. A thick white ring means the closest source was exactly right. These are the sampled segments themselves, so they favour places where the sources disagree.</p>
+    <div id="runmap-canvas" style="height:480px; border-radius:8px; border:1px solid var(--border, #ddd);"></div>
+    <p id="runmap-summary" style="font-size:0.85rem; margin:6px 0 0;"></p>
+  </div>
+
+  <div id="maps-panel-states" style="display:none; margin-top:10px;">
+    <div style="display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center;">
+      <label for="statemap-source" style="margin:0; font-size:0.85rem;">Source</label>
+      <select id="statemap-source"><option value="model">Model</option><option value="here">HERE</option><option value="osm">OSM</option></select>
+      <label for="statemap-minn" style="margin:0; font-size:0.85rem;" title="States with fewer sign observations than this are left grey - a handful of signs is not an estimate">Min. observations per state</label>
+      <input type="number" id="statemap-minn" value="5" min="1" style="width:70px;">
+      <button type="button" class="btn-secondary" onclick="loadStateMap()">Show on map</button>
+      <span id="statemap-status" style="font-size:0.85rem; color:var(--muted);"></span>
+    </div>
+    <p style="color:var(--muted); font-size:0.8rem; margin:6px 0;">Colour = the INFERRED overall RMSE of the chosen source in that state (not the raw sample RMSE, which is biased by drawing only from disagreeing segments):
+      <span class="runmap-key" style="--c:#1d8a4a;">0&ndash;5 mph</span> <span class="runmap-key" style="--c:#e0a800;">5&ndash;10</span> <span class="runmap-key" style="--c:#c62828;">10+</span>
+      <span class="runmap-key" style="--c:#cbd5e1;">too few observations / no data</span>. Hover a state for its number and how many signs it rests on.</p>
+    <div id="statemap-canvas" style="height:480px; border-radius:8px; border:1px solid var(--border, #ddd);"></div>
+    <p id="statemap-note" style="font-size:0.8rem; color:var(--muted); margin:6px 0 0;"></p>
+  </div>
+  <style>.runmap-key::before{content:""; display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--c); margin:0 4px 0 8px; vertical-align:middle;}</style>
+</div>
+<script>
+(function () {
+  const esc = s => String(s === null || typeof s === 'undefined' ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const KIND_COLOR = {osm: '#2563eb', here: '#f59e0b', model: '#00b5ad', tie: '#9ca3af', none: '#d1d5db'};
+  const KIND_LABEL = {osm: 'OSM', here: 'HERE', model: 'Model', tie: 'ties', none: 'no value'};
+  let runMap = null, runLayer = null, stateMap = null, stateLayer = null, statesGeo = null, runsLoaded = false;
+
+  function baseMap(el) {
+    const m = L.map(el, {worldCopyJump: true}).setView([39, -98], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 18, attribution: '&copy; OpenStreetMap contributors'}).addTo(m);
+    return m;
+  }
+  window.showMapsTab = function (tab) {
+    if (typeof L === 'undefined') { document.getElementById('runmap-status').textContent = document.getElementById('statemap-status').textContent = 'The map library (Leaflet) could not be loaded.'; }
+    document.getElementById('maps-panel-samples').style.display = tab === 'samples' ? 'block' : 'none';
+    document.getElementById('maps-panel-states').style.display = tab === 'states' ? 'block' : 'none';
+    document.getElementById('maps-tab-samples').style.fontWeight = tab === 'samples' ? '700' : '400';
+    document.getElementById('maps-tab-states').style.fontWeight = tab === 'states' ? '700' : '400';
+    if (typeof L === 'undefined') return;
+    if (tab === 'samples') {
+      if (!runMap) { runMap = baseMap('runmap-canvas'); runLayer = L.layerGroup().addTo(runMap); }
+      if (!runsLoaded) loadRunList();
+      setTimeout(() => runMap.invalidateSize(), 50);
+    } else {
+      if (!stateMap) { stateMap = baseMap('statemap-canvas'); stateLayer = L.layerGroup().addTo(stateMap); loadStateMap(); }
+      setTimeout(() => stateMap.invalidateSize(), 50);
+    }
+  };
+
+  // ---------------- samples map ----------------
+  function loadRunList() {
+    runsLoaded = true;
+    fetch('/speed-limits/precision-sample/runs').then(r => r.json()).then(d => {
+      const sel = document.getElementById('runmap-run');
+      (d.runs || []).filter(r => r.status === 'done').forEach(r => {
+        const o = document.createElement('option');
+        o.value = r.job_id;
+        o.textContent = (r.state || '') + ' - FC < ' + r.functional_class_lt + ' - ' + r.sample_size + ' samples - ' + new Date(r.created_at).toLocaleString();
+        sel.appendChild(o);
+      });
+      loadRunMap();
+    }).catch(() => loadRunMap());
+  }
+  function pointPopup(p) {
+    const row = (k, label) => {
+      const v = p[k], closest = (p.closest || []).indexOf(k) >= 0;
+      const diff = (typeof v === 'number' && typeof p.truth === 'number') ? ' (' + (v - p.truth >= 0 ? '+' : '') + (v - p.truth) + ')' : '';
+      return '<tr><td style="padding:1px 8px 1px 0;' + (closest ? 'font-weight:700;' : '') + '">' + label + (closest ? ' &#10003;' : '') + '</td><td>' + (v === null || typeof v === 'undefined' ? 'n/a' : esc(v) + diff) + '</td></tr>';
+    };
+    const sv = 'https://www.google.com/maps?q=&layer=c&cbll=' + p.lat + ',' + p.lon;
+    return '<div style="min-width:170px;"><b>Real sign: ' + esc(p.truth) + ' mph</b>'
+      + '<table style="margin:4px 0;">' + row('osm', 'OSM') + row('here', 'HERE') + row('model', 'Model') + '</table>'
+      + (p.street ? esc(p.street) + '<br>' : '') + '<span style="color:#666; font-size:12px;">' + esc(p.run_label) + (p.state ? ' - ' + esc(p.state) : '') + '</span><br>'
+      + (p.snippet ? '<img src="' + esc(p.snippet) + '" style="max-width:150px; max-height:90px; margin-top:4px;" onerror="this.style.display=\'none\'"><br>' : '')
+      + '<a href="' + sv + '" target="_blank" rel="noopener">Street View</a></div>';
+  }
+  window.loadRunMap = function () {
+    const run = document.getElementById('runmap-run').value, status = document.getElementById('runmap-status');
+    status.textContent = 'Loading...';
+    fetch('/speed-limits/run-map-data?run=' + encodeURIComponent(run)).then(r => r.json()).then(d => {
+      if (d.error) { status.innerHTML = '<span class="badge err">Error</span> ' + esc(d.error); return; }
+      runLayer.clearLayers();
+      const bounds = [];
+      d.points.forEach(p => {
+        const c = KIND_COLOR[p.kind] || KIND_COLOR.none;
+        L.circleMarker([p.lat, p.lon], {radius: p.exact ? 8 : 6, color: p.exact ? '#ffffff' : '#374151', weight: p.exact ? 3 : 1, fillColor: c, fillOpacity: 0.9})
+          .bindPopup(pointPopup(p)).addTo(runLayer);
+        bounds.push([p.lat, p.lon]);
+      });
+      if (bounds.length) runMap.fitBounds(bounds, {padding: [30, 30], maxZoom: 13});
+      status.textContent = '';
+      const s = d.summary || {}, total = d.points.length;
+      document.getElementById('runmap-summary').innerHTML = total
+        ? total + ' sign observation(s)' + (d.runs > 1 ? ' from ' + d.runs + ' runs' : '') + ' - closest: ' + ['model', 'here', 'osm', 'tie', 'none'].map(k =>
+            '<span class="runmap-key" style="--c:' + KIND_COLOR[k] + ';">' + KIND_LABEL[k] + ' ' + (s[k] || 0) + ' (' + Math.round((s[k] || 0) / total * 100) + '%)</span>').join(' ')
+        : 'No located sign observations in this selection.';
+    }).catch(err => { status.textContent = err.message; });
+  };
+
+  // ---------------- RMSE per state ----------------
+  const zoneColor = v => (v < 5 ? '#1d8a4a' : (v < 10 ? '#e0a800' : '#c62828'));
+  window.loadStateMap = function () {
+    const status = document.getElementById('statemap-status'), source = document.getElementById('statemap-source').value;
+    status.textContent = 'Loading...';
+    const geo = statesGeo ? Promise.resolve(statesGeo) : fetch('/speed-limits/us-states.geojson').then(r => r.json());
+    Promise.all([geo, fetch('/speed-limits/rmse-state-map?source=' + source).then(r => r.json())]).then(([g, d]) => {
+      if (g.error) { status.innerHTML = '<span class="badge err">Error</span> state outlines: ' + esc(g.error); return; }
+      if (d.error) { status.innerHTML = '<span class="badge err">Error</span> ' + esc(d.error); return; }
+      statesGeo = g;
+      const minN = Math.max(1, parseInt(document.getElementById('statemap-minn').value, 10) || 1), label = {model: 'Model', here: 'HERE', osm: 'OSM'}[source];
+      stateLayer.clearLayers();
+      let shown = 0;
+      L.geoJSON(g, {
+        style: f => {
+          const s = d.states[f.properties.state];
+          const ok = s && s.n >= minN;
+          if (ok) shown++;
+          return {fillColor: ok ? zoneColor(s.rmse_mph) : '#cbd5e1', fillOpacity: ok ? 0.8 : 0.35, color: '#475569', weight: 1};
+        },
+        onEachFeature: (f, layer) => {
+          const s = d.states[f.properties.state];
+          layer.bindTooltip('<b>' + esc(f.properties.name || f.properties.state) + '</b><br>' + (s ? label + ': ' + s.rmse_mph.toFixed(2) + ' mph<br>' + s.n + ' sign observation(s), ' + s.runs + ' run(s)' + (s.n < minN ? '<br><i>below the minimum - shown grey</i>' : '') : 'no signs measured here yet'), {sticky: true});
+        },
+      }).addTo(stateLayer);
+      status.textContent = shown + ' state(s) coloured';
+      document.getElementById('statemap-note').textContent = (d.skipped && d.skipped.length ? 'Not used: ' + d.skipped.join('; ') + '. ' : '')
+        + 'Built from ' + d.runs + ' saved run(s); a run of one state is scaled by that state\'s share of disagreeing segments, a nationwide run by each state\'s own share.';
+    }).catch(err => { status.textContent = err.message; });
+  };
+
+  // Nothing loads until a tab is clicked (the data comes from every saved run, which is not worth fetching on every page view).
+})();
+</script>
+
 <div class="card">
   <span class="eyebrow">Precision sample (pilot)</span>
   <h3 style="margin:0 0 4px;">How often do OSM, HERE, and our model match the real posted sign?</h3>

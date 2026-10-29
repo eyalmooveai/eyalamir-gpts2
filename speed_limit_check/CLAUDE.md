@@ -793,6 +793,17 @@
   entry source = `coverage`/`have`/`of`: segments with a value / all segments, summed over each distinct (table, state, functional class)
   domain once (newest run, so repeats don't double count; runs saved before the counts existed are skipped). A source under 80 % coverage gets its RMSE dial greyed
   and its coverage figures turn red ("below 80%"; the coverage dial itself stays faded like HERE's, no box). Saved results from before this lack coverage until "Update" is pressed.
+- **Quality page "Maps" card** (`run_maps.py`, `#maps-card`; nothing loads until a tab is clicked). (1) "Samples of a run": every sign observation of one
+  saved precision run or of all runs together (`GET /speed-limits/run-map-data?run=<id>|all`), one dot per observation at the Street View camera that
+  saw the sign (fallback: the segment centre), coloured by which source was CLOSEST to the real limit (`closest_sources`: smallest |value - sign|; two
+  or more equal = "tie"; none = grey; thick white ring = the closest was exact); popup shows the three values with their differences, the street, the
+  sign snippet and a Street View link. (2) "Inferred RMSE per state" (`GET /speed-limits/rmse-state-map?source=osm|here|model`): the INFERRED overall RMSE
+  of the chosen source per state, never the raw sample RMSE (`rmse_by_state`: a single-state run scales its sample MSE by that state's own disagree
+  share; a nationwide `US` run is split by each sampled segment's state - taken from the run's `results[].state` - and scaled by THAT state's share, which needs
+  per-state agree/disagree counts: one read-only GROUP BY per (table, functional class), dry-run priced, refused above $10, cached in
+  `output/_rmse_gauges/state_populations.json`). States with fewer observations than the page's "min. observations per state" are grey. State outlines come
+  from `bigquery-public-data.geo_us_boundaries.states` (simplified, ~20 MB scan) once, then cached in `output/_rmse_gauges/us_states.geojson`
+  (`GET /speed-limits/us-states.geojson`). `Dockerfile`'s COPY line needs `run_maps.py`. Leaflet/OSM tiles, like the other maps.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

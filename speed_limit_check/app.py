@@ -29,6 +29,7 @@ import bq_writer
 import precision_recalc
 import preflight
 import rmse_gauges
+import run_maps
 import road_signs_report
 from batch_evaluator import (
     DAILY_COST_CAP_USD,
@@ -1117,6 +1118,69 @@ def speed_limits_rmse_gauges_recalculate():
         RMSE_JOB.update(status="running", method=method, message="Starting...", error=None, estimate=None)
     threading.Thread(target=_run_rmse_job, args=(method,), daemon=True).start()
     return jsonify({"started": True}), 202
+
+
+US_STATES_GEOJSON = OUT_DIR / "_rmse_gauges" / "us_states.geojson"
+STATE_POP_CACHE = OUT_DIR / "_rmse_gauges" / "state_populations.json"
+
+
+def _precision_runs_with_payloads(run: str):
+    """(run id, label, payload with image urls) for one finished precision run, or for every finished run when run == "all"."""
+    if run != "all":
+        if not re.fullmatch(r"[0-9a-f]{32}", run):
+            raise ValueError("run must be a run id or 'all'.")
+        ids = [(run, None)]
+    else:
+        ids = [(r["job_id"], r) for r in _list_precision_runs(limit=1000) if r.get("status") == "done"]
+    for job_id, summary in ids:
+        job = _get_precision_job(job_id)
+        if not job or job.get("status") != "done" or not job.get("payload"):
+            continue
+        job = _with_sign_image_urls(job)
+        s = summary or job
+        when = (s.get("created_at") or "")[:10]
+        yield job_id, f"{s.get('state')} FC<{s.get('functional_class_lt')} n={s.get('sample_size')} {when}", job["payload"]
+
+
+@app.route("/speed-limits/run-map-data")
+def speed_limits_run_map_data():
+    """Points for the Quality page's samples map: every sign observation of one precision run (or all runs) with which source was closest."""
+    try:
+        return jsonify(run_maps.sample_points(_precision_runs_with_payloads(request.args.get("run") or "all")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/speed-limits/rmse-state-map")
+def speed_limits_rmse_state_map():
+    """Inferred overall RMSE of one source per state (run_maps.rmse_by_state). Nationwide runs need per-state agree/disagree counts: looked
+    up once (read-only GROUP BY, dry-run priced, refused above the $10 confirmation threshold) and cached."""
+    source = request.args.get("source") or "model"
+    if source not in ("osm", "here", "model"):
+        return jsonify({"error": "source must be osm, here or model."}), 400
+    try:
+        payloads = list(_iter_precision_payloads())
+        pops = run_maps.load_json(STATE_POP_CACHE, {})
+        needed = run_maps.needed_state_populations(payloads)
+        missing = {k: v for k, v in needed.items() if k not in pops}
+        if missing:
+            from bq_sql_console import BQ_ON_DEMAND_PRICE_PER_TIB_USD, COST_CONFIRMATION_THRESHOLD_USD
+            fetched = run_maps.fetch_state_populations(
+                missing, max_cost_usd=COST_CONFIRMATION_THRESHOLD_USD, price_per_tib=BQ_ON_DEMAND_PRICE_PER_TIB_USD)
+            pops = {**pops, **fetched}
+            run_maps.save_json(STATE_POP_CACHE, pops)
+        result = run_maps.rmse_by_state(payloads, source, pops)
+        return jsonify({**result, "source": source, "runs": len(payloads)})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/speed-limits/us-states.geojson")
+def speed_limits_us_states_geojson():
+    try:
+        return jsonify(run_maps.us_states_geojson(US_STATES_GEOJSON, DEFAULT_PROJECT))
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
 @app.route("/speed-limits/precision-sample/runs")
