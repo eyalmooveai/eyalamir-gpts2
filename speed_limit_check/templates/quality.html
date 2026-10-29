@@ -22,7 +22,7 @@
       <button type="button" class="btn-secondary" id="rmse-update-btn" onclick="updateRmseGauges(false)">Update</button>
     </div>
   </div>
-  <div id="rmse-gauges" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(540px, 1fr)); justify-items:center; align-items:start; gap:18px 36px; margin-top:10px;"></div>
+  <div id="rmse-gauges" style="display:flex; flex-wrap:wrap; justify-content:center; align-items:flex-start; gap:18px 28px; margin-top:10px;"></div>
   <p id="rmse-note" style="color:var(--muted); font-size:0.8rem; margin:6px 0 0;"></p>
   <p id="rmse-status" style="font-size:0.85rem; margin:4px 0 0;"></p>
 </div>
@@ -60,7 +60,7 @@
     const a = v === null ? START : ang(v), [nx, ny] = pt(cx, cy, r - 8, a), [bx, by] = pt(cx, cy, -12, a);
     const col = v === null ? '#8a8a8a' : ZONE_COLOR[zoneOf(v)];
     const inner = cfg.big
-      ? `<text x="${cx}" y="152" text-anchor="middle" font-size="22" font-weight="700" fill="${col}">${v === null ? 'n/a' : cfg.fmt(v)}</text>
+      ? `<text x="${cx}" y="152" text-anchor="middle" font-size="22" font-weight="700" fill="${cfg.valueColor || col}">${v === null ? 'n/a' : cfg.fmt(v)}</text>
          <text x="${cx}" y="166" text-anchor="middle" font-size="9" fill="currentColor" opacity="0.7">${esc(cfg.unit)}</text>` : '';
     return `<svg viewBox="0 0 200 198" width="${cfg.size}" height="${Math.round(cfg.size * 0.99)}" role="img" aria-label="${esc(cfg.aria)}" style="flex:none;">
       <circle cx="${cx}" cy="${cy}" r="94" fill="none" stroke="currentColor" opacity="0.15" stroke-width="2"/>
@@ -68,8 +68,17 @@
       <line x1="${bx.toFixed(1)}" y1="${by.toFixed(1)}" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" stroke="#222" stroke-width="${cfg.big ? 3.5 : 7}" stroke-linecap="round"/>
       <circle cx="${cx}" cy="${cy}" r="${cfg.big ? 7 : 12}" fill="#222"/><circle cx="${cx}" cy="${cy}" r="${cfg.big ? 3 : 5}" fill="${col}"/>${inner}</svg>`;
   }
-  const BIG = 216, SMALL = 108;   // each small dial is half the height of the big one, so HERE + OSM stacked are exactly as tall as the Model dial
+  const TEXT_W = 132, GAP = 10;
+  let BIG = 216, SMALL = 108;   // each small dial is half the height of the big one, so HERE + OSM stacked are exactly as tall as the Model dial
+  // Size the dials to the room there is, so the RMSE group and the Coverage group stay side by side (they wrap under each other only on a narrow screen).
+  function sizeDials() {
+    const avail = (document.getElementById('rmse-gauges') || {}).clientWidth || 1000;
+    const perGroup = (avail - 28) / 2;                       // two groups side by side
+    const big = Math.floor((perGroup - TEXT_W - 2 * GAP - 4) / 1.5);   // group = big + GAP + big/2 + GAP + text
+    BIG = Math.max(132, Math.min(216, big)); SMALL = Math.floor(BIG / 2); BIG = SMALL * 2;
+  }
   // HERE and OSM are only shown as a reference next to the Model: slightly greyed; a source under the coverage threshold is greyed out much more.
+  const RED_TEXT = '#c62828';
   const REF_STYLE = 'filter:grayscale(0.4); opacity:0.82;';
   const LOW_STYLE = 'filter:grayscale(0.9); opacity:0.42;';
   // metric: 'rmse' | 'cov'. One big Model dial, with the HERE and OSM dials stacked to its right, tops and bottoms aligned.
@@ -80,7 +89,8 @@
       if (metric === 'rmse') {
         return {value: s.rmse_mph, max: rmseMax, zones: rmseZones, tickStep: 5, size: big ? BIG : SMALL, big, fmt: v => v.toFixed(2), unit: 'mph RMSE', aria: label + ' RMSE'};
       }
-      return {value: typeof s.coverage === 'number' ? s.coverage * 100 : null, max: 100, zones: covZones, tickStep: 20, size: big ? BIG : SMALL, big, fmt: v => v.toFixed(1) + '%', unit: 'coverage', aria: label + ' coverage'};
+      return {value: typeof s.coverage === 'number' ? s.coverage * 100 : null, max: 100, zones: covZones, tickStep: 20, size: big ? BIG : SMALL, big, fmt: v => v.toFixed(1) + '%', unit: 'coverage', aria: label + ' coverage',
+        valueColor: typeof s.coverage === 'number' && s.coverage * 100 < covMin ? RED_TEXT : null};
     };
     const low = k => typeof pick(k).coverage === 'number' && pick(k).coverage * 100 < covMin;   // under the coverage threshold
     const sub = k => {
@@ -88,31 +98,33 @@
       if (metric === 'rmse') return s.n ? 'n = ' + Number(s.n).toLocaleString() : 'no data';
       return s.of ? Number(s.have).toLocaleString() + ' of ' + Number(s.of).toLocaleString() : 'not calculated - press Update';
     };
-    const text = (k, label) => {
+    const text = (k, label, red) => {
       const s = pick(k), v = metric === 'rmse' ? s.rmse_mph : (typeof s.coverage === 'number' ? s.coverage * 100 : null);
       const val = v === null || typeof v === 'undefined' ? 'n/a' : (metric === 'rmse' ? v.toFixed(2) + ' mph' : v.toFixed(1) + '%');
-      return `<div style="min-width:112px;"><div style="font-weight:700;">${label}</div><div style="font-size:1.15rem; font-weight:700;">${val}</div><div style="color:var(--muted); font-size:0.75rem;">${sub(k)}</div></div>`;
+      return `<div style="width:${TEXT_W}px; flex:none;"><div style="font-weight:700; font-size:0.85rem;">${label}</div><div style="font-size:1.05rem; font-weight:700; white-space:nowrap; ${red ? 'color:' + RED_TEXT + ';' : ''}">${val}</div><div style="color:${red ? RED_TEXT : 'var(--muted)'}; font-size:0.72rem; line-height:1.2;">${sub(k)}</div></div>`;
     };
     // A small row is exactly SMALL px tall: dial left, text right. RMSE of a low-coverage source is greyed out hard; its coverage dial gets the red box.
     const small = (k, label) => {
       const dim = metric === 'rmse' && low(k), alert = metric === 'cov' && low(k);
-      const style = dim ? LOW_STYLE : REF_STYLE;
-      const box = alert ? 'outline:2px solid #c62828; outline-offset:-2px; border-radius:10px; background:rgba(198,40,40,0.08);' : '';
+      const style = dim ? LOW_STYLE : REF_STYLE;   // the coverage dial of a low-coverage source stays faded like HERE's - only its text goes red
       const tip = dim ? label + ' has under ' + covMin + '% coverage, so its RMSE is greyed out' : (alert ? label + ' is under ' + covMin + '% coverage' : label + ' (reference)');
-      return `<div style="display:flex; align-items:center; gap:8px; height:${SMALL + 2}px; ${box}" title="${tip}">
-        <div style="display:flex; align-items:center; gap:8px; ${alert ? '' : style}">${dial(cfgFor(k, label, false))}${text(k, label)}</div>${alert ? '<span class="badge err" style="font-size:0.7rem; margin-right:6px;">&lt; ' + covMin + '%</span>' : ''}</div>`;
+      return `<div style="display:flex; align-items:center; justify-content:flex-start; gap:${GAP}px; height:${SMALL}px; width:${SMALL + GAP + TEXT_W}px; box-sizing:border-box;" title="${tip}">
+        <div style="flex:none; width:${SMALL}px; ${style}">${dial(cfgFor(k, label, false))}</div>
+        <div>${text(k, label, alert)}${alert ? '<div style="color:' + RED_TEXT + '; font-size:0.72rem; font-weight:700;">below ' + covMin + '%</div>' : ''}</div></div>`;
     };
     const mAlert = metric === 'cov' && low('model'), mDim = metric === 'rmse' && low('model');
-    const big = `<div style="text-align:center; ${mDim ? LOW_STYLE : ''} ${mAlert ? 'outline:2px solid #c62828; outline-offset:2px; border-radius:12px; background:rgba(198,40,40,0.08);' : ''}">
+    const big = `<div style="text-align:center; width:${BIG}px; flex:none; ${mDim ? LOW_STYLE : ''}">
         ${dial(cfgFor('model', 'Model', true))}
         <div style="font-weight:700; font-size:1.05rem;">Model</div>
-        <div style="color:var(--muted); font-size:0.78rem;">${sub('model')}</div>
+        <div style="color:${mAlert ? RED_TEXT : 'var(--muted)'}; font-size:0.78rem; ${mAlert ? 'font-weight:700;' : ''}">${sub('model')}${mAlert ? ' - below ' + covMin + '%' : ''}</div>
       </div>`;
     return `<div><div style="font-weight:700; margin:0 0 4px; color:var(--muted); text-transform:uppercase; font-size:0.75rem; letter-spacing:0.04em;">${title}</div>
-      <div style="display:flex; align-items:flex-start; gap:16px;">${big}
-        <div style="display:flex; flex-direction:column; width:290px;">${small('here', 'HERE')}${small('osm', 'OSM')}</div></div></div>`;
+      <div style="display:flex; align-items:flex-start; gap:${GAP}px;">${big}
+        <div style="display:flex; flex-direction:column; width:${SMALL + GAP + TEXT_W}px;">${small('here', 'HERE')}${small('osm', 'OSM')}</div></div></div>`;
   }
+  let lastData = null;
   function render(data) {
+    lastData = data; sizeDials();
     rmseZones = data.zones || rmseZones; rmseMax = data.max_mph || rmseMax;
     covZones = data.coverage_zones || covZones; covMin = data.coverage_min_pct || covMin;
     const e = data.entry, srcs = (e && e.sources) || {};
@@ -123,7 +135,7 @@
       bits.push('Calculated ' + new Date(e.calculated_at).toLocaleString()
         + (e.runs != null ? ' from ' + e.runs + ' run(s)' : '') + (e.observations ? ', ' + Number(e.observations).toLocaleString() + ' sign observations' : '')
         + (e.skipped_runs ? '; ' + e.skipped_runs + ' older run(s) skipped because they have no domain split saved (open them under Previous runs and press "Calculate missing values")' : '')
-        + '. Saved, so it is here after a restart; press Update to recalculate. HERE and OSM are shown a little greyed as a reference for the Model; a source under ' + covMin + '% coverage is greyed out much more and its coverage dial is boxed in red.');
+        + '. Saved, so it is here after a restart; press Update to recalculate. HERE and OSM are shown a little greyed as a reference for the Model; a source under ' + covMin + '% coverage has its RMSE dial greyed out much more and its coverage figures shown in red.');
       if (e.sources && !SRC.some(([k]) => e.sources[k] && e.sources[k].of)) bits.push('(This saved result predates the coverage dials - press Update to add them.)');
     } else {
       bits.push('Not calculated yet for this method.');
@@ -171,6 +183,11 @@
       })
       .catch(err => { document.getElementById('rmse-update-btn').disabled = false; setStatus(esc(err.message)); });
   };
+  let resizeTimer = null, lastWidth = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { const w = document.getElementById('rmse-gauges').clientWidth; if (lastData && Math.abs(w - lastWidth) > 8) { lastWidth = w; render(lastData); } }, 150);
+  });
   const sel = document.getElementById('rmse-method');
   try { const saved = localStorage.getItem('archimedes-rmse-method'); if (saved && sel.querySelector('option[value="' + saved + '"]')) sel.value = saved; } catch (e) {}
   sel.addEventListener('change', () => { try { localStorage.setItem('archimedes-rmse-method', sel.value); } catch (e) {} setStatus(''); load(true); });

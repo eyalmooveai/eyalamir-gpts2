@@ -785,11 +785,14 @@
   `fetch_domain_counts`: the run's own read-only population COUNT, ~1 GB per state/class, free dry run first, refuses above $10) and remembered under
   `domain_counts` in the gauges cache. HERE and OSM dials are drawn slightly greyed as a reference for the Model (`REF_STYLE`), and a source under
   the coverage threshold much more (`LOW_STYLE`); the small dials stack exactly as tall as the Model dial so the group lines up.
+  Dial sizes come from the card's width (`sizeDials`, re-run on resize) so the RMSE and Coverage groups stay side by side down to ~900 px and wrap
+  under each other only below that; every small row has the same fixed width (dial column + fixed text column), so the dials of both groups sit at
+  identical positions and the red "below 80%" text never shifts them.
   Layout: a left cluster of RMSE dials (big Model dial; HERE above OSM to its right, each half the Model dial's height) and a matching right
   cluster of COVERAGE dials (0-100 %, higher is better so red < 80 / yellow 80-95 / green > 95, `COVERAGE_ZONES`/`COVERAGE_MIN_PCT`). Coverage per
   entry source = `coverage`/`have`/`of`: segments with a value / all segments, summed over each distinct (table, state, functional class)
   domain once (newest run, so repeats don't double count; runs saved before the counts existed are skipped). A source under 80 % coverage gets its RMSE dial greyed
-  and its coverage dial boxed in red with a "< 80%" badge. Saved results from before this lack coverage until "Update" is pressed.
+  and its coverage figures turn red ("below 80%"; the coverage dial itself stays faded like HERE's, no box). Saved results from before this lack coverage until "Update" is pressed.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -
