@@ -738,6 +738,13 @@
   metric header (`dirHeader`) and a green dot + bold on the best value of each column (`bestSet`/`bestMark`; ties are
   all marked, n/a is ignored). Higher is better: precision, recall, within-tolerance; lower is better: RMSE and
   mean/median |error|. A new metric column needs an explicit mode there.
+- **Precision section layout (quality.html)** - "Previous runs" lives INSIDE the precision-sample card (form -> "Or open a
+  previous run" list -> results), not a separate card, so it's clear they're one workflow. The open run is highlighted
+  in the list ("Showing"), and the results/interrupted views start with a bar naming the run (`reportBarHtml`) with a
+  "Close report" button (`closePrecisionReport`: hides the report, forgets the remembered job, un-highlights the row).
+  The stats tables are titled "Sample of Disagreements" and "Inferred overall"; columns are "Precision (exact match)",
+  "Recall (exact match)" and "Have Data" (was `n`: how many observations that source had a value for; larger, bold, green
+  marker on the highest, ties all marked).
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

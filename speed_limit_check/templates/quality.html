@@ -37,14 +37,13 @@
     <p id="precision-sample-progress-text" style="color:var(--muted); font-size:0.85rem; margin:0 0 6px;"></p>
     <div class="progress-indeterminate"></div>
   </div>
-  <div id="precision-sample-results" style="display:none; margin-top:14px;"></div>
-</div>
+  <div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--border, #ddd);">
+    <h4 style="margin:0 0 4px;">Or open a previous run</h4>
+    <p class="section-intro" style="margin:0 0 8px;">Runs started above are saved automatically and listed here. Open one to see its results below (or resume one that was interrupted); the run currently shown is highlighted.</p>
+    <div id="precision-runs"><p style="color:var(--muted); font-size:0.85rem;">Loading...</p></div>
+  </div>
 
-<div class="card">
-  <span class="eyebrow">Precision sample</span>
-  <h2>Previous runs</h2>
-  <p class="section-intro">Every precision-sample run this app has saved. Open one to see its full results again, or resume one that was interrupted.</p>
-  <div id="precision-runs"><p style="color:var(--muted); font-size:0.85rem;">Loading...</p></div>
+  <div id="precision-sample-results" style="display:none; margin-top:14px;"></div>
 </div>
 
 <div class="card">
@@ -252,7 +251,8 @@
     resetPrecisionSampleUi();
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'block';
-    el.innerHTML = `<span class="badge warn">${job.status === 'error' ? 'Error' : (job.status === 'paused' ? 'Paused' : 'Interrupted')}</span>`
+    window.__openRunId = jobId; loadPrecisionRuns();
+    el.innerHTML = reportBarHtml(jobId, 'Run not finished') + `<span class="badge warn">${job.status === 'error' ? 'Error' : (job.status === 'paused' ? 'Paused' : 'Interrupted')}</span>`
       + `<pre class="log">${escapeHtml(job.error || 'The run stopped before finishing.')}</pre>`
       + `<p style="color:var(--muted); font-size:0.85rem;">${job.segments_done || 0}/${job.segments_total || '?'} segments were finished.</p>`
       + (job.resumable ? `<button type="button" class="btn-secondary" onclick="resumePrecisionSample('${jobId}')">Resume this run</button>` : '');
@@ -300,17 +300,18 @@
   function sourceStatsTableHtml(stats) {
     const rows = [['OSM', stats.osm], ['HERE', stats.here], ['Model', stats.model]];
     const cols = [
-      { key: 'exact_match_rate', mode: 'max', label: 'Precision (exact)', title: 'Exact matches / observations where the source had a value', fmt: pctOrNa },
-      { key: 'recall', mode: 'max', label: 'Recall', title: 'Exact matches / ALL observations with a real sign (a missing value counts as a miss)', fmt: pctOrNa },
+      { key: 'exact_match_rate', mode: 'max', label: 'Precision (exact match)', title: 'Exact matches / observations where the source had a value', fmt: pctOrNa },
+      { key: 'recall', mode: 'max', label: 'Recall (exact match)', title: 'Exact matches / ALL observations with a real sign (a missing value counts as a miss)', fmt: pctOrNa },
       { key: 'rmse_mph', mode: 'min', label: 'RMSE (mph)', title: 'Root mean squared error vs the real sign, mph', fmt: fmt2 },
       { key: 'within_tolerance_rate', mode: 'max', label: 'Within tol.', title: 'Share of comparisons within the tolerance (mph) of the real sign', fmt: pctOrNa },
       { key: 'mean_abs_error_mph', mode: 'min', label: 'Mean |err|', title: 'Mean absolute error vs the real sign, mph', fmt: fmt2 },
       { key: 'median_abs_error_mph', mode: 'min', label: 'Median |err|', title: 'Median absolute error vs the real sign, mph', fmt: fmt2 },
     ];
     const best = cols.map(c => bestSet(rows.map(([, s]) => s[c.key]), c.mode));
+    const bestN = bestSet(rows.map(([, s]) => s.n_compared), 'max');
     return `<table>
-      <thead><tr><th>Source</th><th>n</th>${cols.map(c => dirHeader(c.label, c.mode, c.title)).join('')}</tr></thead>
-      <tbody>${rows.map(([label, s], r) => `<tr><td>${label}</td><td>${s.n_compared}</td>`
+      <thead><tr><th>Source</th><th title="How many real-sign observations this source had a value for - the denominator of its precision">Have Data<br><span class="dir-hint">&uarr; more is better</span></th>${cols.map(c => dirHeader(c.label, c.mode, c.title)).join('')}</tr></thead>
+      <tbody>${rows.map(([label, s], r) => `<tr><td>${label}</td><td style="font-size:1.1rem;">${bestMark('<b>' + s.n_compared + '</b>', bestN.has(r))}</td>`
         + cols.map((c, ci) => `<td>${bestMark(c.fmt(s[c.key]), best[ci].has(r))}</td>`).join('') + '</tr>').join('')}</tbody>
     </table>`;
   }
@@ -334,13 +335,31 @@
         + `<td>${bestMark(pctOrNa(rec[i]), br.has(i))}</td><td>${bestMark(fmt2(rm[i]), bm.has(i))}</td></tr>`;
     }).join('');
     return `
-      <p style="margin:14px 0 6px;">Inferred overall precision (assumes a segment where OSM/HERE/Model already agree is in fact correct - see <code>precision_sample.py</code>'s module docstring):</p>
+      <h4 style="margin:14px 0 4px;">Inferred overall</h4>
+      <p style="margin:0 0 6px; color:var(--muted); font-size:0.85rem;">Inferred overall precision (assumes a segment where OSM/HERE/Model already agree is in fact correct - see <code>precision_sample.py</code>'s module docstring):</p>
       <p style="color:var(--muted); font-size:0.82rem; margin:0 0 6px;">Domain: ${total} segment(s) with all 3 values present (${pop.agree_count} agree, ${pop.disagree_count} disagree, ${agreePct}% agree) - ${pop.missing_count} more missing a value, excluded.</p>
       <table>
         <thead><tr><th>Source</th>${dirHeader('Inferred precision', 'max', 'Share of the whole domain the source gets right, assuming agreement means correct')}${dirHeader('Inferred recall', 'max', 'agree% + disagree% x recall on the disagreeing sample')}${dirHeader('Inferred RMSE (mph)', 'min', 'sqrt(disagree% x MSE on the disagreeing sample); agreeing segments count as zero error')}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
+  }
+
+  // ---- closing the open report, and the bar that says which run it is ----
+  window.closePrecisionReport = function () {
+    window.__openRunId = null;
+    rememberPrecisionJob(null);
+    const el = document.getElementById('precision-sample-results');
+    el.style.display = 'none'; el.innerHTML = '';
+    loadPrecisionRuns();
+    document.getElementById('precision-sample-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  function reportBarHtml(jobId, label) {
+    const r = (window.__precisionRuns || []).find(x => x.job_id === jobId);
+    const when = r ? `${escapeHtml(r.state || '')} &middot; FC &lt; ${r.functional_class_lt ?? ''} &middot; sample ${r.sample_size ?? ''} &middot; started ${escapeHtml(new Date(r.created_at).toLocaleString())}` : escapeHtml(jobId);
+    return `<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin:0 0 12px; padding:8px 12px; border-radius:6px; background:rgba(0,181,173,0.12);">
+      <span><b>${label}</b> &middot; ${when}</span>
+      <button type="button" class="btn-secondary" onclick="closePrecisionReport()">&#10005; Close report</button></div>`;
   }
 
   // ---- previous runs list ----
@@ -351,12 +370,13 @@
       .then(r => r.json())
       .then(data => {
         const runs = data.runs || [];
+        window.__precisionRuns = runs;
         if (!runs.length) { el.innerHTML = '<p style="color:var(--muted); font-size:0.85rem;">No saved runs yet.</p>'; return; }
         const badge = s => `<span class="badge ${s === 'done' ? 'ok' : (s === 'running' ? '' : 'warn')}">${escapeHtml(s || '?')}</span>`;
         el.innerHTML = `<table><thead><tr><th>Started</th><th>State</th><th>FC &lt;</th><th>Sample</th><th>Segments done</th><th>Status</th><th></th></tr></thead><tbody>`
-          + runs.map(r => `<tr><td>${escapeHtml(new Date(r.created_at).toLocaleString())}</td><td>${escapeHtml(r.state || '')}</td><td>${r.functional_class_lt ?? ''}</td>`
+          + runs.map(r => `<tr${r.job_id === window.__openRunId ? ' style="background:rgba(0,181,173,0.12);"' : ''}><td>${escapeHtml(new Date(r.created_at).toLocaleString())}</td><td>${escapeHtml(r.state || '')}</td><td>${r.functional_class_lt ?? ''}</td>`
             + `<td>${r.sample_size ?? ''}</td><td>${r.segments_done ?? 0}/${r.segments_total ?? '?'}</td><td>${badge(r.status)}</td>`
-            + `<td><a href="#" onclick="viewPrecisionRun('${r.job_id}'); return false;">${r.status === 'done' ? 'View results' : (r.resumable ? 'Open / resume' : 'Open')}</a></td></tr>`).join('')
+            + `<td><a href="#" onclick="viewPrecisionRun('${r.job_id}'); return false;">${r.job_id === window.__openRunId ? '<b>Showing &#9654;</b>' : (r.status === 'done' ? 'View results' : (r.resumable ? 'Open / resume' : 'Open'))}</a></td></tr>`).join('')
           + '</tbody></table>';
       })
       .catch(() => { el.innerHTML = '<p style="color:var(--muted); font-size:0.85rem;">Could not load the saved runs.</p>'; });
@@ -565,9 +585,12 @@
       </div>` : '';
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'block';
+    window.__openRunId = jobId; loadPrecisionRuns();
     el.innerHTML = `
+      ${reportBarHtml(jobId, 'Results')}
       ${recalcHtml}
       <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
+      <h4 style="margin:10px 0 6px;">Sample of Disagreements</h4>
       ${sourceStatsTableHtml(stats)}
       ${inferredPrecisionHtml(payload)}
       ${obsTableHtml('p', obs)}
