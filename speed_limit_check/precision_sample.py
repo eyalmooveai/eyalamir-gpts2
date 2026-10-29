@@ -145,9 +145,15 @@ from find_bad_speed_limit import (
     StreetViewAuthError,
     _validate_identifier,
     fetch_candidate_by_id,
+    _angle_diff_deg,
+    _bearing_deg,
+    fetch_candidates_by_ids,
     gcs_cache_push,
     get_api_call_counts,
+    line_coords_from_geojson,
+    line_length_m,
     load_keys_file,
+    point_at_distance,
     road_sign_row as _road_sign_row,
     parse_headings,
     reset_api_call_counts,
@@ -360,7 +366,8 @@ def _lookup_segment_topology(project: str, state: str, segment_ids: list[str], *
         return {}
     table = _maps_table_for_state(state)
     query = f"""
-        SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class
+        SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class,
+               ramp, frontage, controlled_access, orientation_raw
         FROM `{project}.{MAPS_DATASET}.{table}`
         WHERE id IN UNNEST(@ids)
     """
@@ -385,7 +392,8 @@ def _find_neighbor_segments(
     assert match_column in ("start_node_ref", "end_node_ref")
     table = _maps_table_for_state(state)
     query = f"""
-        SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class
+        SELECT id AS here_segment_id, start_node_ref, end_node_ref, street_name, functional_class,
+               ramp, frontage, controlled_access, orientation_raw
         FROM `{project}.{MAPS_DATASET}.{table}`
         WHERE {match_column} = @node AND id != @exclude_id
     """
@@ -396,22 +404,77 @@ def _find_neighbor_segments(
     return [dict(r.items()) for r in client.query(query, job_config=job_config).result()]
 
 
-def _pick_neighbor(neighbors: list[dict], *, street_name: Optional[str], functional_class: Optional[int]) -> Optional[dict]:
-    """At a branching intersection (more than one segment adjacent to the
-    same node), prefer the one continuing the same named road, then the one
-    with the same functional_class, else just the first candidate - a
-    heuristic, not a guarantee (see module docstring)."""
-    if not neighbors:
+MAX_TURN_DEG = 45.0  # a neighbor that is not the same named road must continue within this turn angle
+
+
+def _end_bearing(coords, span_m: float = 30.0) -> Optional[float]:
+    """Bearing the line is heading in over its last `span_m`, in its own digitized direction."""
+    if len(coords) < 2:
         return None
-    if street_name:
-        same_name = [p for p in neighbors if p.get("street_name") == street_name]
-        if same_name:
-            return same_name[0]
-    if functional_class is not None:
-        same_fc = [p for p in neighbors if p.get("functional_class") == functional_class]
-        if same_fc:
-            return same_fc[0]
-    return neighbors[0]
+    length = line_length_m(coords)
+    lat, lon, _ = point_at_distance(coords, max(0.0, length - span_m))
+    return _bearing_deg((lon, lat), coords[-1]) if length > 0 else None
+
+
+def _start_bearing(coords, span_m: float = 30.0) -> Optional[float]:
+    """Bearing the line is heading in over its first `span_m`, in its own digitized direction."""
+    if len(coords) < 2:
+        return None
+    length = line_length_m(coords)
+    lat, lon, _ = point_at_distance(coords, min(length, span_m))
+    return _bearing_deg(coords[0], (lon, lat)) if length > 0 else None
+
+
+def _allows_travel(orientation_raw: Optional[str], flip: bool) -> bool:
+    """Can a driver travel this segment along its digitized direction (flip=False) or against it (flip=True)?
+    HERE's orientation_raw: BOTH (two-way), FORWARD (one-way with the digitized direction), BACKWARD (one-way against it).
+    Unknown counts as two-way."""
+    o = (orientation_raw or "BOTH").upper()
+    return o == "BOTH" or o == ("BACKWARD" if flip else "FORWARD")
+
+
+def _pick_neighbor(
+    neighbors: list[dict], *, current: dict, direction: str, travel_flip: bool, current_coords=None,
+) -> Optional[dict]:
+    """The neighbor that is the LOGICAL CONTINUATION of `current` for this walk, or None to end the walk (a dead end
+    or a fork we can't honestly follow) rather than drift onto some other road. Candidates are first filtered:
+      - a driver must be able to travel it in the sense this walk follows (one-way aware: _allows_travel);
+      - no ramp unless we are already on one, no frontage road unless we are on one;
+      - from a controlled-access road (freeway), stay on controlled-access road.
+    Then ranked: same named road (name present and equal), same functional class, smaller turn angle, input order.
+    A candidate with a different (or no) name that turns more than MAX_TURN_DEG is dropped, so a T-junction onto a
+    cross street ends the walk instead of following it. The turn angle needs geometry: a neighbor carries its
+    details row under "_row" (and `current_coords` is the current segment's line); without geometry the turn can't be
+    judged and the candidate just ranks last."""
+    kept = []
+    for cand in neighbors:
+        if not _allows_travel(cand.get("orientation_raw"), travel_flip):
+            continue
+        if cand.get("ramp") and not current.get("ramp"):
+            continue
+        if cand.get("frontage") and not current.get("frontage"):
+            continue
+        if current.get("controlled_access") and not current.get("ramp") and not cand.get("controlled_access"):
+            continue
+        turn = None
+        row = cand.get("_row")
+        cand_coords = line_coords_from_geojson(row.get("geom_geojson")) if row and row.get("geom_geojson") else []
+        if current_coords and len(current_coords) >= 2 and len(cand_coords) >= 2:
+            if direction == "forward":   # successor: leave current's end, enter the candidate's start
+                a, b = _end_bearing(current_coords), _start_bearing(cand_coords)
+            else:                        # predecessor: leave the candidate's end, enter current's start
+                a, b = _end_bearing(cand_coords), _start_bearing(current_coords)
+            if a is not None and b is not None:
+                turn = _angle_diff_deg(a, b)
+        same_name = bool(current.get("street_name")) and cand.get("street_name") == current.get("street_name")
+        if turn is not None and turn > MAX_TURN_DEG and not same_name:
+            continue
+        kept.append((cand, same_name, turn))
+    if not kept:
+        return None
+    fc = current.get("functional_class")
+    kept.sort(key=lambda t: (not t[1], t[0].get("functional_class") != fc, t[2] if t[2] is not None else 999.0))
+    return kept[0][0]
 
 
 # direction -> (which node field of the CURRENT segment to branch from, which
@@ -425,27 +488,49 @@ _DIRECTION_NODE_FIELDS = {
 }
 
 
-def _walk_chain(project: str, state: str, start_topo: dict, max_steps: int, direction: str, *, client: "bigquery.Client") -> list[dict]:
-    """Up to `max_steps` neighbor topology rows in `direction`, NOT
-    including start_topo itself. Stops early at a dead end (no neighbor
-    found) or if a segment already walked would be revisited (guards
-    against an accidental loop in the graph). Takes an already-constructed
+def _travel_flips(orientation_raw: Optional[str]) -> dict[str, bool]:
+    """Per walk direction, whether the driver travel direction the sign we look for governs is OPPOSITE to the segment's
+    digitized direction (True) or along it (False) - which is also where the camera must look (heading = travel direction):
+      two-way (BOTH):  backward walk -> signs for drivers heading along the digitized direction; forward walk -> signs for
+                       drivers coming back the other way (so on the forward walk we look back toward the segment).
+      one-way FORWARD: both walks look along the digitized direction (approach signs upstream, follow-up signs downstream).
+      one-way BACKWARD: both walks look against it."""
+    o = (orientation_raw or "BOTH").upper()
+    return {"backward": o == "BACKWARD", "forward": o != "FORWARD"}
+
+
+def _walk_chain(
+    project: str, state: str, start_topo: dict, max_steps: int, direction: str, *, client: "bigquery.Client",
+    dataset: Optional[str] = None, table: Optional[str] = None, start_row: Optional[dict] = None, travel_flip: bool = False,
+) -> list[dict]:
+    """Up to `max_steps` neighbor topology rows in `direction`, NOT including start_topo itself, each a logical
+    continuation of the previous one (see _pick_neighbor). Stops early at a dead end, when no neighbor is a logical
+    continuation (off-ramps, side streets), or if a segment already walked would be revisited. When `dataset`/`table`
+    are given, the candidates' details rows are fetched in ONE query per step (needed to judge the turn) and the chosen
+    one's row rides along as chain[i]["_row"] so the caller doesn't fetch it again. Takes an already-constructed
     `client` - see sample_segments_weighted_by_length's docstring for why."""
     own_node_field, neighbor_match_column = _DIRECTION_NODE_FIELDS[direction]
     chain: list[dict] = []
     visited = {start_topo["here_segment_id"]}
     current = start_topo
+    current_row = start_row
     while len(chain) < max_steps:
         neighbors = _find_neighbor_segments(
             project, state, current.get(own_node_field), exclude_segment_id=current["here_segment_id"], match_column=neighbor_match_column,
             client=client,
         )
-        nxt = _pick_neighbor(neighbors, street_name=current.get("street_name"), functional_class=current.get("functional_class"))
-        if not nxt or nxt["here_segment_id"] in visited:
+        neighbors = [n for n in neighbors if n["here_segment_id"] not in visited]
+        if dataset and table and neighbors:
+            rows = fetch_candidates_by_ids(project, dataset, table, [n["here_segment_id"] for n in neighbors], client=client)
+            for n in neighbors:
+                n["_row"] = rows.get(n["here_segment_id"])
+        current_coords = line_coords_from_geojson(current_row.get("geom_geojson")) if current_row and current_row.get("geom_geojson") else []
+        nxt = _pick_neighbor(neighbors, current=current, direction=direction, travel_flip=travel_flip, current_coords=current_coords)
+        if not nxt:
             break
         chain.append(nxt)
         visited.add(nxt["here_segment_id"])
-        current = nxt
+        current, current_row = nxt, nxt.get("_row")
     return chain
 
 
@@ -453,6 +538,7 @@ def _check_segment_for_sign(
     step_index: int, n: int, row, *, api_key: str, vision_client, bq_client: "bigquery.Client", project: str, sample_out_root: Path,
     walk_segment: bool, walk_segment_spacing_m: float, side_mode: str, side_offset_m: float, auto_side_offset: bool,
     headings: tuple[int, ...], headings_relative: bool, fov: int, log,
+    bearing_offset_deg: float = 0.0, walk_reverse: bool = False,
 ):
     """Thin, shared wrapper around _process_one_candidate - the exact same
     "walk this segment's positions, look for a sign, OCR it" logic the
@@ -467,6 +553,7 @@ def _check_segment_for_sign(
         side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
         headings=headings, headings_relative=headings_relative, fov=fov,
         log=log, progress=lambda fraction, message: None,
+        bearing_offset_deg=bearing_offset_deg, walk_reverse=walk_reverse,
     )
 
 
@@ -483,7 +570,7 @@ def _walk_direction_for_sign(
     chain: list[dict], *, project: str, dataset: str, table: str, direction: str, tag: str,
     api_key: str, vision_client, bq_client: "bigquery.Client", sample_out_root: Path,
     walk_segment: bool, walk_segment_spacing_m: float, side_mode: str, side_offset_m: float, auto_side_offset: bool,
-    headings: tuple[int, ...], headings_relative: bool, fov: int, log,
+    headings: tuple[int, ...], headings_relative: bool, fov: int, log, flip: bool = False,
 ) -> dict:
     """Walks one direction's chain of neighbor segments, stopping at the
     first readable sign. Returns a dict shaped for this script's own result/
@@ -495,7 +582,7 @@ def _walk_direction_for_sign(
     traversed: list[tuple[str, dict, Optional[str]]] = []  # (segment id, its row, sign id found on it) in walk order
     for step_index, step_topo in enumerate(chain, start=1):
         step_seg_id = step_topo["here_segment_id"]
-        rows = fetch_candidate_by_id(project, dataset, table, step_seg_id)
+        rows = [step_topo["_row"]] if step_topo.get("_row") else fetch_candidate_by_id(project, dataset, table, step_seg_id)
         if not rows:
             log(f"{tag} [{direction}] step {step_index} ({step_seg_id}): not found in {dataset}.{table} - skipping.")
             continue
@@ -504,6 +591,7 @@ def _walk_direction_for_sign(
             walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
             side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
             headings=headings, headings_relative=headings_relative, fov=fov, log=log,
+            bearing_offset_deg=180.0 if flip else 0.0, walk_reverse=(direction == "backward"),
         )
         traversed.append((step_seg_id, rows[0], match.sign_id if match else None))
         if match:
@@ -514,10 +602,11 @@ def _walk_direction_for_sign(
                 "found": True, "ground_truth_mph": match.reading.speed_mph,
                 "sign_lat": sign.lat, "sign_lon": sign.lon, "sign_evidence": match.reading.evidence,
                 "streetview_capture_date": sign.capture_date, "annotated_image": str(match.annotated_image),
-                "matched_segment_id": step_seg_id, "steps_walked": step_index, "note": "",
+                "matched_segment_id": step_seg_id, "steps_walked": step_index, "note": "", "flip": flip,
             }
     result = _empty_direction_result(f"no readable sign in {len(chain)} {direction} segment(s)", len(chain))
     result["traversed"] = traversed
+    result["flip"] = flip
     return result
 
 
@@ -586,8 +675,13 @@ def _process_sampled_segment(
         directions = {d: _empty_direction_result("no topology row - could not walk", 0) for d in ("forward", "backward")}
     else:
         directions = {}
+        flips = _travel_flips(start_topo.get("orientation_raw"))
+        start_row = (fetch_candidates_by_ids(project, dataset, table, [seg_id], client=bq_client).get(seg_id) or sampled_row)
         for direction in ("forward", "backward"):
-            chain = _walk_chain(project, state, start_topo, max_walk_back, direction, client=bq_client)
+            chain = _walk_chain(
+                project, state, start_topo, max_walk_back, direction, client=bq_client,
+                dataset=dataset, table=table, start_row=start_row, travel_flip=flips[direction],
+            )
             log(f"{tag} [{direction}]: {len(chain)} neighbor segment(s) to check"
                 + (f" ({', '.join(s['here_segment_id'] for s in chain)})" if chain else ""))
             directions[direction] = _walk_direction_for_sign(
@@ -596,6 +690,7 @@ def _process_sampled_segment(
                 walk_segment=walk_segment, walk_segment_spacing_m=walk_segment_spacing_m,
                 side_mode=side_mode, side_offset_m=side_offset_m, auto_side_offset=auto_side_offset,
                 headings=headings, headings_relative=headings_relative, fov=fov, log=log,
+                flip=flips[direction],
             )
             segments_tried.extend(s["here_segment_id"] for s in chain)
 
@@ -610,10 +705,20 @@ def _process_sampled_segment(
     # calc_out.road_signs: the sampled segment itself (backward = approach in its digitized direction -> dir_1, forward =
     # the opposite direction -> dir_2, same mapping the report uses), then every segment traversed in each walk - a sign
     # found on a traversed segment serves that segment's own dir_1 (backward chain) or dir_2 (forward chain).
-    road_sign_rows = [_road_sign_row(
-        seg_id, sampled_row, sign_dir_1=directions["backward"].get("sign_id"), sign_dir_2=directions["forward"].get("sign_id"),
-    )]
-    for direction, slot in (("backward", "sign_dir_1"), ("forward", "sign_dir_2")):
+    def _slot(direction: str) -> str:
+        flip = directions[direction].get("flip")
+        if flip is None:
+            return "sign_dir_1" if direction == "backward" else "sign_dir_2"
+        return "sign_dir_2" if flip else "sign_dir_1"
+
+    own = {"sign_dir_1": None, "sign_dir_2": None}
+    for direction in ("backward", "forward"):  # backward chain preferred when both land in one slot
+        sid = directions[direction].get("sign_id")
+        if sid and not own[_slot(direction)]:
+            own[_slot(direction)] = sid
+    road_sign_rows = [_road_sign_row(seg_id, sampled_row, **own)]
+    for direction in ("backward", "forward"):
+        slot = _slot(direction)
         for t_seg_id, t_row, t_sign_id in directions[direction].get("traversed", []):
             road_sign_rows.append(_road_sign_row(t_seg_id, t_row, origin="traversed", **{slot: t_sign_id}))
     return {

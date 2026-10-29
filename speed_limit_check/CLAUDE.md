@@ -691,6 +691,18 @@
   hit BigQuery's ~1500 load jobs/table/day; `bq_writer.flush()` (run_batch's `finally`, the Sign Checker's
   `_run_job`, the CLI `main`) sends the rest immediately. A coalesced batch's job id is a hash of its spool
   files, so replaying the same set is a harmless 409.
+- **Precision-sample walk direction and continuation** (`precision_sample.py`) - the camera must look in the driving direction of the
+  drivers a sign governs. Two-way road (`orientation_raw` BOTH or unknown): the backward chain (predecessors) looks along the
+  digitized direction, the forward chain (successors) looks back toward the sampled segment (`bearing_offset_deg=180`, via
+  `_travel_flips`). One-way FORWARD: both chains look along the digitized direction (approach / follow-up signs); one-way
+  BACKWARD: both look against it. Within a traversed neighbor the backward chain visits positions nearest the sampled segment
+  first (`walk_reverse`; not honored in adaptive mode). `calc_out.road_signs` slot: dir_1 when the chain looks along the
+  digitized direction, else dir_2 (direction results carry `flip`; the sampled row takes the first sign per slot, backward
+  preferred). Neighbor choice (`_pick_neighbor`) is a logical-continuation filter, not just a name match: must allow travel in the
+  walk's sense, no ramp/frontage unless already on one, freeway stays controlled-access, and a different-named road must turn
+  <= `MAX_TURN_DEG` (45) - otherwise the chain ENDS rather than drift onto an off-ramp/side street. Candidate geometry comes
+  from one `fetch_candidates_by_ids` query per step and rides along as `_row`. The sampling WHERE clause deliberately keeps rows with
+  a NULL OSM value (by design) - don't "fix" it.
 - **Precision results table: Sign and Map columns** - on a match, `_process_one_candidate` also saves
   `sign_snippet.jpg` (a tight crop of the sign from the ORIGINAL frame, `save_sign_snippet`) next to
   `sign_detected.jpg`. Observations carry display-only keys (`annotated_image`, `sign_heading`,

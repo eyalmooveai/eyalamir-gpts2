@@ -837,6 +837,29 @@ def fetch_candidate_by_id(project: str, dataset: str, table: str, segment_id: st
     return list(client.query(query, job_config=job_config).result())
 
 
+def fetch_candidates_by_ids(
+    project: str, dataset: str, table: str, segment_ids: list[str], *, client: Optional["bigquery.Client"] = None,
+) -> dict[str, dict]:
+    """Several segments' full rows (same shape as fetch_candidate_by_id, geometry as `geom_geojson`) in ONE query,
+    {here_segment_id: row_dict} - for choosing among a junction's candidate neighbors without a query per candidate."""
+    if not segment_ids:
+        return {}
+    for sid in segment_ids:
+        _validate_identifier(sid, SEGMENT_ID_RE, "here_segment_id")
+    client = client or bigquery.Client(project=project)
+    query = f"""
+        SELECT
+          * EXCEPT (geom) REPLACE (ROUND(speed_limit_here_mph) AS speed_limit_here_mph),
+          ST_Y(ST_CENTROID(geom)) AS centroid_lat,
+          ST_X(ST_CENTROID(geom)) AS centroid_lon,
+          ST_ASGEOJSON(geom) AS geom_geojson
+        FROM `{project}.{dataset}.{table}`
+        WHERE here_segment_id IN UNNEST(@ids)
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", list(segment_ids))])
+    return {r["here_segment_id"]: dict(r.items()) for r in client.query(query, job_config=job_config).result()}
+
+
 def _candidates_cache_key(
     *, segment_id: Optional[str] = None, criteria=None, max_candidates: Optional[int] = None,
     zip_codes: tuple[str, ...] = (), counties: tuple[str, ...] = (), custom_criterion_sql: Optional[str] = None,
@@ -1642,6 +1665,8 @@ def _process_one_candidate(
     fov: int,
     adaptive_cfg: Optional[adaptive_walk.AdaptiveWalkConfig] = None,
     record_road_sign: bool = False,
+    bearing_offset_deg: float = 0.0,
+    walk_reverse: bool = False,
     log=lambda msg: None,
     progress=lambda fraction, message: None,
 ) -> tuple["CandidateAttempt", Optional["Match"]]:
@@ -1723,7 +1748,12 @@ def _process_one_candidate(
             ) if t],
             effective_side_offset_m, adaptive_cfg,
         )
-    for p_idx, (p_lat, p_lon, p_bearing) in enumerate([] if adaptive else base_points):
+    # walk_reverse visits the positions end -> start (nearest-to-the-sampled-segment first when this is an upstream
+    # neighbor) but keeps each position's ORIGINAL index, so cache directories (point<N>) never change meaning.
+    point_order = list(enumerate(base_points))
+    if walk_reverse and not adaptive:
+        point_order.reverse()
+    for p_idx, (p_lat, p_lon, p_bearing) in ([] if adaptive else point_order):
         point_prefix = f"point{p_idx}" if walked else None
         if include_center:
             sample_points.append([p_lat, p_lon, point_prefix, "center" if include_sides else None, p_idx, p_bearing])
@@ -1819,7 +1849,9 @@ def _process_one_candidate(
             # vary per candidate, and a manual --side-offset-m change
             # between runs previously collided with a stale cache too.
             point_dir = point_dir / (f"{side_label}_{effective_side_offset_m:.0f}m" if side_label in ("left", "right") else side_label)
-        actual_headings = tuple(int(round(h + p_bearing)) % 360 for h in headings) if headings_relative else headings
+        # bearing_offset_deg turns "forward along this segment's digitized direction" into "the driver travel direction the
+        # sign we are looking for governs" (180 = look back the other way) - see precision_sample's chain notes.
+        actual_headings = tuple(int(round(h + p_bearing + bearing_offset_deg)) % 360 for h in headings) if headings_relative else headings
         progress_at(point_base + 0.3 * point_span, f"{ptag} Downloading Street View imagery...")
         image_paths = fetch_streetview_images(p_lat, p_lon, api_key, point_dir, headings=actual_headings, fov=fov, log=log)
 
