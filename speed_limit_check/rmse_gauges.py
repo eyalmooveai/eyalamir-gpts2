@@ -40,8 +40,23 @@ ZONES = [
 ]
 
 
+# Coverage clocks: share (%) of the data a source has a value for. Higher is better, so the colours run the other way round
+# (red = low coverage). A source below COVERAGE_MIN_PCT is flagged on the page (its coverage clock goes red, its RMSE clock is greyed).
+COVERAGE_MIN_PCT = 80.0
+COVERAGE_ZONES = [
+    {"name": "red", "from": 0.0, "to": COVERAGE_MIN_PCT},
+    {"name": "yellow", "from": COVERAGE_MIN_PCT, "to": 95.0},
+    {"name": "green", "from": 95.0, "to": 100.0},
+]
+
+
 def _empty_sources() -> dict:
-    return {key: {"label": label, "rmse_mph": None, "n": 0} for key, label, _ in SOURCES}
+    return {key: {"label": label, "rmse_mph": None, "n": 0, "coverage": None, "have": None, "of": None} for key, label, _ in SOURCES}
+
+
+def _set_coverage(src: dict, have: Optional[float], of: Optional[float]) -> None:
+    if of:
+        src["have"], src["of"], src["coverage"] = int(have or 0), int(of), (have or 0) / of
 
 
 def compute_precision(payloads: Iterable[dict], method: str) -> dict:
@@ -50,11 +65,16 @@ def compute_precision(payloads: Iterable[dict], method: str) -> dict:
     from precision_sample import _source_stats
     sums = {key: {"w": 0.0, "mse": 0.0} for key, _, _ in SOURCES}
     pooled: list[dict] = []
+    domains: dict[tuple, dict] = {}   # one population per (table, state, functional class) - the newest run's, so repeats don't double count
     runs = 0
     for payload in payloads:
         obs = payload.get("observations") or []
         if not obs:
             continue
+        cfg = payload.get("config") or {}
+        dom_pop = payload.get("population")
+        if dom_pop and dom_pop.get("total_count"):
+            domains.setdefault((cfg.get("table"), cfg.get("state"), cfg.get("functional_class_lt")), dom_pop)
         tol = ((payload.get("stats") or {}).get("osm") or {}).get("within_tolerance_mph") or 5.0
         pop = payload.get("population")
         if method == "precision_inferred":
@@ -77,12 +97,19 @@ def compute_precision(payloads: Iterable[dict], method: str) -> dict:
                 sources[key]["rmse_mph"] = math.sqrt(sums[key]["mse"] / w)
                 sources[key]["n"] = int(w)
         n_obs = max((s["n"] for s in sources.values()), default=0)
+        # Coverage of the whole domain(s) behind these runs: segments with a value / all segments.
+        total = sum(p["total_count"] for p in domains.values())
+        for key, _, _ in SOURCES:
+            _set_coverage(sources[key], sum(p.get(key + "_count", 0) for p in domains.values()), total)
+        coverage_basis = "domain" if total else None
     else:
         for key, _, column in SOURCES:
             st = _source_stats(pooled, column, 5.0)
             sources[key]["rmse_mph"], sources[key]["n"] = st["rmse_mph"], st["n_compared"]
+            _set_coverage(sources[key], st["n_compared"], st["n_observations"])   # share of the sign observations the source had a value for
         n_obs = len(pooled)
-    return {"sources": sources, "runs": runs, "observations": n_obs}
+        coverage_basis = "observations"
+    return {"sources": sources, "runs": runs, "observations": n_obs, "coverage_basis": coverage_basis}
 
 
 def compute_analyzed(run_report: Callable[..., dict], *, confirmed: bool) -> dict:
@@ -96,8 +123,9 @@ def compute_analyzed(run_report: Callable[..., dict], *, confirmed: bool) -> dic
     for key in sources:
         st = stats.get(key) or {}
         sources[key]["rmse_mph"], sources[key]["n"] = st.get("rmse_mph"), st.get("n_compared", 0)
+        _set_coverage(sources[key], st.get("n_compared", 0), st.get("n_observations"))
     return {
-        "sources": sources, "runs": None, "observations": (report.get("summary") or {}).get("observations", 0),
+        "sources": sources, "runs": None, "coverage_basis": "observations", "observations": (report.get("summary") or {}).get("observations", 0),
         "segments": (report.get("summary") or {}).get("segments_checked"),
         "gb_billed": report.get("gb_billed"), "cost_usd_billed": report.get("cost_usd_billed"),
     }
@@ -141,4 +169,5 @@ def payload_for_ui(cache: dict, method: str) -> dict:
     return {
         "method": method, "methods": METHODS, "default_method": DEFAULT_METHOD,
         "zones": ZONES, "max_mph": GAUGE_MAX_MPH, "entry": cache["methods"].get(method),
+        "coverage_zones": COVERAGE_ZONES, "coverage_min_pct": COVERAGE_MIN_PCT,
     }

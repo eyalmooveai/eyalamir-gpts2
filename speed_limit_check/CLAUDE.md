@@ -780,6 +780,12 @@
   them instantly; `GET /speed-limits/rmse-gauges?method=` only reads that cache; `POST /speed-limits/rmse-gauges/recalculate` ("Update") runs one
   method in a background thread (`_run_rmse_job`, status in `RMSE_JOB`). The free methods auto-calculate the first time they have no cache; `analyzed`
   waits for a click. `Dockerfile`'s COPY line needs `rmse_gauges.py`.
+  Layout: a left cluster of RMSE dials (big Model dial; HERE above OSM to its right, each half the Model dial's height) and a matching right
+  cluster of COVERAGE dials (0-100 %, higher is better so red < 80 / yellow 80-95 / green > 95, `COVERAGE_ZONES`/`COVERAGE_MIN_PCT`). Coverage per
+  entry source = `coverage`/`have`/`of`: for `precision_inferred` segments with a value / all segments, summed over each distinct (table, state,
+  functional class) domain once (newest run, so repeats don't double count; runs saved before the counts existed are skipped); for
+  `precision_pooled` and `analyzed` the share of sign observations the source had a value for. A source under 80 % coverage gets its RMSE dial greyed
+  and its coverage dial boxed in red with a "< 80%" badge. Saved results from before this lack coverage until "Update" is pressed.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -
