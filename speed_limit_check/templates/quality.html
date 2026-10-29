@@ -333,6 +333,40 @@
       .catch(() => { el.innerHTML = '<p style="color:var(--muted); font-size:0.85rem;">Could not load the saved runs.</p>'; });
   }
 
+  window.recalcPrecisionRun = function (jobId, confirmed) {
+    const btn = document.getElementById('recalc-btn'), st = document.getElementById('recalc-status');
+    if (btn) btn.disabled = true;
+    st.textContent = 'Checking the cost of the lookups...';
+    fetch('/speed-limits/precision-sample/' + jobId + '/recalculate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed}),
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || data.error) { st.innerHTML = `<span class="badge err">Error</span> ${escapeHtml(data.error || 'unknown error')}`; if (btn) btn.disabled = false; return; }
+        if (data.needs_confirmation) {
+          st.innerHTML = `The geometry lookup would read about ${data.estimate.gb.toFixed(2)} GB (about $${data.estimate.cost_usd.toFixed(2)}). `
+            + `<button type="button" class="btn-secondary" onclick="recalcPrecisionRun('${jobId}', true)">Yes, run it</button>`;
+          return;
+        }
+        pollRecalc(jobId);
+      })
+      .catch(err => { st.textContent = err.message; if (btn) btn.disabled = false; });
+  };
+
+  function pollRecalc(jobId) {
+    fetch('/speed-limits/precision-sample/status/' + jobId)
+      .then(r => r.json())
+      .then(job => {
+        const st = document.getElementById('recalc-status'), btn = document.getElementById('recalc-btn');
+        const rc = job.recalc || {};
+        if (rc.status === 'done') { renderPrecisionResults(jobId, job.payload); return; }
+        if (rc.status === 'error') { if (st) st.innerHTML = `<span class="badge err">Error</span> ${escapeHtml(rc.message || '')}`; if (btn) btn.disabled = false; return; }
+        if (st) st.textContent = rc.message || 'Working...';
+        setTimeout(() => pollRecalc(jobId), 1200);
+      })
+      .catch(() => setTimeout(() => pollRecalc(jobId), 3000));
+  }
+
   window.viewPrecisionRun = function (jobId) {
     document.getElementById('precision-sample-results').style.display = 'none';
     pollPrecisionSample(jobId);
@@ -495,16 +529,24 @@
     const obs = payload.observations || [];
     window.__obsSets = window.__obsSets || {};
 
+    const needsRecalc = stats.osm.recall === undefined || (payload.population && !payload.inferred_metrics)
+      || obs.some(o => !o.snippet_url || !o.segment_geojson);
+    const recalcHtml = needsRecalc ? `
+      <div id="recalc-box" style="margin:0 0 12px; padding:10px 12px; border:1px dashed var(--border, #ccc); border-radius:6px;">
+        <span style="font-size:0.85rem;">This run was saved before some values existed (Recall, RMSE, the sign snippets and map).</span>
+        <button type="button" class="btn-secondary" id="recalc-btn" onclick="recalcPrecisionRun('${jobId}', false)" style="margin-left:8px;">Calculate missing values</button>
+        <div id="recalc-status" style="color:var(--muted); font-size:0.82rem; margin-top:6px;">No new Street View, Vision or Gemini calls - only free arithmetic, cached images and a read-only BigQuery lookup (cost shown first if it is not tiny).</div>
+      </div>` : '';
     const el = document.getElementById('precision-sample-results');
     el.style.display = 'block';
     el.innerHTML = `
+      ${recalcHtml}
       <p style="margin:0 0 6px;">Sample size: ${stats.sample_size} &middot; segments with a sign found: ${stats.segments_with_any_sign} (${pctOrNa(stats.segment_sign_find_rate)}) &middot; Street View calls: ${payload.api_calls.streetview} &middot; Vision calls: ${payload.api_calls.vision}</p>
       <table>
         <thead><tr><th>Source</th><th>n</th><th title="Exact matches / observations where the source had a value">Precision (exact)</th><th title="Exact matches / ALL observations with a real sign (a missing value counts as a miss)">Recall</th><th title="Root mean squared error vs the real sign, mph">RMSE (mph)</th><th>Within tol.</th><th>Mean |err|</th><th>Median |err|</th></tr></thead>
         <tbody>${sourceRowHtml('OSM', stats.osm)}${sourceRowHtml('HERE', stats.here)}${sourceRowHtml('Model', stats.model)}</tbody>
       </table>
       ${inferredPrecisionHtml(payload)}
-      <p style="margin:14px 0 6px;">Segment-direction observations (every source's value next to the real sign reading):</p>
       ${obsTableHtml('p', obs)}
       <p style="margin:14px 0 0;">
         <a href="/speed-limits/precision-sample/${jobId}/results.json">Download results.json</a> &middot;

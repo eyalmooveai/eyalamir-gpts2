@@ -713,6 +713,14 @@
   are not a random sample. Direction labels are `both` / `dir_1 (<bearing>°)` / `dir_2 (<bearing>°)`.
   `quality.html`'s `obsTableHtml(setKey, obs)` renders the observations table for both the precision results
   and this report (an Origin column appears when rows carry one).
+- **"Calculate missing values" on a previous run** (`precision_recalc.py`, `POST /speed-limits/precision-sample/<job_id>/recalculate`)
+  - a finished run saved before Recall/RMSE/snippets/geometry existed shows a button on its results view. It
+  recomputes, with NO Street View/Vision/Gemini spend: stats + inferred recall/RMSE (pure arithmetic over the
+  stored observations/population), sign snippets (re-found from the run's own cached frames, using each frame's
+  cached `.ocr.json` - a frame without one is skipped, never sent to Vision), segment geometry (one read-only
+  SELECT on the run's own `config.table`, dry-run cost checked first, usual $10 confirmation) and camera
+  headings (best-effort SELECT on `calc_out.signs.image_gcs_path`). Runs in a background thread; the result is
+  stored back into the durable job record and `results.json`; progress/outcome is `job["recalc"]`.
 - The hub's model catalog (`HUB_MODELS` in `app.py`) is a curated list of
   MooveAI's model products (Speed Limits, Lanes, Construction Zones,
   Accident Prediction, Accident Detection), not BigQuery ML models -

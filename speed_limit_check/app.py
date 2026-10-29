@@ -26,6 +26,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, url_for
 
 import bq_writer
+import precision_recalc
 import preflight
 import road_signs_report
 from batch_evaluator import (
@@ -995,6 +996,57 @@ def _list_precision_runs(limit: int = 20) -> list[dict]:
             "resumable": bool(job.get("resumable")),
         })
     return runs
+
+
+def _run_precision_recalc(job_id: str) -> None:
+    """Background thread for the "Calculate missing values" button: recomputes what an older finished run lacks (see
+    precision_recalc.py - no imagery spend) and stores the result back into the job's durable record."""
+    job = _get_precision_job(job_id)
+    cfg = (job.get("payload") or {}).get("config") or {}
+    try:
+        new_payload = precision_recalc.recalculate(
+            job["payload"], project=cfg["project"], dataset=cfg["dataset"], table=cfg["table"],
+            on_progress=lambda msg: _update_precision_job(job_id, recalc={"status": "running", "message": msg}),
+        )
+        try:
+            out_root = Path(job["out_root"])
+            (out_root / "results.json").write_text(json.dumps(new_payload, indent=2, default=str))
+            gcs_cache_push(out_root / "results.json")
+        except OSError:
+            pass
+        _update_precision_job(job_id, payload=new_payload, recalc={"status": "done", "message": "Missing values calculated."})
+    except Exception as e:  # noqa: BLE001
+        _update_precision_job(job_id, recalc={"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/speed-limits/precision-sample/<job_id>/recalculate", methods=["POST"])
+def speed_limits_precision_sample_recalculate(job_id):
+    """The "Calculate missing values" button on a previous run: fills in Recall / RMSE (sample and inferred), the sign
+    snippets and the map geometry an older run didn't store. No Street View/Vision/Gemini calls - only free arithmetic,
+    cached files and two small read-only BigQuery SELECTs (a dry-run cost is checked first; above the usual $10
+    threshold it asks for confirmation)."""
+    job = _get_precision_job(job_id)
+    if not job or job.get("status") != "done" or not job.get("payload"):
+        return jsonify({"error": "Only a finished run can be recalculated."}), 409
+    if (job.get("recalc") or {}).get("status") == "running":
+        return jsonify({"job_id": job_id, "already_running": True}), 202
+    cfg = job["payload"].get("config") or {}
+    if not all(cfg.get(k) for k in ("project", "dataset", "table")):
+        return jsonify({"error": "This run's record has no table configuration to recalculate against."}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        estimate = precision_recalc.estimate_geometry_cost(cfg["project"], cfg["dataset"], cfg["table"], job["payload"].get("results", []))
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    from bq_sql_console import COST_CONFIRMATION_THRESHOLD_USD
+    if estimate["cost_usd"] > COST_CONFIRMATION_THRESHOLD_USD and not data.get("confirmed"):
+        return jsonify({"needs_confirmation": True, "estimate": estimate}), 200
+    with PRECISION_JOBS_LOCK:
+        PRECISION_JOBS[job_id] = {**job, "recalc": {"status": "running", "message": "Starting..."}}
+        PRECISION_JOBS[job_id].pop("resumable", None)
+        _persist_precision_job(job_id, PRECISION_JOBS[job_id])
+    threading.Thread(target=_run_precision_recalc, args=(job_id,), daemon=True).start()
+    return jsonify({"job_id": job_id, "estimate": estimate}), 202
 
 
 @app.route("/speed-limits/precision-sample/runs")
